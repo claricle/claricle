@@ -1,0 +1,291 @@
+= Claricle
+
+image:https://img.shields.io/gem/v/claricle.svg[RubyGems Version]
+image:https://img.shields.io/github/license/ribose/claricle.svg[License]
+image:https://github.com/ribose/claricle/actions/workflows/test.yml/badge.svg["Build Status", link="https://github.com/ribose/claricle/actions/workflows/test.yml"]
+
+== Purpose
+
+Claricle is a comprehensive image utility gem that provides tools for image
+validation, format conversion, compression, and vector graphics processing.
+
+The gem integrates functionality from multiple specialized tools including
+pngconform, svgconform, and vectory into a unified interface, making it easier
+to work with various image formats in Ruby applications.
+
+This library is particularly useful for applications that need to:
+
+* Validate image files for conformance to standards
+* Convert between different image formats
+* Compress images while maintaining quality
+* Process vector graphics programmatically
+
+== Etymology & Symbolism
+
+[cols="1,2,3",options="header"]
+|===
+|Part
+|Root
+|Meaning
+
+|clari-
+|Latin _clārus_
+|"clear, bright, famous" -- root of clarity, clarify
+
+|-cle
+|Latin _cle_ (from _particula_)
+|"small particle" -- like particle, fascicle
+|===
+
+*Combined:* "Clear particle" or "Bright essence"
+
+Perfect metaphor:
+
+* *Validation* → clarify every pixel/particle
+* *Conversion* → preserve the clear essence
+* *Compression* → bright clarity in every bit
+* *Ruby* → gem-like, small but brilliant
+
+== Features
+
+[NOTE]
+====
+This is currently a minimal shim release to reserve the gem name.
+Full functionality will be implemented in future versions.
+====
+
+Planned features:
+
+* PNG validation and conformance checking (via pngconform)
+* SVG validation and processing (via svgconform)
+* Vector graphics manipulation (via vectory)
+* Image format conversion utilities
+* Image compression with quality preservation
+* Command-line interface for all operations
+* Ruby API for programmatic access
+* Batch processing capabilities
+* Comprehensive error reporting
+
+== Installation
+
+Add this line to your application's Gemfile:
+
+[source,ruby]
+----
+gem 'claricle'
+----
+
+And then execute:
+
+[source,sh]
+----
+$ bundle install
+----
+
+Or install it yourself as:
+
+[source,sh]
+----
+$ gem install claricle
+----
+
+== Command Line Interface
+
+The `claricle` command provides utilities for working with image files.
+
+=== Available Commands
+
+Get help on available commands:
+
+[source,sh]
+----
+$ claricle help
+Commands:
+  claricle compress FILE_PATTERN  # Compress image files (placeholder)
+  claricle convert SOURCE DEST    # Convert image formats (placeholder)
+  claricle help [COMMAND]         # Describe available commands or one specific command
+  claricle validate FILE_PATTERN  # Validate image files (placeholder)
+  claricle version                # Display Claricle version
+----
+
+=== Version Information
+
+Display the installed version:
+
+[source,sh]
+----
+$ claricle version
+Claricle version 0.1.0
+----
+
+=== Validation (Placeholder)
+
+[NOTE]
+====
+This functionality is not yet implemented in this shim release.
+====
+
+Future usage:
+
+[source,sh]
+----
+# Validate a single image file
+$ claricle validate image.png
+
+# Validate multiple files
+$ claricle validate *.svg
+
+# Validate files using patterns
+$ claricle validate "images/*.png"
+----
+
+=== Conversion (Placeholder)
+
+[NOTE]
+====
+This functionality is not yet implemented in this shim release.
+====
+
+Future usage:
+
+[source,sh]
+----
+# Convert between formats
+$ claricle convert image.png image.svg
+$ claricle convert logo.svg logo.png
+----
+
+=== Compression (Placeholder)
+
+[NOTE]
+====
+This functionality is not yet implemented in this shim release.
+====
+
+Future usage:
+
+[source,sh]
+----
+# Compress image files
+$ claricle compress image.png
+$ claricle compress *.jpg
+----
+
+== Usage
+
+=== Basic Example (Future)
+
+[source,ruby]
+----
+require 'claricle'
+
+# Validate an image
+validator = Claricle::Validator.new
+result = validator.validate('image.png')
+
+if result.valid?
+  puts "Image is valid!"
+else
+  puts "Validation errors:"
+  result.errors.each { |error| puts "  - #{error}" }
+end
+
+# Convert image format
+converter = Claricle::Converter.new
+converter.convert('image.png', 'image.svg')
+
+# Compress image
+compressor = Claricle::Compressor.new
+compressor.compress('image.png', quality: 85)
+----
+
+== Architecture
+
+=== Current Structure
+
+[source]
+----
+Claricle (Gem)
+    │
+    ├── CLI (Thor-based command-line interface)
+    │   ├── validate command (placeholder)
+    │   ├── convert command (placeholder)
+    │   ├── compress command (placeholder)
+    │   └── version command (implemented)
+    │
+    └── Core Module (placeholder for future components)
+        ├── Validator (future: PNG, SVG validation)
+        ├── Converter (future: format conversion)
+        ├── Compressor (future: image compression)
+        └── VectorProcessor (future: vector graphics)
+----
+
+=== Future Architecture
+
+The planned architecture will integrate specialized tools:
+
+[source]
+----
+┌─────────────────────────────────────────────────────────┐
+│                    Claricle Gem                         │
+│                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
+│  │  PNG Module  │  │  SVG Module  │  │Vector Module │ │
+│  │              │  │              │  │              │ │
+│  │ pngconform   │  │ svgconform   │  │   vectory    │ │
+│  └──────────────┘  └──────────────┘  └──────────────┘ │
+│                                                         │
+│  ┌────────────────────────────────────────────────┐   │
+│  │         Unified API & CLI Interface             │   │
+│  └────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
+----
+
+== Development
+
+After checking out the repo, run `bin/setup` to install dependencies.
+Then, run `rake spec` to run the tests.
+You can also run `bin/console` for an interactive prompt that will allow you
+to experiment.
+
+To install this gem onto your local machine, run:
+
+[source,sh]
+----
+$ bundle exec rake install
+----
+
+To release a new version, update the version number in `version.rb`, and then
+run:
+
+[source,sh]
+----
+$ bundle exec rake release
+----
+
+This will create a git tag for the version, push git commits and the created
+tag, and push the `.gem` file to https://rubygems.org[RubyGems.org].
+
+== Contributing
+
+Bug reports and pull requests are welcome on GitHub at
+https://github.com/ribose/claricle.
+
+This project is intended to be a safe, welcoming space for collaboration, and
+contributors are expected to adhere to the
+https://github.com/ribose/claricle/blob/main/CODE_OF_CONDUCT.md[code of conduct].
+
+== Copyright
+
+Copyright https://www.ribose.com[Ribose Inc.]
+
+== License
+
+The gem is available as open source under the terms of the
+https://opensource.org/licenses/BSD-2-Clause[BSD 2-Clause License].
+
+== Code of Conduct
+
+Everyone interacting in the Claricle project's codebases, issue trackers,
+chat rooms and mailing lists is expected to follow the
+https://github.com/ribose/claricle/blob/main/CODE_OF_CONDUCT.md[code of conduct].
