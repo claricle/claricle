@@ -4,7 +4,7 @@
 
 **Goal:** Turn the `claricle` placeholder gem into a real umbrella library: one Ruby API and one CLI providing inspect, conformance check, and conversion over PNG, SVG, EMF/WMF, PS/EPS, and PDF by delegating to the org's specialist gems.
 
-**Architecture:** A handler registry (one plain-Ruby handler class per format family, self-registering at load) fronted by `Claricle::Image` and a Thor CLI wrapped in an exit-code-mapping runner. Unified `Issue`/`Report`/`Inspection` models are lutaml-model classes; each handler maps its specialist gem's native result shape into them. Format detection is a hand-rolled magic-byte sniffer.
+**Architecture:** A handler registry (one plain-Ruby handler class per format family, listed once in a frozen registry map derived from declared formats) fronted by `Claricle::Image` and a Thor CLI wrapped in an exit-code-mapping runner. Unified `Issue`/`Report`/`Inspection` models are lutaml-model classes; each handler maps its specialist gem's native result shape into them. Format detection is a hand-rolled magic-byte sniffer.
 
 **Tech Stack:** Ruby >= 3.2, Thor ~> 1.0, lutaml-model ~> 0.8, and the specialist gems: `emf`, `png_conform`, `svg_conform`, `vectory`, `postscript`, `pdfrb`.
 
@@ -31,7 +31,7 @@ All ten design questions were settled between Claude and Codex with no unresolve
 | D2 | **[deviation]** `Image#inspect` renamed to `Image#inspection` — `Object#inspect` is Ruby's universal debugging protocol and must keep returning a diagnostic string. No module-level facade (`Claricle.inspect(src)` would shadow `Module#inspect` and break `p Claricle`). |
 | D3 | Handlers are plain subclasses with ordinary methods (`inspection`, `conformance_report`, `convert`) + a `formats` class macro that declares supported formats. No block DSL. The registry is a frozen map derived from one list of handler classes — no runtime mutation, no self-registration side effects (thermo-nuclear amendment to the original "register at load" idea; formats stay declared once, in the handler). |
 | D4 | Unified models (`Issue`, `Location`, `Report`, `Inspection`, later `Conversion` result) are lutaml-model classes; `lutaml-model` is a direct dependency (`~> 0.8`, compatible with png_conform `~> 0.7` and svg_conform `~> 0.8.0` constraints — verify resolution at bundle time). |
-| D5 | **[deviation]** Hard dependencies on all delegates, Ruby floor 3.2, `libpng` dropped from scope. Heavy gems are `require`d lazily inside their handlers so `claricle version` stays fast. |
+| D5 | **[deviation]** Hard dependencies on all delegates, Ruby floor 3.2, `libpng` dropped from scope. Heavy gems are `require`d lazily inside their handlers so `claricle version` stays fast; `emf` (bindata-only, needed by the detector on every dispatch) is the sole eager require. |
 | D6 | Keep Thor. A `Runner` wraps `Cli.start(argv, debug: true)` (Thor re-raises `Thor::Error` when `config[:debug]` is set — verify against installed Thor with dependency-contract-check) and maps: `Thor::Error`/`Errno::ENOENT` → 2, `UnknownFormat`/`UnsupportedFormat` → 3, other `StandardError` → 4. Conformance failure exits 1 from the command itself. |
 | D7 | Hand-rolled detector: PNG 8-byte signature, `%PDF-`, `%!PS` (+ `EPSF` in first line → `:eps`, else `:ps`), EMF/WMF via `Emf.detect_format`, SVG via XML-aware root sniff. Marcel not used. |
 | D8 | Tri-state `valid` kept: `yes` = no issues, `suspicious` = warnings only, `no` = any error. `conform?` passes `yes`+`suspicious`; `--strict`/`strict:` requires `yes`. |
@@ -72,7 +72,7 @@ Errors, unified models, detector, registry + handler base, `Image`, CLI rebuild 
   - postscript: exceptions (`ParseError`, `LexError`, `SyntaxError`) → single `Issue{severity: "error", code: exception class}`; clean parse = conformant.
   - pdfrb: `Validator.validate` strings → `Issue{severity: "error", code: "PDF_STRUCTURE"}`; `Conformance::*` `Violation{rule_id, severity, spec_clause, object}` → `Issue{code: rule_id, location: {node_path: object}}`.
   - `location` is nullable throughout; synthetic stable codes where upstream has none; never invent coordinates.
-- Module API: `Claricle.conform?(path_or_pattern, strict: false)`, `Claricle.conformance_report(path)`.
+- Module API: `Claricle.conform?(path = nil, pattern: nil, strict: false)` — exactly one of positional path or `pattern:` keyword (ArgumentError otherwise; the issue's own examples use both call shapes); `pattern:` batches per D12 and is true only if every file conforms. `Claricle.conformance_report(path)`.
 - `claricle conform FILE|PATTERN [--json] [--strict]` with batch semantics (D12) and exit 1 on nonconformance.
 - Fixture set: valid + invalid sample per format (sourced from delegates' corpora).
 
@@ -82,9 +82,10 @@ Errors, unified models, detector, registry + handler base, `Image`, CLI rebuild 
 - `Models::Conversion` (lutaml-model): `source_format`, `target_format`, `lossiness`, `content` (excluded from JSON serialization), `output_path`.
 - `Handlers::Metafile#convert` / `Postscript#convert` / `Svg#convert` via vectory (`Vectory::Emf.from_content(...).to_svg` etc.); static lossiness edge table (D10).
 - `Claricle.convert(src, to:, output: nil)`; `Image#convert(to:)` returning the in-memory result.
-- `claricle convert SOURCE [--to FORMAT] [--output FILE|-] [--force]`, batch per D12.
+- Write lifecycle (explicit): `Image#convert` never touches disk. `Claricle.convert` writes to the given `output:` path; to stdout for `output: "-"`; and with `output: nil` derives the sibling path (source name, target extension — the issue's `convert("diagram.emf", to: :svg)` writes `diagram.svg`). `Conversion#output_path` is set by `Claricle.convert` to the actual written path (nil for stdout/in-memory).
+- `claricle convert SOURCE [--to FORMAT] [--output FILE|-] [--json] [--force]`, batch per D12. `--json` serializes `Models::Conversion` minus `content` (single object, or array for batch), like inspect/conform; `--json` with `--output -` is rejected (D12).
 - Round-trip/semantic specs per D11; edge table upgraded only on fixture evidence.
-- README.adoc fully rewritten (real API + CLI, format matrix, exit codes); gemspec description/homepage refreshed (org moved ribose → claricle); stale `sig/claricle.rbs` replaced or removed.
+- README.adoc fully rewritten (real API + CLI, format matrix, exit codes, and — an explicit issue acceptance item — the registry extension workflow: adding a format = one handler class + one entry in `Registry::HANDLER_CLASSES`); gemspec description/homepage refreshed (org moved ribose → claricle); stale `sig/claricle.rbs` replaced or removed. PR4 also reintroduces a real `convert` command, so it must drop `"convert"` from Task 7's stub-removal spec assertion.
 
 **Interfaces produced:** `Handlers::<X>#convert(image, to:) -> Models::Conversion`; `Claricle.convert`.
 
@@ -123,7 +124,13 @@ spec/fixtures/detector/         create — minimal real files per format
 **Files:** Modify `claricle.gemspec`, `.rubocop.yml`, `.github/workflows/main.yml`.
 
 - [ ] Set `spec.required_ruby_version = ">= 3.2.0"`; add `spec.add_dependency "emf", "~> 0.1"` and `spec.add_dependency "lutaml-model", "~> 0.8"` (keep thor).
-- [ ] `.rubocop.yml`: `TargetRubyVersion: 3.2`.
+- [ ] `.rubocop.yml`: `TargetRubyVersion: 3.2`, plus exclude specs from block-length limits (rubocop-rspec is not wired in, so RSpec `describe` blocks would trip `Metrics/BlockLength`):
+
+```yaml
+Metrics/BlockLength:
+  Exclude:
+    - "spec/**/*"
+```
 - [ ] CI matrix: `ruby: ['3.2', '3.3']`.
 - [ ] Run `bundle install` — must resolve cleanly against released gems (D13).
 - [ ] Run `bundle exec rake` — green.
@@ -278,7 +285,7 @@ end
 
 ```ruby
 RSpec.describe Claricle::Detector do
-  FIXTURES = File.expand_path("../fixtures/detector", __dir__)
+  let(:fixtures) { File.expand_path("../fixtures/detector", __dir__) }
 
   it "detects png" do
     expect(described_class.detect("\x89PNG\r\n\x1a\n#{"\x00" * 8}".b)).to eq(:png)
@@ -294,8 +301,8 @@ RSpec.describe Claricle::Detector do
   end
 
   it "detects emf and wmf from real fixtures" do
-    expect(described_class.detect_path("#{FIXTURES}/sample.emf")).to eq(:emf)
-    expect(described_class.detect_path("#{FIXTURES}/sample.wmf")).to eq(:wmf)
+    expect(described_class.detect_path("#{fixtures}/sample.emf")).to eq(:emf)
+    expect(described_class.detect_path("#{fixtures}/sample.wmf")).to eq(:wmf)
   end
 
   it "detects svg with xml prolog, doctype and leading comment" do
@@ -318,7 +325,7 @@ module Claricle
     PNG_SIGNATURE = "\x89PNG\r\n\x1a\n".b
     # 4096, not 512: real-world SVGs carry multi-KB license comments before <svg>.
     HEADER_BYTES = 4096
-    SVG_ROOT = /\A\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--.*?-->\s*)*(?:<!DOCTYPE[^>]*>\s*)?<svg[\s>\/]/m
+    SVG_ROOT = %r{\A\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--.*?-->\s*)*(?:<!DOCTYPE[^>]*>\s*)?<svg[\s>/]}m
 
     module_function
 
@@ -393,9 +400,9 @@ module Claricle
   module Registry
     HANDLER_CLASSES = [].freeze # PR2: [Handlers::Png, Handlers::Svg, ...]
 
-    HANDLERS = HANDLER_CLASSES.flat_map { |handler|
+    HANDLERS = HANDLER_CLASSES.flat_map do |handler|
       handler.supported_formats.map { |format| [format, handler] }
-    }.to_h.freeze
+    end.to_h.freeze
 
     module_function
 
@@ -450,6 +457,8 @@ end
 - [ ] Failing spec:
 
 ```ruby
+require "tempfile"
+
 RSpec.describe Claricle::Image do
   let(:png_bytes) { "\x89PNG\r\n\x1a\n#{"\x00" * 8}".b }
 
@@ -480,6 +489,9 @@ RSpec.describe Claricle::Image do
     end
   end
 
+  # NOTE: PR2 registers the Png handler and MUST replace this example with an
+  # equivalent one dispatching an explicitly-passed unregistered format, e.g.
+  # from_content("x", format: :unregistered).inspection.
   it "raises UnsupportedFormat when no handler is registered" do
     expect { described_class.from_content(png_bytes).inspection }
       .to raise_error(Claricle::UnsupportedFormat)
@@ -494,9 +506,11 @@ RSpec.describe Claricle::Image do
 end
 ```
 
-- [ ] Implement:
+- [ ] Implement (`tempfile` is stdlib but NOT autoloaded — the require is load-bearing):
 
 ```ruby
+require "tempfile"
+
 module Claricle
   class Image
     def self.from_path(path)
@@ -555,7 +569,7 @@ end
 
 ### Task 7: CLI rebuild + exit-code runner
 
-**Files:** Modify `lib/claricle/cli.rb` (delete `validate`/`convert`/`compress` stubs and their long_desc blocks; keep `version`; add the nested `Runner` module — the rebuilt file is ~50 lines, no separate runner file until the CLI grows in PR2/PR3), `exe/claricle`; create `spec/claricle/runner_spec.rb`.
+**Files:** Modify `lib/claricle/cli.rb` (delete `validate`/`convert`/`compress` stubs and their long_desc blocks; keep `version`; add the nested `Runner` module — the rebuilt file is ~60 lines, no separate runner file until the CLI grows in PR2/PR3), `exe/claricle`, `README.adoc` (minimal honesty pass only: remove the placeholder command documentation the CLI no longer has, note that real commands land in subsequent PRs — the full rewrite stays in PR4); create `spec/claricle/runner_spec.rb`.
 
 **Produces:** `Cli::Runner.run(argv) -> Integer` exit code per the matrix; `exe/claricle` becomes `exit Claricle::Cli::Runner.run(ARGV)`.
 
@@ -575,9 +589,10 @@ RSpec.describe Claricle::Cli::Runner do
     expect(@code).to eq(2)
   end
 
+  # NOTE: PR4 ships a real `convert` command and must drop "convert" here.
   it "no longer exposes stub commands" do
     expect(Claricle::Cli.commands.keys)
-      .not_to include("validate", "compress")
+      .not_to include("validate", "convert", "compress")
   end
 end
 ```
@@ -603,15 +618,23 @@ module Claricle
         EXIT_OK
       rescue SystemExit => e
         e.status
-      rescue Thor::Error, Errno::ENOENT => e
-        warn(e.message)
-        EXIT_INVOCATION
-      rescue UnknownFormat, UnsupportedFormat => e
-        warn(e.message)
-        EXIT_UNSUPPORTED
       rescue StandardError => e
-        warn("internal error: #{e.class}: #{e.message}")
-        EXIT_INTERNAL
+        warn(error_message(e))
+        exit_code(e)
+      end
+
+      def exit_code(error)
+        case error
+        when Thor::Error, Errno::ENOENT then EXIT_INVOCATION
+        when UnknownFormat, UnsupportedFormat then EXIT_UNSUPPORTED
+        else EXIT_INTERNAL
+        end
+      end
+
+      def error_message(error)
+        return error.message unless exit_code(error) == EXIT_INTERNAL
+
+        "internal error: #{error.class}: #{error.message}"
       end
     end
   end
@@ -627,7 +650,7 @@ end
 **Files:** Modify `lib/claricle.rb` (final require order: thor, emf, lutaml/model, version, errors, models, detector, handlers/base, registry, image, cli — registry AFTER handlers/base since `HANDLERS` derives from handler classes at load), `spec/claricle_spec.rb` (drop the stale "loads the CLI module" trio if superseded; keep version + Error checks).
 
 - [ ] `bundle exec rake` — full suite + rubocop green.
-- [ ] `/execution-diff` gate: run `exe/claricle version`, `exe/claricle help`, `exe/claricle validate x.png; echo $?` on main vs branch; expected diffs ONLY: stubs gone (unknown command → exit 2), version unchanged. Any other diff is a bug.
+- [ ] `/execution-diff` gate: run `bundle exec exe/claricle version`, `bundle exec exe/claricle help`, `bundle exec exe/claricle validate x.png; echo $?` on main vs branch (`bundle exec` on BOTH revisions — the bare executable can't resolve `lib/` from a checkout); expected diffs ONLY: stubs gone (unknown command → exit 2), version unchanged. Any other diff is a bug.
 - [ ] Commit: `chore: finalize core wiring`
 
 ---
