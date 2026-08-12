@@ -73,14 +73,14 @@ issue #1 comment at the start of implementation.
 
 | # | Decision | Status |
 |---|----------|--------|
-| D1 | Four vertical-slice PRs; docs land inside each PR; README fully rewritten by 04 | settled |
+| D1 | Four vertical-slice PRs; every item documents the commands and API it ships in README.adoc as part of that PR; 04 does the full rewrite | settled |
 | D2 | `Image#inspect` → `Image#inspection` (`Object#inspect` stays Ruby's debugging protocol; no module-level facade — it would shadow `Module#inspect`) | **needs issue sign-off** |
 | D3 | Plain handler subclasses + `formats` declaration macro; frozen derived registry, no runtime mutation, no self-registration | settled |
 | D4 | All unified models are lutaml-model classes; `lutaml-model ~> 0.8` is a direct dependency (resolves with png_conform `~> 0.7` / svg_conform `~> 0.8.0`) | settled |
 | D5 | Hard deps on all delegates; Ruby floor **3.2** (pdfrb); `libpng` dropped (FFI codec, no v1 operation needs it). Heavy gems required lazily inside handlers; `emf` (bindata-only, powers the detector) is the sole eager require | **needs issue sign-off** |
 | D6 | Keep Thor; `Runner` wraps `Cli.start(argv, debug: true)` and maps errors → exit codes (matrix below) | settled |
 | D7 | Hand-rolled magic-byte detector (no marcel): PNG signature, `%PDF-`, `%!PS` + `EPSF` first-line split, `Emf.detect_format`, XML-aware `<svg` root sniff | settled |
-| D8 | Tri-state `valid`: `yes` = no issues, `suspicious` = warnings only, `no` = any error. Non-strict `conform?` passes `yes` AND `suspicious`; `--strict`/`strict:` requires `yes` | settled |
+| D8 | Tri-state `valid`, decided in order: any `error` → `no`; else any `warning` → `suspicious`; else (`info` only, or no issues at all) → `yes`. `info` never downgrades validity. Non-strict `conform?` passes `yes` AND `suspicious`; `--strict`/`strict:` requires `yes` | settled |
 | D9 | Conversion via vectory only: EMF↔SVG, PS/EPS↔SVG, SVG→EPS/PS. PNG/PDF inspect+conform only. WMF inspect+conform via `emf`, no convert. EMF+ surfaces as inspection metadata | settled |
 | D10 | Lossiness = static per-edge enum `:lossless/:lossy/:unknown`; SVG→EMF is `:lossy` (documented); lossy/unknown warn on stderr + carry classification in the result; no consent-gate flag | settled |
 | D11 | Round-trip narrowed: byte-identical A→B→A across formats NOT promised (vectory's own specs are semantic); same-format parse→serialize identity where the delegate guarantees it, semantic checks for conversions | **needs issue sign-off** |
@@ -112,15 +112,24 @@ Only the D9-verified edges ship in v1 (EMF↔SVG, PS/EPS↔SVG,
 SVG→EPS/PS); vectory offers more pairs, but unexposed edges stay out
 until fixture evidence justifies them.
 
+**`capabilities` tracks what has shipped, never what is planned.** A
+handler declares an operation in the same commit that implements it, so
+`claricle formats` is truthful at every commit — including the commits
+inside an item, not just at item boundaries. 02 declares `inspect`
+only; 03 adds `conform` handler by handler; 04 adds `convert` plus each
+handler's target list. The `formats` output spec moves with the
+declarations, since the command's expected output changes when
+capabilities do.
+
 ## Acceptance criteria → items
 
 - [ ] `Claricle::Image.from_path(...).inspection` for PNG, SVG, EMF, PS/EPS, PDF → 02
 - [ ] `Claricle.conform?` delegates for all five formats → 03
 - [ ] `Claricle.convert` covers EMF↔SVG, PS/EPS↔SVG, SVG→EPS → 04
 - [ ] CLI inspect/conform/convert, human + JSON → 02/03/04
-- [ ] `claricle formats` support matrix → 02
+- [ ] `claricle formats` support matrix → 02 (command, inspect only), grows in 03 and 04, complete at 04
 - [ ] Handler registry documented; adding a format = one handler class → 01 (code), 04 (README)
-- [ ] Exit codes match the matrix → 01 (runner), verified per command in 02/03/04
+- [ ] Exit codes match the matrix → 01 (runner, all rows incl. 4), verified per command in 02/03/04; 03 reaches 4 end-to-end
 - [ ] Conformance specs on canonical fixtures; round-trip specs per D11 → 03/04
 - [ ] `compress` stub removed → 01
 - [ ] README.adoc rewritten → 04 (honesty pass in 01)

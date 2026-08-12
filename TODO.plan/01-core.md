@@ -25,8 +25,10 @@ dependency where marked ⚙):
   classes ⚙ (construct + `to_json`/`from_json` against the installed gem
   before trusting specs). `Location{byte_offset, line, column, chunk,
   node_path}` all nullable; `Issue{severity: error|warning|info, code,
-  message, location}`; `Report.build(path:, format:, issues:)` computes
-  tri-state `valid` per D8; `Inspection{format, width, height, dpi,
+  message, location}` — `message` is always present, never nil;
+  `Report.build(path:, format:, issues:)` computes tri-state `valid`
+  per D8, deciding in order error → warning → else `yes`, so an
+  info-only report is `yes`; `Inspection{format, width, height, dpi,
   color_space, meta, valid, issues}`.
 - **Detector** (`lib/claricle/detector.rb`): `detect(bytes)` /
   `detect_path(path)` → `:png :svg :emf :wmf :eps :ps :pdf` or raise
@@ -106,6 +108,11 @@ subjects in quotes):
 - `bundle exec rake` green on a clean install.
 - `bundle exec exe/claricle version` → 0; `bundle exec exe/claricle
   nope; echo $?` → 2; stub commands absent from `claricle help`.
+- Runner spec covers every row of the exit-code matrix including 4
+  (a raised `StandardError` that is not a `Claricle::Error`); 03
+  exercises 4 end-to-end through a real crashing delegate.
+- `Report.build` spec covers info-only and warning-plus-info inputs,
+  not just the three obvious tri-state cases.
 - Execution-diff vs main shows ONLY: stubs gone, version unchanged.
 - The three ⚙ contract checks ran against installed gems and their
   outcomes are recorded in the PR description.
