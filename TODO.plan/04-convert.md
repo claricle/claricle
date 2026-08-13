@@ -1,12 +1,14 @@
 # 04 — Convert: vectory routing, lossiness, README rewrite
 
-Can start: after 03 (reuses its batch helper).
+Can start: after 03 (reuses its batch helper). D11 (round-trip
+assertions) and D23 (lossiness classification) settle what it asserts.
 
 ## Problem
 
-No conversion exists. The issue requires EMF↔SVG, PS/EPS↔SVG, and
+No conversion exists. The issue requires EMF↔SVG, PS/EPS↔SVG and
 SVG→EPS with explicit lossiness — no silent lossy conversions — plus
-the final README describing the real library.
+the final README describing the real library. All twelve edges between
+svg/emf/eps/ps were measured working, so v1 ships the full matrix.
 
 ## Design
 
@@ -17,18 +19,31 @@ the final README describing the real library.
   works in memory and has no path to report. It is required in every
   path that batching can reach, since that is where a result must be
   traceable to its input; never substitute a Tempfile path to fill it.
-- Conversion routes through vectory's verified matrix only:
-  `Vectory::Emf.from_content(...).to_svg` and siblings (D9). WMF is out
-  of v1 entirely (D14) and never reaches a handler.
-- **Lossiness** (D10): static per-edge enum — `:lossless` / `:lossy` /
-  `:unknown`. **EMF→SVG starts `:lossy`**, because issue #1 names it as
-  the direction that drops metafile semantics. SVG→EMF starts
-  `:unknown`. Every other edge is `:unknown` and is upgraded only on
-  edge-specific fixture evidence. The earlier plan had this backwards
-  on the strength of emfsvg's "lossy `SvgMatcher`" — that phrase
-  describes a 0.1px comparison tolerance in their spec suite, not a
-  lossy direction, and it is no longer cited as evidence for anything.
-  Lossy/unknown conversions warn on stderr and always carry the
+- Conversion routes through vectory: `Vectory::Emf.from_content(...)
+  .to_svg` and siblings. All twelve svg/emf/eps/ps edges succeed **on a
+  rect-and-line fixture** (D9) — that is what "the matrix works" means,
+  and no more. Richer content fails in ways the matrix cannot express:
+  gradients raise on SVG→EMF, and the SVG→EPS path raised
+  `NameError: uninitialized constant Postsvg::Model::UnknownOperator`
+  on a cold process for an embedded raster, then succeeded once an
+  unrelated conversion had run first. That load-order bug will present
+  as intermittent, so the spec suite must exercise each edge in a fresh
+  process, not only after other conversions have warmed the constants. WMF is out of v1 entirely (D14)
+  and never reaches a handler; png and pdf have no vectory class.
+- **Lossiness is per-conversion, not per-edge (D10 superseded, D23).**
+  Measured: SVG→EPS silently turns a gradient solid black, silently
+  removes a clip path, and silently deletes an embedded raster, while
+  the same edge is perfectly clean for a rect. SVG→EMF *raises* on a
+  gradient (`Emfsvg::FormatError: unsupported SVG color`) but silently
+  makes a clipped object invisible. A static per-edge label would
+  therefore call SVG→EPS lossless on rect evidence and then destroy a
+  gradient without a word — the exact silent lossy conversion issue #1
+  forbids. So: inspect the source document for the features known to be
+  dropped on that edge, and classify **this** conversion. The
+  `:lossless` / `:lossy` / `:unknown` vocabulary stands; the static
+  table becomes a pessimistic floor, never the answer. Build the
+  feature list from the fixture corpus and grow it as more losses are
+  found. Lossy/unknown conversions warn on stderr and carry the
   classification in the result. No consent-gate flag — the issue
   requires disclosure, not consent.
 - **Write lifecycle**: `Image#convert(to:)` never touches disk.
@@ -38,6 +53,17 @@ the final README describing the real library.
   `convert("diagram.emf", to: :svg)` writes `diagram.svg`).
   `Conversion#output_path` = actual written path, nil for
   stdout/in-memory.
+- **Same-format conversion is an invocation error, not a crash.**
+  `Vectory::Svg#to_svg` does not exist — every same-format pair raises
+  `NoMethodError`, which would exit 4 as an internal fault. Reject
+  `--to` equal to the detected source format up front with
+  `InvocationError` → exit 2, before any delegate is touched.
+- **A successful `from_content` proves nothing about the content.**
+  Measured: EPS bytes into `Vectory::Emf`, EMF bytes into
+  `Vectory::Eps` and raw SVG into `Vectory::Emf` all construct without
+  complaint and only fail at the conversion call. Detection remains the
+  only authority on what a file is; never infer it from a delegate
+  accepting the bytes.
 - **One overwrite rule, both layers**: an existing destination is never
   overwritten without `force: true`/`--force`, and it makes no
   difference whether the path was derived or given explicitly. Refusing
@@ -55,7 +81,14 @@ the final README describing the real library.
   up front, compare by **filesystem identity** rather than string
   equality (symlinks, hardlinks, case folding), reject any destination
   that is also a source, and reject non-unique destinations even under
-  `--force`. `--force` authorises replacing an unrelated existing file,
+  `--force`. Note a **nonexistent** destination has no inode to compare
+  — `Logo.svg` and `logo.svg` collide on a case-insensitive filesystem
+  before either exists. So canonicalize planned destinations by probing
+  the target directory's case sensitivity once, and compare
+  canonicalized strings for paths that do not yet exist. A preflight
+  collision **fails the whole batch before any write**, rather than
+  producing per-item failures — half-written output is worse than none,
+  and the user can fix the input set and re-run. `--force` authorises replacing an unrelated existing file,
   never clobbering an input.
 - **Writes are atomic in both directions.** Without `--force`, stage to
   a temp file in the destination's own directory and publish with a
@@ -68,8 +101,9 @@ the final README describing the real library.
   binary output. Spec it byte-for-byte.
 - CLI: `claricle convert SOURCE... [--pattern GLOB] [--to FORMAT]
   [--output FILE|-] [--json] [--force]` — same invocation shape as
-  `conform` (D12): positional sources are literal paths, globbing needs
-  `--pattern`. Batch runs via 03's helper, every file landing in a
+  `conform` (D19): a positional source is a literal path when it names
+  an existing file and a glob otherwise, with `--pattern` forcing glob
+  interpretation. Batch runs via 03's helper, every file landing in a
   uniform `Models::BatchItem` slot, failures included. `--output` names
   a single destination, so it is rejected with exit 2 whenever more
   than one source resolves; multi-source runs use derived names. `--to` may be omitted **only** when
@@ -93,14 +127,24 @@ the final README describing the real library.
   `formats` output spec moving alongside. The last such commit is what
   finally makes `claricle formats` the full support matrix the issue
   asks for.
-- **Round-trip specs** (D11): same-format parse→serialize identity
-  where the delegate guarantees it (EMF); semantic checks for
-  cross-format conversions. Byte-identical cross-format round-trips are
-  NOT asserted. Note that "dimension preservation" is not assertable
-  until D15 settles units and coordinate space — the same SVG reports
-  `3×1` through vectory and `96×48` as EPS, so an equality check would
-  be testing a coincidence. Until then, name the specific property each
-  semantic spec checks.
+- **There is no general round-trip invariant, and that is measured
+  (D11).** Byte identity against the original never held — the first
+  pass always rewrites. Idempotence held for a rect-and-line fixture
+  and then failed outright once the document contained a single
+  `<text>` element: three cycles gave three different hashes on both
+  the EMF and EPS chains, with a text baseline drifting 24.4 → 23.4 →
+  22.4 and an EPS viewBox growing `0 0 100 50` → `0 -25 100 75` →
+  `0 -25 100 100`. So do **not** write a general `cycle N == cycle N+1`
+  spec; it passes only because the fixture is trivial, and that is how
+  this claim survived two review rounds.
+  What can honestly be asserted: conversion is **deterministic** (same
+  input, identical bytes — measured true); same-format parse→serialize
+  identity for EMF; and per-feature semantic properties over a fixture
+  corpus, each naming the property it checks. Pending D11 sign-off on
+  what replaces the issue's stated backbone.
+  Also note "dimension preservation" is not assertable until D15
+  settles units — the same SVG reports `3×1` through vectory and
+  `96×48` as EPS, so an equality check would be testing a coincidence.
 - Docs closure: README.adoc fully rewritten on top of 01's honesty
   baseline — real API + CLI, the format × operation matrix, exit codes,
   and the registry extension workflow. That workflow must describe what
@@ -117,7 +161,10 @@ the final README describing the real library.
 
 Plumbing first again, then one edge family per commit.
 
-1. `Models::Conversion` + lossiness edge table + specs.
+1. `Models::Conversion` + the per-target feature-loss rules (D23) +
+   specs. Not a flat edge table — a rule says "this target discards
+   gradients / clip paths / embedded rasters", and the classifier
+   inspects the source for those features.
 2. Extract the write lifecycle as its own injectable service and spec
    it directly — preflight collision set, filesystem-identity aliasing,
    no-replace atomic create, force-mode temp-and-rename, binary stdout.
@@ -131,8 +178,10 @@ Plumbing first again, then one edge family per commit.
 4. One edge family per commit: handler `convert` TDD against real
    fixtures, `capabilities :convert` with that handler's target list,
    and the `formats` expected-output update, together.
-5. Round-trip + semantic spec suite; upgrade lossiness edges only where
-   edge-specific fixtures prove it.
+5. Semantic spec suite over the fixture corpus, each spec naming the
+   property it checks (D11 leaves the overall invariant open, so do not
+   write a general round-trip assertion). Add a feature-loss rule only
+   when a fixture demonstrates the loss.
 6. `formats` full-matrix spec once the last edge lands.
 7. README rewrite + gemspec metadata + RBS update + stub-spec update.
 
@@ -140,8 +189,10 @@ Plumbing first again, then one edge family per commit.
 
 - All acceptance-matrix conversions work via API and CLI with correct
   exit codes and lossiness warnings.
-- Round-trip/semantic suite green; every `:lossless` edge is
-  fixture-proven.
+- Semantic suite green; every `:lossless` classification is
+  fixture-proven for the features present in that fixture, and the
+  gradient, clip-path and embedded-raster cases each produce a
+  `:lossy` classification with a warning rather than silent loss.
 - A batch that would collide or overwrite an input is refused before
   anything is written, and specs cover the four concrete cases.
 - `claricle formats` prints the complete support matrix — every cell

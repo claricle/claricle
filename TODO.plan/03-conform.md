@@ -1,13 +1,15 @@
 # 03 — Conform: unified reports, `Claricle.conform?`, batch helper
 
-Can start: after 02.
+Can start: after 02. D16 (PDF scope), D22 (EPS/PS) and D23 (pre-pass)
+settle what this item builds.
 
 ## Problem
 
 Each delegate reports validity in a different shape (typed issues,
 error strings, exceptions, or parse-error lists). The issue demands one
 typed `Report` with uniform `Issue{severity, code, message, location}`
-across all five formats, a module-level API, and a batch-capable CLI
+across every format that has a conformance basis, a module-level API,
+and a batch-capable CLI
 command that exits 1 on nonconformance.
 
 ## Design
@@ -18,32 +20,63 @@ coordinates:
 
 | Delegate result | → Issue mapping |
 |---|---|
-| png_conform via `validate_file` ⚙ | **Message text only.** `result_builder#add_context_messages` calls `result.error(e[:message])`, dropping `error_type`, `chunk_type` and `chunk_offset`. So: `severity` from which bucket it came (error/warning/info), `location: nil`, and a stable synthetic `code` — there is no upstream type to carry. If a richer png_conform entry point exists, use it and restore type/chunk/offset; otherwise say plainly that PNG issues have no coordinates |
-| svg_conform `ValidationIssue` ⚙ | **Map severity from `severity`, not `type`.** `ErrorTracker#add_error` hardcodes `type: :error` and keeps the real classification in a separate `severity` field, so mapping from `type` would flatten every info and warning into an error and defeat D8's tri-state. Treat `validity_error` as error; fall back to `type` only when `severity` is nil. `code: requirement_id`; `location: {line, column}` |
-| emf `metafile.errors` (message, offset, record_code) | `severity: "error"`; `code: "EMF_PARSE"`; `location: {byte_offset}`; clean parse + serialize round-trip identity = conformant |
-| postscript exceptions ‡ | Unverified — the gem is not installed. Assumed: a single `Issue{severity: "error", code: <exception class>}`, clean parse = conformant. Confirm at the gate |
-| pdfrb ‡ | Unverified — the gem is not installed. The plan previously asserted a `Validator.validate` / `Conformance::*` surface as fact; it is not. Confirm at the gate, then decide D16 |
+| png_conform, **not** via `validate_file` | Build `Readers::FullLoadReader.new(path)`, pass it to `ValidationService.new(reader, path)`, call `validate`, then read **all three buckets — `context.all_errors`, `all_warnings`, `all_info`**. Location lives on the **context object only**: both `validate_file` and `result.validation_result.errors` return `chunk_type: nil, chunk_offset: nil` for the same input. `all_errors` alone silently drops warnings and info, which would break D8's tri-state and `--strict`. Measured error shape: `{chunk_type: "IDAT", message: "CRC error in IDAT chunk", severity: :error, offset: 33}`. Map `severity` as-is, `location: {chunk: chunk_type, byte_offset: offset}` (offset may be nil, e.g. a missing IEND). **`byte_length` has no source here** — png_conform reports a start offset only, so the issue's "byte range" is delivered as offset-plus-chunk for PNG, and `byte_length` stays nil unless the pre-pass (D23) computes it from the chunk header, which it can. `code` synthesized stably since there is no upstream type. **Never use `validate_file`** — it returns a `FileAnalysis` with chunk and offset discarded. See D23: this path misses duplicate `IHDR`/`IEND` and trailing bytes entirely |
+| svg_conform `ValidationIssue` | Severity is `severity || type` — `ErrorTracker#add_error` hardcodes `type: :error`, and `severity` was measured **nil** on some issues, so neither field alone is reliable. Normalize `:validity_error` to `error`. Collect errors, warnings **and** validity errors, not just one bucket. `code: requirement_id`. `line` and `column` were nil on every issue measured, so `location` is usually nil; populate only when present. Run under the `base` profile (D21), and call `Profiles.clear_cache!` or enumerate eagerly — `available_profiles` collapses to just the last-loaded profile after any validation. Note UTF-32 input was measured passing every profile silently, so the structural pre-pass (D23) must settle encoding before profile validation runs — but note D23: `base` returns 0 errors for raw binary, so it cannot stand alone |
+| emf | `Emf.parse` → `Metafile` exposing `ok?` and `errors`. **`ok?` is not sufficient on its own**: a file with its final EOF record removed measured `ok? == true, errors == [], records == 15` against 16 for the intact file. Require an EOF record on top of `ok?` (D23). **Do not naively compare the declared record count to the parsed count** — the intact fixture reports `header.n_records == 17` against 16 parsed records, so that offset means something not yet understood. Either work out what it counts and then cross-check, or restrict the pre-pass to EOF presence and trailing-byte detection, both of which were measured catching real corruption. Map `errors` (message, offset, record_code) to `severity: "error"`, `code: "EMF_PARSE"`, `location: {byte_offset}`. Truncation raises **`IOError`** at some cut points and `Emf::FormatError` at others — both belong on the conform allowlist, or a corrupt file exits 4 instead of 1 |
+| postscript | **No mapping — EPS/PS conform is unsupported in v1 (D22).** `Postscript.parse` was measured accepting an unmatched `}`, an undefined operator, a missing operand and raw binary; only an unterminated string raised. There is nothing here that answers "does this conform?", so the handler declares no `conform` capability and the registry raises `UnsupportedFormat` → exit 3 |
+| pdfrb `Validator.validate` | Structural, class method taking a `Document`. Measured `[]` on a valid file. **Failure reporting is not uniform** — a catalog-less document raises `Pdfrb::Error`, a `/Pages` reference to a missing object raises `NoMethodError`, and a dangling unrelated reference comes back as an error string. The allowlist must cover the raising cases including `NoMethodError` from this call path specifically, which means wrapping the call rather than allowlisting `NoMethodError` globally. When it returns strings: `severity: "error"`, `code: "PDF_STRUCTURE"`, `message` the string, `location: nil` |
+| pdfrb `Conformance::*` `Violation` | Only via `--profile`. Measured `PdfA.validate(doc, level: :a1b)` → `ValidationResult` whose violations are `Violation{rule_id, message, object, severity, spec_clause}`, e.g. `rule_id="6.1-2", message="PDF/A requires /Catalog/Metadata XMP stream", object="Catalog", severity=:error`. So `code: rule_id`, `message` as-is (it has real prose — no composition needed), severity as-is, `location: {node_path: object}` — note `object` was the string `"Catalog"`, not a path, so treat it as an opaque label. **`PdfA`/`PdfX`/`PdfVT` take `level:`; `PdfUA` does not** — the adapter is per-profile |
 
-- **PDF conformance scope is deferred to D16.** An earlier draft here
-  specified structural-only conform with `--profile` opt-in; that rested
-  on a pdfrb surface nobody has executed. Issue #1 asks for Arlington
-  predicates, and whether released pdfrb exposes a general Arlington
-  runner is unknown. The gate resolves what exists, then D16 gets
-  signed off, then this section gets written. Ship no PDF conformance
-  claim before that — a weaker check under the name "conform" would
-  silently narrow the issue's requirement.
-- **`conform` needs one stated baseline across formats.** Today it
-  would mean extensive validation for PNG, a default profile for SVG,
-  parse-plus-round-trip for EMF, and a bare syntactic parse for PS/EPS.
-  Those are not comparable claims. Record what each format's conform
-  actually checks, in the `Report` provenance fields, and say so in the
-  README rather than implying uniformity.
+- **One `--profile` flag, two formats.** PDF and SVG both have a
+  generic check and a set of named stricter standards, so they share
+  one mechanism rather than inventing two.
+  - PDF: generic `conform` runs `Validator.validate` (structural).
+    `--profile pdf_a --level a1b` reaches `Pdfrb::Conformance::*`.
+    **A profile run must pass structural validation first** — measured
+    on a catalog-less file, most profiles raise a raw `NoMethodError`
+    while `Pdf2AF` returns zero violations and "passes". Never report a
+    profile pass for a document that is not structurally sound.
+    **Claricle validates the level itself**: `PdfA`, `PdfX`, `PdfVT`
+    and `Pades` accept `level:`; `PdfUA`, `Ltv`, `Pdf2AF` and
+    `TaggedPdf` do not. An invalid level is **silently ignored**
+    upstream — `level: :nonsense` returned the same result as
+    `level: :a1b` — so an unrecognised level must be rejected here with
+    `InvocationError`, and passing `--level` to a profile that takes
+    none is equally an error. Enumerate the accepted names and levels
+    in one table; do not pass user input through unchecked.
+  - SVG: generic `conform` runs the **`base`** profile (D21).
+    `--profile metanorma`, `svg_1_2_rfc`, `svg_1_2_rfc_with_rdf`,
+    `no_external_css`, `lucid_fix` reach the stricter sets.
+  - An unknown profile name, or `--profile` on a format with no profile
+    system, is an `InvocationError` → exit 2.
+  - `Report#profile` always records what actually ran, so no result is
+    ambiguous about which standard it was judged against.
+  "Valid PDF" and "valid PDF/A" are different claims, and so are
+  "well-formed SVG" and "SVG that satisfies the RFC colour rules".
+  Neither is silently substituted for the other.
+- **Arlington is not delivered in v1.** Released pdfrb exposes
+  `Arlington::Loader` (`list_object_names`, `object_definition`),
+  `Predicate`, `ObjectDefinition`, `FieldDefinition` — the grammar, not
+  a validator. No `Conformance` profile references it. Driving those
+  predicates across a document is a validator we would be writing, not
+  a delegate call. Issue #1 asks for Arlington, so this omission is the
+  one part of D16 that needs the author's sign-off. Say it plainly in
+  the README rather than letting "conform" imply it.
+- **`conform` still means different things per format, so say so.**
+  PNG gets chunk-level validation, SVG the `base` requirement set, EMF
+  a parse plus `ok?`, PDF a structural check. Those are not comparable
+  claims even after D22 removed the worst offender. `Report#profile`
+  and the validator version record what actually ran, and the README
+  states it per format rather than implying uniformity.
 - Module API: `Claricle.conform?(path = nil, pattern: nil,
-  strict: false)` — exactly one of positional path or `pattern:`
-  (`InvocationError` otherwise; the issue's examples use both shapes);
-  `pattern:` is true only if every matched file conforms.
-  `Claricle.conformance_report(path)` → `Models::Report`. No `profile:`
-  until D16 settles.
+  strict: false, profile: nil)` — exactly one of positional path or
+  `pattern:` (`InvocationError` otherwise; the issue's examples use
+  both shapes); `pattern:` is true only if every matched file conforms.
+  `Claricle.conformance_report(path, profile: nil)` → `Models::Report`.
+  `profile:` is accepted for PDF and SVG (D16, D21); on any other
+  format, or with a name that format does not define, it raises
+  `InvocationError`. `Report#profile` records which one ran, so a
+  result is never ambiguous about what it checked.
 - **A batch predicate loses information, so give callers the full
   result too.** `Claricle.conformance_batch(pattern:)` returns ordered
   per-file outcomes plus an aggregate status, so Ruby callers can get
@@ -58,12 +91,14 @@ coordinates:
   An operational failure — unknown format, unsupported format, missing
   file, delegate crash — raises, and raises out of the batch shape too;
   it never silently becomes `false`. `pattern:` matching zero files
-  raises `ArgumentError` (matching the CLI's exit 2, not a vacuous
+  raises `InvocationError` (matching the CLI's exit 2, not a vacuous
   `true`).
-- **The batch helper** (owned here, reused by 04): positional `FILE...`
-  arguments are literal paths; globbing needs an explicit `--pattern`
-  (D12). Expand `Dir.glob(pattern).sort`; zero matches → exit 2;
-  per-file failures don't stop the batch; final exit = highest code.
+- **The batch helper** (owned here, reused by 04): a positional
+  argument is a literal path when it names an existing file and a glob
+  otherwise; `--pattern` forces glob interpretation for a filename that
+  legitimately contains glob characters (D19). Expand
+  `Dir.glob(pattern).sort`; zero matches → exit 2; per-file failures
+  don't stop the batch; final exit = highest code.
 - **One envelope type, never a mixed array.** Every slot is a
   `Models::BatchItem{path, status, exit_code, result, error}` — one
   homogeneous element type, with `result` holding the `Report` (or in
@@ -116,10 +151,12 @@ so no commit declares a capability the CLI can't yet deliver.
 3. One handler per commit: `conformance_report` TDD against valid and
    invalid fixtures, `capabilities :conform`, and the `formats`
    expected-output update, together. Exit codes 0 and 1 get their
-   end-to-end specs with the first handler. PS and PDF handlers are
-   blocked on the verification gate.
+   end-to-end specs with the first handler.
 4. Per-delegate malformed-input allowlist, per operation and stage, so
-   a recognised-but-corrupt file exits 1 rather than 4. `Emf::FormatError`
+   a recognised-but-corrupt file exits 1 rather than 4 — **for the
+   formats that have conform at all**. EPS and PS are excluded by D22:
+   they exit 3 whatever their content, since there is no conformance
+   verdict to give. `Emf::FormatError`
    raised while conforming a truncated EMF goes **on** that allowlist:
    the delegate reports it as an exception before any `metafile.errors`
    result exists, but the user-visible meaning is the same
@@ -135,14 +172,16 @@ so no commit declares a capability the CLI can't yet deliver.
 
 ## Done when
 
-- `Claricle.conform?` correct for all five formats, both call shapes.
+- `Claricle.conform?` correct for png, svg, emf and pdf, both call
+  shapes; eps/ps raise `UnsupportedFormat` per D22.
 - Invalid fixture of each format yields a `Report` with populated,
   correctly-mapped issues; exit codes verified end-to-end.
 - Batch glob over mixed formats returns highest-code exit and a
   positionally complete JSON array of `BatchItem`, failures included.
 - A single-file failure emits the same JSON envelope as a batch one.
-- Exit code 4 is reached end-to-end, and a corrupt-but-recognised
-  fixture of every format exits 1 rather than 4.
+- Exit code 4 is reached end-to-end. A corrupt-but-recognised fixture
+  exits 1 for png, svg, emf and pdf; eps and ps exit 3 regardless of
+  content (D22).
 - `formats` now reports conform, and its spec says so.
 - Full Pre-Push Review Chain passed.
 
