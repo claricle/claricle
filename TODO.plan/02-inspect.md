@@ -1,6 +1,7 @@
 # 02 — Inspect: five handlers, `claricle inspect`, `claricle formats`
 
-Can start: after 01.
+Can start: after 01. D14 (WMF) and D18 (EMF+) settle what this item
+registers.
 
 ## Problem
 
@@ -14,18 +15,16 @@ delegates are path- or content-oriented as noted):
 
 | Handler (formats) | Delegate call | Metadata source |
 |---|---|---|
-| `Handlers::Png` (`:png`) | A chunk **reader**, not the validator ⚙ — `PngConform::Readers::{StreamingReader,FullLoadReader}` exist for exactly this. Routing inspection through `ValidationService.validate_file` would make `inspect` mean conformance for PNG and metadata for everything else | header chunk: width/height/bit depth/colour type |
-| `Handlers::Svg` (`:svg`) | `Vectory::Svg.from_content(image.content)` | width/height; root attributes into `meta` |
-| `Handlers::Metafile` (`:emf` only) | `::Emf.parse(image.content)` | header bounds/device dims; `meta[:emf_plus]` from `metafile.emf_plus` |
-| `Handlers::Postscript` (`:eps, :ps`) ‡ | `Vectory::Eps`/`Ps` (BoundingBox dims) + `::Postscript.parse` structure | dims; DSC header fields into `meta` |
-| `Handlers::Pdf` (`:pdf`) ‡ | `Pdfrb::Document.open(path)` via `image.with_path` | version, page count |
+| `Handlers::Png` (`:png`) | A chunk **reader**, not the validator — `PngConform::Readers::FullLoadReader` was measured exposing `each_chunk`, `signature`, `png`, `file_size`. It accepts signature-only or signature-plus-junk input and simply yields zero chunks, so "no exception" cannot mean `parse_status: :ok` — require a readable `IHDR` before declaring success. Routing inspection through `ValidationService` would make `inspect` mean conformance for PNG and metadata for everything else | header chunk: width/height/bit depth/colour type |
+| `Handlers::Svg` (`:svg`) | `Vectory::Svg.from_content(image.content)`. **`Vectory::NotImplementedError` means "no dimensions", not "parse failed"** — measured: a *valid* SVG with no width/height/viewBox raises it, while a *malformed* SVG carrying `width="7"` returns 7. So dimensions are nullable, that error maps to nil dimensions, and `parse_status` must come from Claricle's own structural check (D23), never from whether the dimension read raised | width/height (nullable); root attributes into `meta` |
+| `Handlers::Metafile` (`:emf` only) | `::Emf.parse(image.content)` | header bounds/device dims. `metafile.emf_plus` was nil on our fixture, and when present it is packed binary — putting it straight into `meta` risks `JSON::GeneratorError`, so expose presence, byte size and optionally Base64, never the raw bytes ⚙ confirm against a real EMF+ file before writing the spec |
+| `Handlers::Postscript` (`:eps, :ps`) | `Vectory::Eps`/`Ps` for dims — measured `100.0x50.0`, **floats not integers**. `::Postscript.parse` for DSC structure only; it is not a validity signal (D22), so a successful parse says nothing about conformance | dims; DSC header fields into `meta` |
+| `Handlers::Pdf` (`:pdf`) | `Pdfrb::Document.open(path)` via `image.with_path` — measured returning version `1.4` and a page count. It **opens a structurally broken PDF without complaint**, so a successful `open` cannot by itself yield `parse_status: :ok`; the status comes from Claricle's structural pre-pass (D23), consistent with 01 | version, page count |
 
-‡ **Unverified.** `postscript` and `pdfrb` are not installed in any
-local gemset, so every claim in those two rows is an assumption carried
-over from a source read, not an executed fact. The verification gate in
-00 blocks this item until they are resolved, executed against valid and
-malformed fixtures, and their real surfaces recorded here. Register no
-PS or PDF capability before that.
+Every row above was executed against a real fixture on 2026-08-13; see
+the measured-contracts section in 00. Re-run them if a delegate version
+moves — that section exists because six confidently-asserted contracts
+turned out false.
 
 - **WMF is out (D14).** Released `emf` 0.1.0 raises `WMF parser not yet
   implemented`, so `Handlers::Metafile` claims `:emf` alone. The
@@ -55,11 +54,12 @@ PS or PDF capability before that.
   format has none. Note that a `:failed` inspection still exits 0.
 - New deps in gemspec: `png_conform`, `svg_conform`, `vectory`,
   `postscript`, `pdfrb` — three-segment constraints on the reviewed
-  line (D13), pinned to the versions the verification gate actually
-  executed, not to a floating `~> 0.x`. Locally installed and reviewed:
-  png_conform 0.1.4, svg_conform 0.2.1, vectory 0.12.0. The earlier
-  plan's `png_conform ~> 0.7` / `svg_conform ~> 0.8.0` figures were
-  wrong and contradicted this list. Verify Bundler resolution.
+  line (D13), not a floating `~> 0.x`. Locally installed and reviewed:
+  png_conform 0.1.4, svg_conform 0.2.1, vectory 0.12.0, postscript
+  0.2.0, pdfrb 0.7.10. The earlier plan's `png_conform ~> 0.7` /
+  `svg_conform ~> 0.8.0` figures were wrong and contradicted this list.
+  No direct `libpng` dep — it arrives via `vectory → emfsvg` already
+  (D5). Verify Bundler resolution.
 - CLI: `claricle inspect FILE [--json]`; human output prints format,
   dimensions, each populated metadata field one per line, the
   `parse_status`, and every issue — a delegate that failed to parse

@@ -1,8 +1,10 @@
 # 01 — Core: models, detection, registry, CLI runner
 
-Can start: now. Everything else builds on this; ships with an empty
-registry, so every operation raises `UnsupportedFormat` through the
-real dispatch path until 02.
+Can start: now. Everything else builds on this item; it ships with an
+empty registry, so every operation raises `UnsupportedFormat` through
+the real dispatch path until 02. The model shape is settled by D15
+(dimensions), D17 (`parse_status`) and D23 (structural pre-pass) — read
+those before writing `Handlers::Base`.
 
 ## Problem
 
@@ -53,7 +55,12 @@ dependency where marked ⚙):
   belong to `conform` alone. An **allowlisted** parse failure gives
   `:failed` and exits 0 — the command succeeded in reporting that the
   file doesn't parse. A fault off the allowlist is not absorbed; it
-  propagates and exits 4.
+  propagates and exits 4. **`parse_status` comes from Claricle's own
+  structural check (D23), never from delegate silence** — measured, a
+  PNG reader yields zero chunks without raising, svg_conform's `base`
+  profile returns no errors for raw binary, and vectory raises on a
+  *valid* dimensionless SVG. "The delegate didn't complain" is not
+  evidence the file parsed.
 - **Detector** (`lib/claricle/detector.rb`): `detect(bytes)` /
   `detect_path(path)` → `:png :svg :emf :wmf :eps :ps :pdf` or raise
   `UnknownFormat`. Load-bearing details, each corrected by execution on
@@ -89,12 +96,16 @@ dependency where marked ⚙):
 - **Handler metadata carries everything the registry derives**, so the
   advertised "adding a format = one handler class" is actually true.
   A handler declares its formats, its capabilities, its conversion
-  targets and their lossiness, its canonical file extensions (needed by
+  targets, the **feature-loss rules** for each of those targets (per
+  D23, lossiness is classified per conversion from the source's
+  content, so a handler declares which source features a target
+  discards, not a flat per-edge label), its canonical file extensions
+  (needed by
   04's `--to` inference from an `--output` suffix), and its detection
   sniffer. If any of those stays in a central table, the README must
   document the real multi-file workflow instead — a new format that
-  needs a detector edit, a require, a registry entry and a lossiness
-  table edit is not one class.
+  needs a detector edit, a require, a registry entry and a
+  feature-loss rule edit is not one class.
 - **Handlers::Base** (`lib/claricle/handlers/base.rb`): `formats(*syms)`
   class macro is pure declaration; instance `inspection(image)`,
   `conformance_report(image)`, `convert(image, to:)` all raise
@@ -113,9 +124,13 @@ dependency where marked ⚙):
   scoped around the call; record which mechanism was used).
   `Thor::Error`/`Errno::ENOENT`/`InvocationError` → 2,
   `UnknownFormat`/`UnsupportedFormat` → 3, other `StandardError` → 4,
-  **`LoadError` → 4 caught explicitly** (it's a `ScriptError`, not a
-  `StandardError`, so a missing lazy delegate would otherwise escape as
-  process status 1 — the code reserved for nonconformance),
+  **`LoadError` → 4 and `SystemStackError` → 4, both caught
+  explicitly** — neither is a `StandardError`, so a missing lazy
+  delegate or a deeply recursive PostScript file would otherwise escape
+  as process status 1, the code reserved for nonconformance. Recursive
+  PS through `Vectory::Ps#to_svg` was measured raising
+  `SystemStackError`. Catch `ScriptError` and `SystemStackError`
+  narrowly; never rescue `Exception`.
   Never blanket-map `ArgumentError`: a delegate raising one
   accidentally is an internal defect, not bad user input. Split into
   `run` / `exit_code` / `error_message` to stay under
