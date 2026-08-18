@@ -3,4 +3,4 @@
 
 require "claricle"
 
-Claricle::Cli.start(ARGV)
+exit Claricle::Cli::Runner.run(ARGV)
