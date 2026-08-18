@@ -5,7 +5,8 @@ module Claricle
 
   # Anything responding to #read, which includes StringIO, not only IO.
   interface _Readable
-    def read: (*untyped) -> String?
+    # Called with no arguments, and its result used directly.
+    def read: () -> String
   end
 
   def self.detect: (String | _Readable source) -> format
@@ -63,6 +64,9 @@ module Claricle
     # signature for Lutaml::Model::Serializable, and naming it makes
     # `rbs validate` fail with NoSuperclassFoundError.
     class Location
+      def self.from_json: (String json) -> Location
+      def to_json: (*untyped) -> String
+
       attr_accessor byte_offset: Integer?
       attr_accessor byte_length: Integer?
       attr_accessor line: Integer?
@@ -72,6 +76,9 @@ module Claricle
     end
 
     class Issue
+      def self.from_json: (String json) -> Issue
+      def to_json: (*untyped) -> String
+
       SEVERITIES: Array[String]
 
       attr_accessor severity: String
@@ -81,6 +88,9 @@ module Claricle
     end
 
     class Report
+      def self.from_json: (String json) -> Report
+      def to_json: (*untyped) -> String
+
       attr_accessor source_path: String?
       attr_accessor format: String?
       attr_accessor issues: Array[Issue]
@@ -92,6 +102,9 @@ module Claricle
     end
 
     class Inspection
+      def self.from_json: (String json) -> Inspection
+      def to_json: (*untyped) -> String
+
       PARSE_STATUSES: Array[String]
 
       attr_accessor format: String?

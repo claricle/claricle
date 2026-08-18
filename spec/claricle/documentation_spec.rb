@@ -75,9 +75,14 @@ RSpec.describe "the documentation" do
 
     # Assert what the note SAYS before exempting it: stripping it first
     # would let it be reversed to "compression now works" and still pass.
+    # Tied to compression specifically: an unrelated negative sentence
+    # elsewhere plus "compression now works" would otherwise pass.
     it "states plainly that compression was dropped" do
-      expect(readme).to match(/never implemented and is no longer\s+planned/)
-      expect(readme).not_to match(/compression (is|will be) (supported|available|planned)/i)
+      note = readme[/^\[NOTE\]\n====.*?^====$/m]
+      expect(note).to be_a(String), "the 0.1.0 correction note is gone"
+      expect(note).to match(/compression/i)
+      expect(note).to match(/never implemented and is no longer\s+planned/)
+      expect(readme).not_to match(/compression (now |is |will be )?(works|supported|available|planned)/i)
     end
 
     it "names no capability that was dropped, outside that note" do
@@ -124,9 +129,12 @@ RSpec.describe "the documentation" do
       expect(prose).not_to match(/comprehensive/i)
     end
 
+    # Any bare uppercase token, so an added BMP or AVIF fails rather than
+    # going unnoticed by a fixed alternation.
     it "names every format detection supports, and no others" do
-      named = prose.scan(/\b(PNG|SVG|EMF|WMF|EPS|PS|PDF|JPEG|GIF|TIFF|WEBP)\b/).flatten.uniq
-      expect(named.sort).to eq(%w[EMF EPS PDF PNG PS SVG WMF].sort)
+      allowed = %w[EMF EPS PDF PNG PS SVG WMF]
+      tokens = prose.scan(/\b[A-Z]{2,5}\b/).uniq - %w[XMP]
+      expect(tokens.sort).to eq(allowed.sort)
     end
   end
 end
