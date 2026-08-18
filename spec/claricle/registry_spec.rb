@@ -129,7 +129,7 @@ RSpec.describe "Claricle::Registry" do
 
     it "loads registry.rb without the entry point" do
       ok, output = run.call('require "claricle/registry"; ' \
-                            'print Claricle.const_get(:Registry).formats.inspect')
+                            "print Claricle.const_get(:Registry).formats.inspect")
       expect(ok).to be(true), "subprocess failed: #{output}"
       expect(output).to eq("[]")
     end
