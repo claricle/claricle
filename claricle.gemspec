@@ -12,8 +12,7 @@ Gem::Specification.new do |spec|
   spec.description = <<~HEREDOC
     Claricle detects an image's format from its bytes -- PNG, SVG, EMF, WMF,
     EPS, PS and PDF -- and gives one object and one set of models to work with.
-    The name combines "clarity" and "particle", for the clear validation of
-    every pixel. Inspection, conformance checking and conversion are being
+    The name combines "clarity" and "particle". Inspection, conformance checking and conversion are being
     built on this foundation, wrapping png_conform, svg_conform, vectory and
     pdfrb behind a single interface.
   HEREDOC

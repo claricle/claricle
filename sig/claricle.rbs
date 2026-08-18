@@ -2,6 +2,14 @@ module Claricle
   VERSION: String
 
   type format = Symbol
+  type verdict = :yes | :suspicious | :no
+  type severity = "error" | "warning" | "info"
+  type parse_status = "ok" | "failed"
+
+  # Anything with #puts, which includes StringIO -- not an IO subclass.
+  interface _Writable
+    def puts: (*untyped) -> void
+  end
 
   # Anything responding to #read, which includes StringIO, not only IO.
   interface _Readable
@@ -45,6 +53,8 @@ module Claricle
   # Superclass unnamed for the same reason as the models: thor ships no
   # RBS signature, so naming it fails validation.
   class Cli
+    # Thor's, called directly by Runner.run.
+    def self.start: (Array[String] argv, ?untyped config) -> untyped
     def self.exit_on_failure?: () -> bool
     def version: () -> void
 
@@ -55,7 +65,7 @@ module Claricle
         def initialize: (Integer code) -> void
       end
 
-      def self.run: (Array[String] argv, ?output: IO) -> Integer
+      def self.run: (Array[String] argv, ?output: _Writable) -> Integer
     end
   end
 
@@ -81,7 +91,7 @@ module Claricle
 
       SEVERITIES: Array[String]
 
-      attr_accessor severity: String
+      attr_accessor severity: severity
       attr_accessor code: String?
       attr_accessor message: String
       attr_accessor location: Location?
@@ -98,7 +108,7 @@ module Claricle
       attr_accessor validator_version: String?
 
       # Derived from issues on read, never stored.
-      def valid: () -> Symbol
+      def valid: () -> verdict
     end
 
     class Inspection
@@ -113,7 +123,7 @@ module Claricle
       attr_accessor dpi: Float?
       attr_accessor color_space: String?
       attr_accessor meta: Hash[untyped, untyped]?
-      attr_accessor parse_status: String
+      attr_accessor parse_status: parse_status
       attr_accessor issues: Array[Issue]
     end
   end

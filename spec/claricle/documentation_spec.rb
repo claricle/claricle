@@ -23,7 +23,7 @@ RSpec.describe "the documentation" do
   describe "the examples in Usage" do
     it "detects from bytes and from an IO" do
       shows('Claricle.detect(File.binread("logo.png"))   # => :png')
-      shows('Claricle.detect(File.open("logo.png", "rb")) # => :png')
+      shows('File.open("logo.png", "rb") { |io| Claricle.detect(io) } # => :png')
       expect(Claricle.detect(png)).to eq(:png)
       Tempfile.create(["logo", ".png"]) do |file|
         file.binmode

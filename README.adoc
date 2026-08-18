@@ -87,6 +87,10 @@ Claricle version 0.1.0
 | 4 | The operation failed, or something unexpected went wrong
 |===
 
+A command may also exit with a status of its own choosing, which is
+passed through unchanged; the codes above are the ones this library
+assigns.
+
 Exit code 1 is reserved for a nonconformant file, which arrives with
 `conform`.
 
@@ -99,7 +103,7 @@ Detect a format from a path or from bytes:
 require "claricle"
 
 Claricle.detect(File.binread("logo.png"))   # => :png
-Claricle.detect(File.open("logo.png", "rb")) # => :png
+File.open("logo.png", "rb") { |io| Claricle.detect(io) } # => :png
 
 image = Claricle::Image.from_path("logo.png")
 image.format    # => :png
@@ -140,8 +144,9 @@ lib/claricle/
 
 `Detector`, `Registry`, `Handlers::Base` and `Models::Base` are private
 constants. The public surface is `Claricle.detect`, `Claricle::Image`,
-`Claricle::Cli`, `Claricle::VERSION`, the `Claricle::Models` classes and
-the error classes.
+`Claricle::Cli` (including `Cli::Runner` and `Runner::Status`),
+`Claricle::VERSION`, the `Claricle::Models` classes and the error
+classes.
 
 === Adding a format
 
