@@ -342,7 +342,7 @@ D10 folded into D23.
 
 | # | Decision | Status |
 |---|----------|--------|
-| D1 | Four vertical-slice PRs; every item documents the commands and API it ships in README.adoc as part of that PR; 04 does the full rewrite | settled |
+| D1 | Four vertical-slice items; every item documents the commands and API it ships in README.adoc. **Amended 2026-08-18: an item may be split across several stacked PRs** — item 01 reached ~3,100 lines, which reviews as a skim rather than a review, so the author chose reviewability over one-PR-per-item. The constraint that survives: any PR that removes a documented command must carry the README correction with it, so no PR lands describing something it just deleted. 04 still does the full rewrite | settled — amended |
 | D2 | `Image#inspect` → `Image#inspection` (`Object#inspect` stays Ruby's debugging protocol; no module-level facade — it would shadow `Module#inspect`) | settled — report: renames an API the issue named |
 | D3 | Plain handler subclasses + `formats` declaration macro; frozen derived registry, no runtime mutation, no self-registration | settled |
 | D4 | All unified models are lutaml-model classes. The constraint is **three-segment on the reviewed line (0.8.19)** — `~> 0.8` would admit 0.9 through 0.99 and contradict D13. Model invariants (severity enum, non-nil message) are enforced at construction **and** deserialization — lutaml-model 0.8.19 accepts a bogus enum until `validate!` runs. `Report#valid` is derived, not stored, so appending an issue can't leave it stale | settled |

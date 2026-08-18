@@ -3,7 +3,12 @@ module Claricle
 
   type format = Symbol
 
-  def self.detect: (IO | String source) -> format
+  # Anything responding to #read, which includes StringIO, not only IO.
+  interface _Readable
+    def read: (*untyped) -> String?
+  end
+
+  def self.detect: (String | _Readable source) -> format
 
   class Error < StandardError
   end
@@ -25,6 +30,7 @@ module Claricle
     attr_reader format: format
     attr_reader path: String?
 
+    def initialize: (format: format, ?path: String?, ?content: String?) -> void
     def self.from_path: (String path) -> Image
     def self.from_content: (String content, ?format: format?) -> Image
 
@@ -35,8 +41,28 @@ module Claricle
     def convert: (to: format) -> untyped
   end
 
+  # Superclass unnamed for the same reason as the models: thor ships no
+  # RBS signature, so naming it fails validation.
+  class Cli
+    def self.exit_on_failure?: () -> bool
+    def version: () -> void
+
+    module Runner
+      class Status
+        RANGE: Range[Integer]
+        attr_reader code: Integer
+        def initialize: (Integer code) -> void
+      end
+
+      def self.run: (Array[String] argv, ?output: IO) -> Integer
+    end
+  end
+
   module Models
-    class Location < Lutaml::Model::Serializable
+    # Superclass deliberately unnamed: lutaml-model 0.8.19 ships no
+    # signature for Lutaml::Model::Serializable, and naming it makes
+    # `rbs validate` fail with NoSuperclassFoundError.
+    class Location
       attr_accessor byte_offset: Integer?
       attr_accessor byte_length: Integer?
       attr_accessor line: Integer?
@@ -45,7 +71,7 @@ module Claricle
       attr_accessor node_path: String?
     end
 
-    class Issue < Lutaml::Model::Serializable
+    class Issue
       SEVERITIES: Array[String]
 
       attr_accessor severity: String
@@ -54,7 +80,7 @@ module Claricle
       attr_accessor location: Location?
     end
 
-    class Report < Lutaml::Model::Serializable
+    class Report
       attr_accessor source_path: String?
       attr_accessor format: String?
       attr_accessor issues: Array[Issue]
@@ -65,7 +91,7 @@ module Claricle
       def valid: () -> Symbol
     end
 
-    class Inspection < Lutaml::Model::Serializable
+    class Inspection
       PARSE_STATUSES: Array[String]
 
       attr_accessor format: String?

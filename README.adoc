@@ -83,8 +83,8 @@ Claricle version 0.1.0
 
 | 0 | Success
 | 2 | Bad invocation -- unknown command, wrong arguments, missing file
-| 3 | The format was recognised but is not supported for that operation
-| 4 | An unexpected internal failure
+| 3 | The format is unknown, or is recognised but unsupported for that operation
+| 4 | The operation failed, or something unexpected went wrong
 |===
 
 Exit code 1 is reserved for a nonconformant file, which arrives with
@@ -140,14 +140,16 @@ lib/claricle/
 
 `Detector`, `Registry`, `Handlers::Base` and `Models::Base` are private
 constants. The public surface is `Claricle.detect`, `Claricle::Image`,
-the model classes and the error classes.
+`Claricle::Cli`, `Claricle::VERSION`, the `Claricle::Models` classes and
+the error classes.
 
 === Adding a format
 
 Not one file. A new format costs:
 
 . a handler class under `handlers/`, declaring its formats
-. an entry in `Registry::HANDLER_CLASSES`
+. a `require_relative` for it in `registry.rb` -- there is no autoloading
+. an entry in `Registry::HANDLER_CLASSES`, next to that require
 . a probe in `Detector` -- detection is one ordered sequence, not a
   per-handler sniffer, because the probes are heterogeneous and their
   order is load-bearing
