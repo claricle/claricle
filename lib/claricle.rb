@@ -7,6 +7,7 @@ require_relative "claricle/models/location"
 require_relative "claricle/models/issue"
 require_relative "claricle/models/report"
 require_relative "claricle/models/inspection"
+require_relative "claricle/registry"
 require_relative "claricle/detector"
 require_relative "claricle/cli"
 
@@ -66,5 +67,5 @@ module Claricle
   end
 
   private_class_method :accumulate, :conclusive?
-  private_constant :Detector, :EpsHeader, :ReservedNamespace
+  private_constant :Detector, :EpsHeader, :ReservedNamespace, :Registry, :Handlers
 end
