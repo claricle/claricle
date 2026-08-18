@@ -3,6 +3,10 @@
 require "thor"
 require_relative "claricle/version"
 require_relative "claricle/errors"
+require_relative "claricle/models/location"
+require_relative "claricle/models/issue"
+require_relative "claricle/models/report"
+require_relative "claricle/models/inspection"
 require_relative "claricle/detector"
 require_relative "claricle/cli"
 
