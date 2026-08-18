@@ -5,8 +5,9 @@ module Claricle
 
   class UnknownFormat < Error; end
 
-  # Bad arguments, conflicting flags, a refused destination. The only
-  # thing besides Thor::Error and ENOENT that means exit 2.
+  # Bad arguments, conflicting flags, a refused destination. Besides
+  # Thor::Error and ENOENT, the only *exception* that means exit 2 -- a
+  # command can still request 2 explicitly with a Status.
   class InvocationError < Error; end
 
   # A conversion that failed after dispatch. Reaches exit 4 through the

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "English"
 require "stringio"
 
 RSpec.describe Claricle::Cli::Runner do
@@ -47,9 +48,9 @@ RSpec.describe Claricle::Cli::Runner do
     described_class.run(argv, output: StringIO.new)
   end
 
-  before { stub_const("Claricle::Cli", probe) }
-
   describe "success" do
+    before { stub_const("Claricle::Cli", probe) }
+
     it "returns 0 when nothing is raised" do
       expect(run.call(["ok"])).to eq(0)
     end
@@ -66,6 +67,11 @@ RSpec.describe Claricle::Cli::Runner do
   end
 
   describe "Status" do
+    it "accepts both ends of the byte range" do
+      expect(status.new(0).code).to eq(0)
+      expect(status.new(255).code).to eq(255)
+    end
+
     it "refuses a code outside a byte" do
       expect { status.new(256) }.to raise_error(ArgumentError, /0\.\.255/)
       expect { status.new(-1) }.to raise_error(ArgumentError, /0\.\.255/)
@@ -80,7 +86,50 @@ RSpec.describe Claricle::Cli::Runner do
     end
   end
 
+  # Everything above drives a probe, so none of it would notice the real
+  # CLI losing its commands or its runner wiring.
+  describe "the real CLI" do
+    it "returns 0 for version and prints it" do
+      expect { expect(described_class.run(["version"])).to eq(0) }
+        .to output(/Claricle version/).to_stdout
+    end
+
+    it "returns 2 for an unknown command" do
+      expect(described_class.run(["nope"], output: StringIO.new)).to eq(2)
+    end
+
+    # Thor contributes help itself, so assert the deleted ones are gone
+    # rather than that version stands alone.
+    it "no longer exposes the deleted commands" do
+      expect(Claricle::Cli.all_commands.keys).to include("version")
+      expect(Claricle::Cli.all_commands.keys)
+        .not_to include("validate", "convert", "compress")
+    end
+  end
+
+  # The executable is the only place `exit` is called, and nothing above
+  # would notice if it stopped passing the runner's result through.
+  describe "exe/claricle" do
+    root = File.expand_path("../..", __dir__)
+
+    run_exe = lambda do |*args|
+      system(RbConfig.ruby, "-I#{File.join(root, "lib")}", File.join(root, "exe", "claricle"),
+             *args, out: File::NULL, err: File::NULL)
+      $CHILD_STATUS.exitstatus
+    end
+
+    it "exits 0 for version" do
+      expect(run_exe.call("version")).to eq(0)
+    end
+
+    it "exits with the runner's status for an unknown command" do
+      expect(run_exe.call("nope")).to eq(2)
+    end
+  end
+
   describe "the exit map" do
+    before { stub_const("Claricle::Cli", probe) }
+
     {
       2 => %w[enoent invocation],
       3 => %w[unknown unsupported],
@@ -105,6 +154,8 @@ RSpec.describe Claricle::Cli::Runner do
   end
 
   describe "exits that are not errors" do
+    before { stub_const("Claricle::Cli", probe) }
+
     it "returns the status a command exited with" do
       expect(run.call(%w[quit 7])).to eq(7)
     end
@@ -135,11 +186,28 @@ RSpec.describe Claricle::Cli::Runner do
   end
 
   describe "output" do
+    before { stub_const("Claricle::Cli", probe) }
+
     it "writes the message to the given stream, not stdout" do
       stream = StringIO.new
       expect { described_class.run(%w[boom standard], output: stream) }
         .not_to output.to_stdout
-      expect(stream.string).to include("claricle: plain")
+      expect(stream.string).to include("plain")
+    end
+
+    # "claricle: missing gem" is not much help when the class was
+    # LoadError, so an unexpected failure names its class.
+    it "names the class of an unexpected failure" do
+      stream = StringIO.new
+      described_class.run(%w[boom load], output: stream)
+      expect(stream.string).to eq("claricle: LoadError: missing gem\n")
+    end
+
+    # A mapped Claricle error already reads as a sentence.
+    it "does not name the class of a mapped error" do
+      stream = StringIO.new
+      described_class.run(%w[boom unknown], output: stream)
+      expect(stream.string).to eq("claricle: no signature\n")
     end
   end
 end

@@ -13,8 +13,10 @@ module Claricle
     end
 
     # Turns an exception into a process status. `run` returns an Integer
-    # and never exits; only exe/claricle exits, so every code is reachable
-    # from a spec without trapping SystemExit.
+    # for everything it maps, and never exits -- only exe/claricle exits,
+    # so every code is reachable from a spec without trapping SystemExit.
+    # Interrupt and other signals are deliberately not mapped and do
+    # propagate, so Ctrl-C behaves like Ctrl-C.
     module Runner
       # A command sets its status by returning one of these. A bare Integer
       # is ignored, because thor passes a command's return value straight
@@ -43,7 +45,7 @@ module Claricle
           # Thor turns Errno::EPIPE into SystemExit(0) even under debug,
           # and a command may exit deliberately. Neither is an error.
           # The status still has to be a byte: `exit 256` reports success.
-          in_range(e.status)
+          bounded_status(e.status)
         rescue StandardError, ScriptError, SystemStackError => e
           output.puts(error_message(e))
           exit_code(e)
@@ -53,7 +55,7 @@ module Claricle
 
         # Returns rather than raises: an ArgumentError from here would be
         # inside the SystemExit rescue and could not reach the next clause.
-        def in_range(code)
+        def bounded_status(code)
           Status::RANGE.cover?(code) ? code : 4
         end
 
@@ -65,8 +67,13 @@ module Claricle
           end
         end
 
+        # An unexpected failure names its class: "claricle: missing gem" is
+        # not much help when the class was LoadError. A mapped Claricle
+        # error already reads as a sentence, so it does not need one.
         def error_message(error)
-          "claricle: #{error.message}"
+          return "claricle: #{error.message}" if error.is_a?(Error) || error.is_a?(Thor::Error)
+
+          "claricle: #{error.class}: #{error.message}"
         end
       end
     end
