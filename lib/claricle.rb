@@ -9,6 +9,7 @@ require_relative "claricle/models/report"
 require_relative "claricle/models/inspection"
 require_relative "claricle/registry"
 require_relative "claricle/detector"
+require_relative "claricle/image"
 require_relative "claricle/cli"
 
 module Claricle
