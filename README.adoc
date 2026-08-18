@@ -6,65 +6,154 @@ image:https://github.com/ribose/claricle/actions/workflows/test.yml/badge.svg["B
 
 == Purpose
 
-Claricle is a comprehensive image utility gem that provides tools for image
-validation, format conversion, compression, and vector graphics processing.
+Claricle is a Ruby library and CLI for working with image files. It
+detects a file's format from its bytes and gives one object and one set
+of models to work with, wrapping specialist tools behind a single API.
 
-The gem integrates functionality from multiple specialized tools including
-pngconform, svgconform, and vectory into a unified interface, making it easier
-to work with various image formats in Ruby applications.
-
-This library is particularly useful for applications that need to:
-
-* Validate image files for conformance to standards
-* Convert between different image formats
-* Compress images while maintaining quality
-* Process vector graphics programmatically
-
-== Etymology & Symbolism
-
-[cols="1,2,3",options="header"]
-|===
-|Part
-|Root
-|Meaning
-
-|clari-
-|Latin _clārus_
-|"clear, bright, famous" -- root of clarity, clarify
-
-|-cle
-|Latin _cle_ (from _particula_)
-|"small particle" -- like particle, fascicle
-|===
-
-*Combined:* "Clear particle" or "Bright essence"
-
-Perfect metaphor:
-
-* *Validation* → clarify every pixel/particle
-* *Conversion* → preserve the clear essence
-* *Compression* → bright clarity in every bit
-* *Ruby* → gem-like, small but brilliant
-
-== Features
+Format detection ships today. Inspection, conformance checking and
+conversion are being built on top of it.
 
 [NOTE]
 ====
-This is currently a minimal shim release to reserve the gem name.
-Full functionality will be implemented in future versions.
+Version 0.1.0 was a name reservation. Its `validate`, `convert` and
+`compress` commands printed "coming soon" and did nothing; they have
+been removed rather than left in place. Its metadata also advertised
+image compression -- that was never implemented and is no longer
+planned. Rendering, editing and WMF conversion are likewise out of
+scope.
 ====
 
-Planned features:
+== Etymology & Symbolism
 
-* PNG validation and conformance checking (via pngconform)
-* SVG validation and processing (via svgconform)
-* Vector graphics manipulation (via vectory)
-* Image format conversion utilities
-* Image compression with quality preservation
-* Command-line interface for all operations
-* Ruby API for programmatic access
-* Batch processing capabilities
-* Comprehensive error reporting
+*Claricle* = *Clari* (clarity) + *cle* (particle)
+
+*Combined:* "Clear particle" or "Bright essence"
+
+The name reflects what the library is for:
+
+* *Detection* -> know exactly what a file is
+* *Validation* -> clarify every pixel
+* *Conversion* -> preserve the clear essence
+* *Ruby* -> gem-like, small but brilliant
+
+== What works today
+
+* Format detection for PNG, SVG, EMF, WMF, EPS, PS and PDF
+* `Claricle::Image`, built from a path or from bytes
+* A unified issue and report model, serialising to and from JSON
+* An error taxonomy mapped to documented CLI exit codes
+
+== What does not work yet
+
+* `inspect`, `conform` and `convert` -- the handler registry ships
+  empty, so every operation raises `Claricle::UnsupportedFormat`
+* WMF beyond detection. `detect` returns `:wmf`, but no handler
+  registers it, so every operation on a WMF raises
+  `UnsupportedFormat`. That is deliberate: the upstream parser this
+  library would use reports "WMF parser not yet implemented"
+
+== Command Line Interface
+
+=== Available commands
+
+[source,sh]
+----
+$ claricle help
+Commands:
+  claricle help [COMMAND]  # Describe available commands or one specific command
+  claricle version         # Display Claricle version
+----
+
+The operations are added as they are implemented, so `claricle help`
+never lists a command that does nothing.
+
+=== Version
+
+[source,sh]
+----
+$ claricle version
+Claricle version 0.1.0
+----
+
+=== Exit codes
+
+[cols="1,4"]
+|===
+| Code | Meaning
+
+| 0 | Success
+| 2 | Bad invocation -- unknown command, wrong arguments, missing file
+| 3 | The format was recognised but is not supported for that operation
+| 4 | An unexpected internal failure
+|===
+
+Exit code 1 is reserved for a nonconformant file, which arrives with
+`conform`.
+
+== Usage
+
+Detect a format from a path or from bytes:
+
+[source,ruby]
+----
+require "claricle"
+
+Claricle.detect(File.binread("logo.png"))   # => :png
+Claricle.detect(File.open("logo.png", "rb")) # => :png
+
+image = Claricle::Image.from_path("logo.png")
+image.format    # => :png
+image.content   # read lazily, once
+----
+
+`Image.from_path` streams the file while detecting. `Claricle.detect`
+accepts a String of bytes or an IO; an IO is read to EOF from wherever
+it currently sits and is never rewound.
+
+Bytes matching no known signature raise `Claricle::UnknownFormat`. A
+format that is recognised but unhandled raises
+`Claricle::UnsupportedFormat` -- two different answers to two different
+questions.
+
+Hand a delegate a real path, whichever way the image was built:
+
+[source,ruby]
+----
+Claricle::Image.from_content(bytes, format: :png).with_path do |path|
+  # a temporary file exists here, and only here
+end
+----
+
+== Architecture
+
+[source]
+----
+lib/claricle/
+  detector.rb          # magic-byte and XML-root format detection
+  image.rb             # the object every operation takes
+  registry.rb          # frozen format -> handler map, empty today
+  handlers/base.rb     # what a handler subclasses
+  models/              # Location, Issue, Report, Inspection
+  errors.rb            # Error, UnknownFormat, UnsupportedFormat, ...
+  cli.rb               # Thor CLI and the exit-code Runner
+----
+
+`Detector`, `Registry`, `Handlers::Base` and `Models::Base` are private
+constants. The public surface is `Claricle.detect`, `Claricle::Image`,
+the model classes and the error classes.
+
+=== Adding a format
+
+Not one file. A new format costs:
+
+. a handler class under `handlers/`, declaring its formats
+. an entry in `Registry::HANDLER_CLASSES`
+. a probe in `Detector` -- detection is one ordered sequence, not a
+  per-handler sniffer, because the probes are heterogeneous and their
+  order is load-bearing
+. for an inbound conversion, an entry in the source handler's target
+  list together with its feature-loss rules
+
 
 == Installation
 
@@ -89,157 +178,6 @@ Or install it yourself as:
 $ gem install claricle
 ----
 
-== Command Line Interface
-
-The `claricle` command provides utilities for working with image files.
-
-=== Available Commands
-
-Get help on available commands:
-
-[source,sh]
-----
-$ claricle help
-Commands:
-  claricle compress FILE_PATTERN  # Compress image files (placeholder)
-  claricle convert SOURCE DEST    # Convert image formats (placeholder)
-  claricle help [COMMAND]         # Describe available commands or one specific command
-  claricle validate FILE_PATTERN  # Validate image files (placeholder)
-  claricle version                # Display Claricle version
-----
-
-=== Version Information
-
-Display the installed version:
-
-[source,sh]
-----
-$ claricle version
-Claricle version 0.1.0
-----
-
-=== Validation (Placeholder)
-
-[NOTE]
-====
-This functionality is not yet implemented in this shim release.
-====
-
-Future usage:
-
-[source,sh]
-----
-# Validate a single image file
-$ claricle validate image.png
-
-# Validate multiple files
-$ claricle validate *.svg
-
-# Validate files using patterns
-$ claricle validate "images/*.png"
-----
-
-=== Conversion (Placeholder)
-
-[NOTE]
-====
-This functionality is not yet implemented in this shim release.
-====
-
-Future usage:
-
-[source,sh]
-----
-# Convert between formats
-$ claricle convert image.png image.svg
-$ claricle convert logo.svg logo.png
-----
-
-=== Compression (Placeholder)
-
-[NOTE]
-====
-This functionality is not yet implemented in this shim release.
-====
-
-Future usage:
-
-[source,sh]
-----
-# Compress image files
-$ claricle compress image.png
-$ claricle compress *.jpg
-----
-
-== Usage
-
-=== Basic Example (Future)
-
-[source,ruby]
-----
-require 'claricle'
-
-# Validate an image
-validator = Claricle::Validator.new
-result = validator.validate('image.png')
-
-if result.valid?
-  puts "Image is valid!"
-else
-  puts "Validation errors:"
-  result.errors.each { |error| puts "  - #{error}" }
-end
-
-# Convert image format
-converter = Claricle::Converter.new
-converter.convert('image.png', 'image.svg')
-
-# Compress image
-compressor = Claricle::Compressor.new
-compressor.compress('image.png', quality: 85)
-----
-
-== Architecture
-
-=== Current Structure
-
-[source]
-----
-Claricle (Gem)
-    │
-    ├── CLI (Thor-based command-line interface)
-    │   ├── validate command (placeholder)
-    │   ├── convert command (placeholder)
-    │   ├── compress command (placeholder)
-    │   └── version command (implemented)
-    │
-    └── Core Module (placeholder for future components)
-        ├── Validator (future: PNG, SVG validation)
-        ├── Converter (future: format conversion)
-        ├── Compressor (future: image compression)
-        └── VectorProcessor (future: vector graphics)
-----
-
-=== Future Architecture
-
-The planned architecture will integrate specialized tools:
-
-[source]
-----
-┌─────────────────────────────────────────────────────────┐
-│                    Claricle Gem                         │
-│                                                         │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
-│  │  PNG Module  │  │  SVG Module  │  │Vector Module │ │
-│  │              │  │              │  │              │ │
-│  │ pngconform   │  │ svgconform   │  │   vectory    │ │
-│  └──────────────┘  └──────────────┘  └──────────────┘ │
-│                                                         │
-│  ┌────────────────────────────────────────────────┐   │
-│  │         Unified API & CLI Interface             │   │
-│  └────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────┘
-----
 
 == Development
 

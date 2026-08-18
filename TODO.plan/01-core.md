@@ -160,9 +160,18 @@ dependency where marked ⚙):
   Later items extend this baseline; 04 does the final rewrite. Merged
   source should never claim capabilities it lacks, release or no
   release.
-- **Require order** in `lib/claricle.rb`: thor, emf, lutaml/model,
-  version, errors, models, detector, handlers/base, registry (AFTER
-  handlers — `HANDLERS` derives at load), image, cli.
+- **Require order is no longer load-bearing.** Every file requires what
+  it references, so each loads standalone — verified for `detector`,
+  `image`, `registry`, `errors`, `handlers/base` and the models. That
+  deliberately replaced the original prescription (thor, emf,
+  lutaml/model, version, errors, models, detector, handlers/base,
+  registry, image, cli), which existed only because files relied on the
+  entry point to have loaded their constants first. `registry.rb`
+  requires `handlers/base` itself, next to the `HANDLER_CLASSES` entries
+  that name those classes; `detector.rb` requires `emf` and `rexml`;
+  `models/base.rb` requires `lutaml/model`. `lib/claricle.rb` still
+  requires in a sensible reading order, but nothing breaks if it does
+  not.
 
 ## Do
 

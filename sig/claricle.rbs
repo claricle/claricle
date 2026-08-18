@@ -1,4 +1,81 @@
 module Claricle
   VERSION: String
-  # See the writing guide of rbs: https://github.com/ruby/rbs#guides
+
+  type format = Symbol
+
+  def self.detect: (IO | String source) -> format
+
+  class Error < StandardError
+  end
+
+  class UnknownFormat < Error
+  end
+
+  class InvocationError < Error
+  end
+
+  class ConversionError < Error
+  end
+
+  class UnsupportedFormat < Error
+    def initialize: (untyped format, ?untyped operation, ?target: untyped) -> void
+  end
+
+  class Image
+    attr_reader format: format
+    attr_reader path: String?
+
+    def self.from_path: (String path) -> Image
+    def self.from_content: (String content, ?format: format?) -> Image
+
+    def content: () -> String
+    def with_path: [T] () { (String path) -> T } -> T
+    def inspection: () -> untyped
+    def conformance_report: () -> untyped
+    def convert: (to: format) -> untyped
+  end
+
+  module Models
+    class Location < Lutaml::Model::Serializable
+      attr_accessor byte_offset: Integer?
+      attr_accessor byte_length: Integer?
+      attr_accessor line: Integer?
+      attr_accessor column: Integer?
+      attr_accessor chunk: String?
+      attr_accessor node_path: String?
+    end
+
+    class Issue < Lutaml::Model::Serializable
+      SEVERITIES: Array[String]
+
+      attr_accessor severity: String
+      attr_accessor code: String?
+      attr_accessor message: String
+      attr_accessor location: Location?
+    end
+
+    class Report < Lutaml::Model::Serializable
+      attr_accessor source_path: String?
+      attr_accessor format: String?
+      attr_accessor issues: Array[Issue]
+      attr_accessor profile: String?
+      attr_accessor validator_version: String?
+
+      # Derived from issues on read, never stored.
+      def valid: () -> Symbol
+    end
+
+    class Inspection < Lutaml::Model::Serializable
+      PARSE_STATUSES: Array[String]
+
+      attr_accessor format: String?
+      attr_accessor width: Float?
+      attr_accessor height: Float?
+      attr_accessor dpi: Float?
+      attr_accessor color_space: String?
+      attr_accessor meta: Hash[untyped, untyped]?
+      attr_accessor parse_status: String
+      attr_accessor issues: Array[Issue]
+    end
+  end
 end
