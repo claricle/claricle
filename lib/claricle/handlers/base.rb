@@ -9,7 +9,15 @@ module Claricle
     # asked for, so an unfinished handler says so rather than returning nil.
     class Base
       class << self
+        # One declaration per handler, refused on a second call. The
+        # registry derives a frozen map at load, so a later redeclaration
+        # would leave the two disagreeing about who owns a format --
+        # measured: after `Png.formats(:svg)` the registry still answered
+        # :png while the handler claimed :svg. Refusing makes that
+        # unrepresentable rather than merely unlikely.
         def formats(*symbols)
+          raise Error, "#{self} already declared formats #{@formats.inspect}" if @formats
+
           @formats = symbols.freeze
         end
 

@@ -10,11 +10,12 @@ module Claricle
     # one lifecycle -- normalize, validate, freeze -- at both doors.
     class Base < Lutaml::Model::Serializable
       DESERIALIZING = :claricle_models_deserializing
+      BACK_REFERENCES = %i[@lutaml_parent @lutaml_root].freeze
       # Lutaml builds every model -- parent and nested alike -- by calling
       # `new` with exactly this and populating it afterwards. Direct
       # construction always carries real attributes.
       BLANK_CONSTRUCTION = [:lutaml_register].freeze
-      private_constant :DESERIALIZING, :BLANK_CONSTRUCTION
+      private_constant :DESERIALIZING, :BLANK_CONSTRUCTION, :BACK_REFERENCES
 
       # Deserialization builds a blank instance and populates it afterwards,
       # so `initialize` must not finalize during that window. Neither the
@@ -59,8 +60,17 @@ module Claricle
       # dump -- so a restored model would be mutable while claiming to be
       # sealed, which also stops a later seal from freezing it. Restore the
       # state, drop that claim, and run the lifecycle again.
+      # lutaml threads a parent and root back-reference through every
+      # nested model, and they are cyclic. Marshal serialises the whole
+      # graph, and marshal_load finalizes before the graph is whole, so an
+      # Issue lifted out of a deserialized Report raised ValidationError on
+      # a round trip. They are lutaml's bookkeeping rather than our data,
+      # and a detached copy has no parent by definition, so they are left
+      # out of the dump.
       def marshal_dump
-        instance_variables.to_h { |ivar| [ivar, instance_variable_get(ivar)] }
+        instance_variables
+          .reject { |ivar| BACK_REFERENCES.include?(ivar) }
+          .to_h { |ivar| [ivar, instance_variable_get(ivar)] }
       end
 
       def marshal_load(state)

@@ -227,6 +227,44 @@ RSpec.describe Claricle::Models do
       expect(report.issues).to be_frozen
     end
 
+    # lutaml threads cyclic parent/root back-references through every
+    # nested model. Dumping them made marshal_load finalize against a
+    # half-restored graph, so an Issue lifted out of a deserialized Report
+    # raised ValidationError -- while a directly-built Issue round-tripped
+    # fine, which is why the example below never caught it.
+    describe "a model nested inside a deserialized parent" do
+      let(:parent) do
+        models::Report.from_json(
+          {
+            format: "png", valid: false,
+            issues: [{ severity: "error", message: "m",
+                       location: { chunk: "IDAT", byte_offset: 33 } }]
+          }.to_json
+        )
+      end
+
+      it "round-trips once lifted out of its parent" do
+        # Not named `issue`: that is a lambda local at describe scope, and
+        # assigning it here would rebind it for every later example.
+        nested = parent.issues.first
+        restored = Marshal.load(Marshal.dump(nested))
+
+        expect(restored.to_json).to eq(nested.to_json)
+        expect(restored).to be_frozen
+      end
+
+      it "round-trips at the second level of nesting" do
+        location = parent.issues.first.location
+        restored = Marshal.load(Marshal.dump(location))
+
+        expect(restored.to_json).to eq(location.to_json)
+      end
+
+      it "still round-trips the parent itself" do
+        expect(Marshal.load(Marshal.dump(parent)).to_json).to eq(parent.to_json)
+      end
+    end
+
     # Marshal skips initialize, and @claricle_sealed survives the dump, so
     # a restored model would be mutable while claiming to be sealed.
     it "re-runs the lifecycle on an unmarshalled model" do
