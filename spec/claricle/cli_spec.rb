@@ -107,6 +107,82 @@ RSpec.describe Claricle::Cli::Runner do
     end
   end
 
+  describe "inspect" do
+    let(:png) { File.join(__dir__, "..", "fixtures", "inspect", "valid.png") }
+
+    it "prints the metadata and returns 0" do
+      expect { expect(described_class.run(["inspect", png])).to eq(0) }
+        .to output(/format: png.*dimensions: 4\.0x3\.0.*parse status: ok/m).to_stdout
+    end
+
+    # Empty collections have to survive serialization, or a consumer
+    # cannot tell "no issues" from "field absent".
+    it "keeps an empty issues array under --json" do
+      expect { described_class.run(["inspect", png, "--json"]) }
+        .to output(/"issues":\[\]/).to_stdout
+    end
+
+    it "reports a file that does not parse, and still exits 0" do
+      failed = File.join(__dir__, "..", "fixtures", "inspect", "signature_only.png")
+
+      expect { expect(described_class.run(["inspect", failed])).to eq(0) }
+        .to output(/parse status: failed/).to_stdout
+    end
+
+    it "exits 2 for a missing file" do
+      expect(described_class.run(["inspect", "no/such.png"], output: StringIO.new)).to eq(2)
+    end
+
+    # A typo is an ordinary user error, so it reads as a sentence rather
+    # than naming Errno::ENOENT at someone who mistyped a filename.
+    it "does not name the error class for a missing file" do
+      stream = StringIO.new
+      described_class.run(["inspect", "no/such.png"], output: stream)
+
+      expect(stream.string).to start_with("claricle: No such file or directory")
+    end
+
+    it "exits 3 for bytes it cannot identify" do
+      Tempfile.create(["junk", ".bin"]) do |file|
+        file.write("not an image at all")
+        file.flush
+
+        expect(described_class.run(["inspect", file.path], output: StringIO.new)).to eq(3)
+      end
+    end
+
+    # Detected but unhandled is a different answer from unrecognised, and
+    # both are exit 3 -- so assert the message, not just the code.
+    it "exits 3 for a detected format with no handler" do
+      stream = StringIO.new
+      wmf = File.join(__dir__, "..", "fixtures", "detector", "std.wmf")
+
+      expect(described_class.run(["inspect", wmf], output: stream)).to eq(3)
+      expect(stream.string).to match(/not supported/)
+    end
+  end
+
+  describe "formats" do
+    it "prints what png can actually do" do
+      expect { expect(described_class.run(["formats"])).to eq(0) }
+        .to output(/png\tinspect/).to_stdout
+    end
+
+    # The command must not advertise an operation that is still a stub.
+    # Asserting the whole line, because "prints no conform" would also
+    # pass if the command printed nothing at all.
+    it "does not claim conform or convert yet" do
+      expect { described_class.run(["formats"]) }
+        .to output("png\tinspect\n").to_stdout
+    end
+
+    it "emits a fixed row shape under --json" do
+      expect { described_class.run(["formats", "--json"]) }
+        .to output(%([{"format":"png","inspect":true,"conform":false,"convert":false,"convert_to":[]}]\n))
+        .to_stdout
+    end
+  end
+
   # The executable is the only place `exit` is called, and nothing above
   # would notice if it stopped passing the runner's result through.
   describe "exe/claricle" do

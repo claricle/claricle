@@ -359,7 +359,7 @@ D10 folded into D23.
 | D14 | **WMF leaves v1 entirely — proposed, not forced.** Missing upstream support does not by itself decide the question; implementing a WMF parser, or waiting for one, are defensible alternatives, exactly as D22 acknowledges for PostScript. What is forced is that it cannot ship *through `emf` 0.1.0*. Released `emf` 0.1.0 raises `WMF parser not yet implemented`, so no WMF operation can ship through the chosen delegate. The detector still recognises `:wmf`; no handler registers it, so it raises `UnsupportedFormat` → exit 3, which is the honest answer. Note the issue *body* does ask for WMF conformance even though the acceptance checklist omits it | settled — report: narrows the format list, though the issue already prescribes UnsupportedFormat here |
 | D15 | **Dimensions follow the shape issue #1 already sketched** — `#<Inspection format=:emf, width=800, height=600, dpi=96, meta={...}>`. So `width`/`height` are plain numbers in the format's own device or user units, `dpi` is a separate nullable field carrying physical resolution where the format records it, and everything format-native goes in `meta`. Sources measured: EMF `header.device_pixels` with `device_mm` (100×50 px against 26×13 mm, so dpi derives); PNG `ImageInfo` from IHDR plus pHYs; SVG declared width/height with the viewBox in `meta`; EPS/PS BoundingBox. Normalize to a consistent numeric type — vectory returns Integer for SVG and Float for EPS. **Cross-format dimension equality is never asserted**, because `3×1` as SVG and `96×48` as EPS are both correct answers about different things | settled |
 | D16 | PDF conformance. **Two things need sign-off, not one**: omitting Arlington, *and* substituting `Validator.validate` for it — that call is a pre-write integrity check (catalog, pages, MediaBox, references), not ISO 32000 conformance, so calling it "conform" is itself a narrowing. Generic `conform` runs `Validator.validate` (structural). Named standards are opt-in via `--profile NAME`, mapping to `Pdfrb::Conformance::{PdfA,PdfUA,PdfX,PdfVT,Pades,Ltv,Pdf2AF,TaggedPdf}` — **measured working**, returning `Violation{rule_id, message, object, severity, spec_clause}`. Note `PdfA`/`PdfX`/`PdfVT` take a `level:` keyword and `PdfUA` does not, so the adapter is per-profile, not uniform. **Arlington is not delivered in v1** — pdfrb ships the grammar but no document runner, so honouring the issue literally means writing that validator ourselves | settled — report: Arlington was named in the issue and is not runnable |
-| D17 | `Inspection#valid` becomes `parse_status` (`:ok`/`:failed`), and inspection stops making any validity claim — it would otherwise mean five different things across five delegates, and vectory parses SVG in Nokogiri RECOVER mode so a repaired file would read as valid. Issue #1 names a `valid` field on inspection, so this changes the public model | settled — report: renames a field the issue named |
+| D17 | `Inspection#valid` becomes `parse_status` (`"ok"`/`"failed"` — **amended 2026-08-18**: this row first wrote them as Symbols, but the shipped model declares `PARSE_STATUSES = %w[ok failed]` on a `:string` attribute and silently casts a Symbol on write, so the observable value and the JSON are always Strings), and inspection stops making any validity claim — it would otherwise mean five different things across five delegates, and vectory parses SVG in Nokogiri RECOVER mode so a repaired file would read as valid. Issue #1 names a `valid` field on inspection, so this changes the public model | settled — report: renames a field the issue named |
 | D18 | EMF+ is surfaced as inspection metadata only — **proposed, same reasoning as D14**: the released parser raises "not yet implemented", but writing one is a defensible alternative the author may prefer. its payload is never validated, because the released EMF+ parser is unimplemented. Issue #1 includes EMF+ conformance | settled — report: narrows conformance coverage |
 | D19 | CLI batch accepts `FILE...` positionals **and** honours the issue's `PATTERN` examples: a positional is a literal path when it names an existing file, and a glob otherwise. `--pattern` forces glob interpretation for the ambiguous case (a filename legitimately containing glob characters). This satisfies the issue's CLI as written without the unquoted-glob trap | settled — supports both, so nothing is deviated from |
 | D20 | PNG issues carry full `location` — `{chunk, byte_offset}` — via `ValidationService.new(reader, path)` then `context.all_errors`, measured returning `{chunk_type: "IDAT", severity: :error, offset: 33}`. Only the `validate_file` convenience wrapper discards them, so the handler must not use it. Issue #1's location contract is met for PNG | settled — an earlier draft wrongly escalated this |
@@ -386,7 +386,7 @@ status reserved for nonconformance. Each delegate gets an allowlist of
 expected malformed-input exceptions, per operation and per stage.
 **What an allowlisted failure means depends on the operation**: under
 `conform` it is nonconformance and exits 1; under `inspect` it is
-`parse_status: :failed` and exits 0, because reporting that a file
+`parse_status` `"failed"` and exits 0, because reporting that a file
 doesn't parse is a successful inspection. Anything off the allowlist is
 an unexpected fault and exits 4 under either. Without that list, 1
 versus 4 is decided by which delegate happens to report via a return
@@ -413,14 +413,22 @@ EPS/PS conform (D22, no conformance basis exists).
 All twelve conversion edges ship, because all twelve were measured
 working. The earlier subset was caution, not evidence.
 
-**`capabilities` tracks what has shipped, never what is planned.** A
-handler declares an operation in the same commit that implements it, so
-`claricle formats` is truthful at every commit — including the commits
-inside an item, not just at item boundaries. 02 declares `inspect`
-only; 03 adds `conform` handler by handler; 04 adds `convert` plus each
-handler's target list. The `formats` output spec moves with the
-declarations, since the command's expected output changes when
-capabilities do.
+**`capabilities` tracks what has shipped, never what is planned —
+because it is derived, not declared.** A handler's capabilities are
+read off the operations it overrides on `Handlers::Base`, so
+`claricle formats` is truthful at every commit, including the commits
+inside an item. Amended 2026-08-18: an earlier draft used a
+`capabilities` class macro. A declaration is a second place to state
+what the code already says, and it can advertise an operation that is
+still `Base`'s raising stub — the exact lie the macro existed to
+prevent. Deriving makes that unrepresentable.
+
+So 02 gets `inspect` by implementing `inspection`; 03 gets `conform`
+the same way, handler by handler; 04 gets `convert`. Item 04's
+per-handler **target list stays a real declaration**, because a list of
+targets is data rather than a boolean. The `formats` output spec still
+moves with the handlers, since the command's expected output changes as
+operations land.
 
 ## Acceptance criteria → items
 
