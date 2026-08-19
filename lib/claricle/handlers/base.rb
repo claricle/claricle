@@ -32,15 +32,15 @@ module Claricle
       # `inspection` reports `inspect` (D2 renamed the method because Ruby
       # owns `inspect`, but the command is still `inspect`).
       def inspection(image)
-        raise UnsupportedFormat.new(image.format, operation: :inspect)
+        raise UnsupportedFormat.new(image.format, :inspect)
       end
 
       def conformance_report(image)
-        raise UnsupportedFormat.new(image.format, operation: :conform)
+        raise UnsupportedFormat.new(image.format, :conform)
       end
 
       def convert(image, to:)
-        raise UnsupportedFormat.new(image.format, operation: :convert, target: to)
+        raise UnsupportedFormat.new(image.format, :convert, target: to)
       end
     end
 
