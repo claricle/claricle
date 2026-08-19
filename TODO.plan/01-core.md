@@ -153,8 +153,11 @@ dependency where marked ⚙):
   `TargetRubyVersion: 3.2` + `Metrics/BlockLength` exclude `spec/**/*`
   (rubocop-rspec isn't wired in); CI matrix `['3.2', '3.3']`, extended
   to the newest stable Ruby the gemspec actually admits.
-- **Honesty baseline**: README.adoc, the gemspec description and
-  `sig/claricle.rbs` all describe reality as of 01 — the current README
+- **Honesty baseline**: README.adoc and the gemspec description
+  describe reality as of 01. (`sig/claricle.rbs` was part of this
+  baseline when 01 was written; the maintainer decided on 2026-08-19
+  to drop RBS entirely, so the follow-up PR deletes it.) The current
+  README
   advertises validation, conversion, compression and a fictional
   `Claricle::Validator` API, and the gemspec advertises compression.
   Later items extend this baseline; 04 does the final rewrite. Merged
@@ -204,7 +207,7 @@ subjects in quotes):
 7. CLI rebuild + Runner + spec (version → 0, unknown command → 2,
    `LoadError` → 4, `InvocationError` → 2, all three stubs gone).
    "feat: rebuild cli with exit-code runner"
-7b. Honesty baseline: README.adoc, gemspec description and `sig/`
+7b. Honesty baseline: README.adoc and the gemspec description
    describe only what exists. "docs: describe only shipped behaviour"
 8. Final wiring; full `bundle exec rake`; execution-diff against main —
    `bundle exec exe/claricle version`, `bundle exec exe/claricle help`,
@@ -230,7 +233,7 @@ subjects in quotes):
 - The detector accepts every SVG form vectory accepts, rejects foreign
   namespaces and decoys, and never resolves an external entity.
 - Execution-diff vs main shows ONLY: stubs gone, version unchanged,
-  README/gemspec/RBS truthful.
+  README/gemspec truthful.
 - Every ⚙ contract check ran against the installed gem and its outcome
   is recorded in the PR description. `Emf.detect_format` raising, the
   SVG root cases, lutaml-model's deferred validation and `tempfile`'s
@@ -245,5 +248,5 @@ subjects in quotes):
 {base,location,issue,report,inspection}.rb`, `lib/claricle/detector.rb`,
 `lib/claricle/registry.rb`, `lib/claricle/handlers/base.rb`,
 `lib/claricle/image.rb`, `lib/claricle/cli.rb`, `exe/claricle`,
-`README.adoc`, `sig/claricle.rbs`, `spec/claricle/*_spec.rb`,
+`README.adoc`, `spec/claricle/*_spec.rb`,
 `spec/fixtures/detector/`.
