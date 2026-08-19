@@ -263,6 +263,24 @@ RSpec.describe Claricle::Models do
       it "still round-trips the parent itself" do
         expect(Marshal.load(Marshal.dump(parent)).to_json).to eq(parent.to_json)
       end
+
+      # The cost of the fix above, pinned rather than left implicit. With
+      # the back-references dumped, a whole-Report copy kept its lutaml
+      # hierarchy and only a LIFTED nested model raised; excluding them
+      # reverses that -- the lifted model round-trips and the copied graph
+      # comes back detached. Claricle never reads lutaml_parent or
+      # lutaml_root, so nothing in this gem depends on it, but a consumer
+      # reaching for lutaml's hierarchy on a Marshal copy will find nil.
+      # Relinking is not available: Marshal restores depth-first, so every
+      # descendant is already frozen by the time the parent loads.
+      it "returns a copy detached from the lutaml hierarchy" do
+        copy = Marshal.load(Marshal.dump(parent))
+        nested = copy.issues.first
+
+        expect(nested.lutaml_parent).to be_nil
+        expect(nested.location.lutaml_parent).to be_nil
+        expect(copy.to_json).to eq(parent.to_json)
+      end
     end
 
     # Marshal skips initialize, and @claricle_sealed survives the dump, so
