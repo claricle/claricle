@@ -439,6 +439,24 @@ RSpec.describe "Claricle format detection" do
       expect { Claricle.detect(other_first) }.to raise_error(Claricle::UnknownFormat)
     end
 
+    # REXML collapses duplicates inside ONE declaration last-wins before
+    # handing over the parsed hash, so the raw source is re-read for the
+    # order XML actually specifies.
+    it "binds the first of two declarations inside a single ATTLIST" do
+      ours = %(xmlns CDATA #FIXED "#{svg_ns}")
+      theirs = %(xmlns CDATA #FIXED "http://example.com/other")
+
+      expect(Claricle.detect(doc("<!ATTLIST svg #{ours} #{theirs}>", "<svg/>"))).to eq(:svg)
+      expect { Claricle.detect(doc("<!ATTLIST svg #{theirs} #{ours}>", "<svg/>")) }
+        .to raise_error(Claricle::UnknownFormat)
+    end
+
+    it "reads an xmlns declared after an enumerated attribute" do
+      source = doc(%(<!ATTLIST svg kind (a|b) "a" xmlns CDATA #FIXED "#{svg_ns}">), "<svg/>")
+
+      expect(Claricle.detect(source)).to eq(:svg)
+    end
+
     it "does not apply another element's defaults to the root" do
       source = doc(%(<!ATTLIST other xmlns CDATA #FIXED "#{svg_ns}">), "<svg width='10'/>")
 
