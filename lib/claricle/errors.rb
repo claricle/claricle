@@ -9,7 +9,7 @@ module Claricle
   # the operation asked for. The class builds its own sentence: callers
   # pass what they were doing, not a phrase.
   class UnsupportedFormat < Error
-    def initialize(format, operation: nil, target: nil)
+    def initialize(format, operation = nil, target: nil)
       super(build_message(format, operation, target))
     end
 
