@@ -107,6 +107,13 @@ module Claricle
     # arbitrarily long prolog, so this is a sniffing limit, not a
     # complete one.
     SVG_PROLOG_BYTES = 8192
+    # One "name TYPE [#DEFAULT] value" group of an ATTLIST body, enough to
+    # recover declaration order. Values may be absent (#REQUIRED etc).
+    ATTLIST_DECLARATION = /
+      (?<name>[\w:.-]+)\s+
+      (?:\([^)]*\)|[A-Z]+(?:\s*\([^)]*\))?)\s*
+      (?:\#(?:REQUIRED|IMPLIED)|(?:\#FIXED\s+)?(?:"(?<dq>[^"]*)"|'(?<sq>[^']*)'))
+    /x
 
     CHUNK_BYTES = 4096
 
@@ -178,11 +185,26 @@ module Claricle
       # #FIXED "...">` was rejected as an unknown format. A specified
       # attribute wins over the declared default, hence the merge order.
       # XML accumulates ATTLIST declarations and the FIRST declaration of
-      # an attribute binds, so a second one neither replaces the element's
+      # an attribute binds, so a later one neither replaces the element's
       # earlier defaults nor overrides a duplicate.
+      #
+      # Duplicates *inside one* declaration need the raw source: REXML
+      # collapses them last-wins before handing over the parsed hash, so
+      # `<!ATTLIST svg xmlns ... "a" xmlns ... "b">` arrives as "b" where
+      # XML binds "a". The parsed values stay authoritative -- the raw
+      # scan only supplies the order, and only for keys REXML already
+      # reported, so a declaration it cannot read changes nothing.
       def collect_defaults(defaults, event)
         element = event[0]
-        defaults[element] = event[1].merge(defaults[element] || {})
+        parsed = event[1]
+        ordered = parsed.merge(first_declarations(event[2]).slice(*parsed.keys).compact)
+        defaults[element] = ordered.merge(defaults[element] || {})
+      end
+
+      def first_declarations(raw)
+        body = raw.to_s.sub(/\A<!ATTLIST\s+\S+/, "").sub(/>\s*\z/, "")
+        body.scan(ATTLIST_DECLARATION)
+            .each_with_object({}) { |(name, quoted, single), a| a[name] ||= quoted || single }
       end
 
       def root_attributes(event, defaults)
