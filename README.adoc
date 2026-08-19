@@ -144,8 +144,9 @@ end
 lib/claricle/
   detector.rb          # magic-byte and XML-root format detection
   image.rb             # the object every operation takes
-  registry.rb          # frozen format -> handler map, empty today
+  registry.rb          # frozen format -> handler map
   handlers/base.rb     # what a handler subclasses
+  handlers/png.rb      # PNG metadata
   models/              # Location, Issue, Report, Inspection
   errors.rb            # Error, UnknownFormat, UnsupportedFormat, ...
   cli.rb               # Thor CLI and the exit-code Runner
