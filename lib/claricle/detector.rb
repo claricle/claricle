@@ -10,7 +10,14 @@ module Claricle
     PNG_SIGNATURE = "\x89PNG\r\n\x1A\n".b.freeze
     PDF_SIGNATURE = "%PDF-".b.freeze
     POSTSCRIPT_SIGNATURE = "%!PS".b.freeze
-    EPS_TOKEN = "EPSF".b.freeze
+    # The EPSF spec puts `EPSF` or `EPSF-<version>` in the header as a
+    # whitespace-delimited field. A bare substring match calls
+    # "%!PS-Adobe-3.0 NOT-EPSFILE" and "... XEPSFY" EPS files, which the
+    # PostScript parser does not.
+    EPS_FIELD = /(?<![\w-])EPSF(?!\w)/
+    # The field match needs one byte either side of the token, so a
+    # window must carry that much context across a chunk boundary.
+    EPS_CARRY_BYTES = 5
     SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 
     # PostScript ends a line with CR, LF or CRLF.
@@ -21,6 +28,15 @@ module Claricle
     # FormatError and falls through to UnknownFormat. 512 is deliberate
     # slack over that floor -- no probe's correctness depends on it.
     HEADER_BYTES = 512
+    # The SVG probe stops at the first start element, but REXML holds one
+    # live string for the construct it is reading -- so a file beginning
+    # "<" with no ">" cost +52MB RSS for 1MB of input, and +217MB for
+    # 16MB. Bounding the prefix makes the worst case fixed instead of
+    # proportional. A conventional XML declaration plus a full SVG 1.1
+    # DOCTYPE is about 140 bytes, so 8192 is generous; XML permits an
+    # arbitrarily long prolog, so this is a sniffing limit, not a
+    # complete one.
+    SVG_PROLOG_BYTES = 8192
 
     CHUNK_BYTES = 4096
 
@@ -62,22 +78,55 @@ module Claricle
         eps_first_line?(source) ? :eps : :ps
       end
 
-      # Streams the first line looking for EPS_TOKEN. `gets` would
+      # Streams the first line looking for the EPSF field. `gets` would
       # materialise the whole line, and a newline-free %!PS file would
-      # allocate its full size -- the SVG probe never runs for PostScript,
-      # so nothing else absorbs that cost. PostScript ends a line with CR,
-      # LF or CRLF, so the scan stops at whichever comes first.
+      # allocate its full size -- the SVG probe never runs for
+      # PostScript, so nothing else absorbs that cost. PostScript ends a
+      # line with CR, LF or CRLF, so the scan stops at whichever comes
+      # first.
+      #
+      # The carry is sized for the *field* match, not a bare substring:
+      # the pattern inspects one byte either side of `EPSF`, so a token
+      # split across chunks needs its neighbours to travel with it.
       def eps_first_line?(source)
-        carry = "".b
-        while (chunk = source.read(CHUNK_BYTES))
-          window = carry + chunk.b
-          line_end = window.index(LINE_END)
-          return true if (line_end ? window[0, line_end] : window).include?(EPS_TOKEN)
-          return false if line_end
-
-          carry = window[-(EPS_TOKEN.bytesize - 1)..] || window
+        each_first_line_window(source) do |scan, final|
+          return eps_field?(scan, final: true) if final
+          return true if eps_field?(scan, final: false)
         end
         false
+      end
+
+      # Yields the first line a window at a time, flagging the window
+      # that ends it. The carry is sized for the *field* match, not a
+      # bare substring: the pattern inspects one byte either side of
+      # `EPSF`, so a token split across chunks needs its neighbours to
+      # travel with it. The line ending and the end of the file are both
+      # final -- a token against either is genuinely followed by nothing.
+      def each_first_line_window(source)
+        carry = "".b
+        loop do
+          chunk = source.read(CHUNK_BYTES)
+          # nil.to_s is "", so EOF needs no branch of its own here.
+          window = carry + chunk.to_s.b
+          stop = window.index(LINE_END)
+          final = !stop.nil? || chunk.nil?
+
+          yield(stop ? window[0, stop] : window, final)
+          return if final
+
+          carry = window[-EPS_CARRY_BYTES..] || window
+        end
+      end
+
+      # A match ending exactly at the buffer's edge had its trailing
+      # delimiter supplied by end-of-string rather than by the file, so
+      # unless this really is the end of the line it is deferred to the
+      # next window, where the following byte is known.
+      def eps_field?(scan, final:)
+        found = EPS_FIELD.match(scan)
+        return false unless found
+
+        final || found.end(0) < scan.bytesize
       end
 
       def metafile_format(header)
@@ -92,14 +141,31 @@ module Claricle
       # would turn a malformed file into an internal error rather than
       # UnknownFormat. Undecodable bytes already arrive as a ParseException.
       def svg?(source)
-        parser = REXML::Parsers::PullParser.new(source)
+        parser = REXML::Parsers::PullParser.new(bounded(source))
+        defaults = {}
         while parser.has_next?
           event = parser.pull
-          return svg_root?(event[0], event[1]) if event.start_element?
+          defaults[event[0]] = event[1] if event.event_type == :attlistdecl
+          return svg_root?(event[0], root_attributes(event, defaults)) if event.start_element?
         end
         false
       rescue REXML::ParseException, ArgumentError
         false
+      end
+
+      # XML 1.0 requires a processor to apply attribute defaults declared
+      # in the internal subset, and REXML's own DOM does -- so without
+      # this an SVG whose xmlns comes from `<!ATTLIST svg xmlns CDATA
+      # #FIXED "...">` was rejected as an unknown format. A specified
+      # attribute wins over the declared default, hence the merge order.
+      def root_attributes(event, defaults)
+        defaults.fetch(event[0], {}).merge(event[1])
+      end
+
+      # Only the prolog and the root start tag can matter here, and both
+      # fit well inside the bound.
+      def bounded(source)
+        StringIO.new(source.read(SVG_PROLOG_BYTES) || "")
       end
 
       def svg_root?(qname, attributes)

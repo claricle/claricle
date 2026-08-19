@@ -101,6 +101,35 @@ RSpec.describe "Claricle format detection" do
       with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:eps) }
     end
 
+    # EPSF is a whitespace-delimited field in the header, so a substring
+    # match called these EPS files. Measured against the PostScript
+    # parser, which calls both plain PostScript.
+    {
+      "%!PS-Adobe-3.0 XEPSFY" => "a token it is glued to on the left",
+      "%!PS-Adobe-3.0 NOT-EPSFILE" => "a hyphenated word containing it",
+      "%!PS-Adobe-3.0 EPSFILE" => "a longer word starting with it"
+    }.each do |header, why|
+      it "is plain PostScript for #{why}" do
+        expect(Claricle.detect("#{header}\n")).to eq(:ps)
+      end
+    end
+
+    it "accepts the bare EPSF field as well as a versioned one" do
+      expect(Claricle.detect("%!PS-Adobe-3.0 EPSF\n")).to eq(:eps)
+      expect(Claricle.detect("%!PS-Adobe-2.0 EPSF-1.2\n")).to eq(:eps)
+    end
+
+    # The field match reads one byte either side of the token, so a token
+    # straddling a chunk boundary needs its neighbours carried with it.
+    # Both a real field and a decoy are swept across the boundary.
+    it "decides the same way wherever the token falls across a chunk edge" do
+      (4085..4100).each do |offset|
+        padding = " " * (offset - 4)
+        expect(Claricle.detect("%!PS#{padding}EPSF-3.0\n")).to eq(:eps)
+        expect(Claricle.detect("%!PS#{padding}XEPSFY\n")).to eq(:ps)
+      end
+    end
+
     it "treats a bare %!PS as plain PostScript" do
       expect(Claricle.detect("%!PS")).to eq(:ps)
     end
@@ -331,6 +360,83 @@ RSpec.describe "Claricle format detection" do
         reader&.close
         writer&.close
       end
+    end
+  end
+
+  # A file beginning "<" with no ">" made REXML hold one live string for
+  # the construct it was reading: +52MB of RSS for 1MB of input, +217MB
+  # for 16MB. The probe now reads a bounded prolog, so the worst case is
+  # fixed rather than proportional to the file.
+  # XML 1.0 requires attribute defaults from the internal subset to be
+  # applied, and REXML's own DOM applies them -- so reading only the
+  # explicit root attributes rejected a valid SVG.
+  describe "attribute defaults declared in an internal DTD" do
+    def doc(attlist, root)
+      %(<?xml version="1.0"?>\n<!DOCTYPE svg [\n  #{attlist}\n]>\n#{root})
+    end
+
+    svg_ns = "http://www.w3.org/2000/svg"
+
+    it "takes xmlns from a #FIXED default when the root omits it" do
+      source = doc(%(<!ATTLIST svg xmlns CDATA #FIXED "#{svg_ns}">), "<svg width='10'/>")
+
+      expect(Claricle.detect(source)).to eq(:svg)
+    end
+
+    it "prefers an explicit xmlns over the declared default" do
+      source = doc(%(<!ATTLIST svg xmlns CDATA #FIXED "http://example.com/other">),
+                   %(<svg xmlns="#{svg_ns}"/>))
+
+      expect(Claricle.detect(source)).to eq(:svg)
+    end
+
+    it "still rejects a default naming some other namespace" do
+      source = doc(%(<!ATTLIST svg xmlns CDATA #FIXED "http://example.com/other">),
+                   "<svg width='10'/>")
+
+      expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+    end
+
+    it "does not apply another element's defaults to the root" do
+      source = doc(%(<!ATTLIST other xmlns CDATA #FIXED "#{svg_ns}">), "<svg width='10'/>")
+
+      expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+    end
+  end
+
+  describe "the SVG prolog bound" do
+    svg_tag = '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>'
+
+    it "still detects an ordinary SVG" do
+      expect(Claricle.detect(svg_tag)).to eq(:svg)
+    end
+
+    it "still detects one behind a declaration and a full DOCTYPE" do
+      declaration = %(<?xml version="1.0" encoding="UTF-8"?>\n)
+      doctype = %(<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" ) +
+                %("http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">\n)
+
+      expect(Claricle.detect("#{declaration}#{doctype}#{svg_tag}")).to eq(:svg)
+    end
+
+    it "accepts a root that ends on the last byte of the bound" do
+      padding = "<!--#{"x" * (8192 - svg_tag.bytesize - 7)}-->"
+      expect(Claricle.detect(padding + svg_tag)).to eq(:svg)
+    end
+
+    # One byte further and the comment is truncated, so there is no root
+    # inside the bound. Pinned both sides, or "a big prolog fails" would
+    # pass for any cap.
+    it "rejects the same root one byte beyond the bound" do
+      padding = "<!--#{"x" * (8192 - svg_tag.bytesize - 6)}-->"
+      expect { Claricle.detect(padding + svg_tag) }
+        .to raise_error(Claricle::UnknownFormat)
+    end
+
+    it "refuses a delimiter-free file without reading it all" do
+      hostile = "<#{"a" * 1_000_000}"
+
+      expect { Claricle.detect(hostile) }.to raise_error(Claricle::UnknownFormat)
     end
   end
 
