@@ -10,6 +10,26 @@ RSpec.describe "Claricle::Handlers::Base" do
       expect(subclass.supported_formats).to eq(%i[png svg])
     end
 
+    # The registry derives a frozen map at load, so a redeclaration would
+    # leave handler and registry disagreeing about who owns a format.
+    it "refuses a second declaration" do
+      subclass = Class.new(base) { formats :png }
+
+      expect { subclass.formats(:svg) }
+        .to raise_error(Claricle::Error, /already declared formats \[:png\]/)
+    end
+
+    it "keeps the original declaration after a refused one" do
+      subclass = Class.new(base) { formats :png }
+      begin
+        subclass.formats(:svg)
+      rescue Claricle::Error
+        nil
+      end
+
+      expect(subclass.supported_formats).to eq([:png])
+    end
+
     it "does not leak to a sibling or to Base" do
       Class.new(base) { formats :png }
       sibling = Class.new(base)
