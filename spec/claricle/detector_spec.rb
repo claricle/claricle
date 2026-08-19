@@ -107,7 +107,10 @@ RSpec.describe "Claricle format detection" do
     {
       "%!PS-Adobe-3.0 XEPSFY" => "a token it is glued to on the left",
       "%!PS-Adobe-3.0 NOT-EPSFILE" => "a hyphenated word containing it",
-      "%!PS-Adobe-3.0 EPSFILE" => "a longer word starting with it"
+      "%!PS-Adobe-3.0 EPSFILE" => "a longer word starting with it",
+      "%!PS-Adobe-3.0 .EPSF" => "punctuation on the left",
+      "%!PS-Adobe-3.0 EPSF.foo" => "punctuation on the right",
+      "%!PS-Adobe-3.0 (EPSF)" => "brackets around it"
     }.each do |header, why|
       it "is plain PostScript for #{why}" do
         expect(Claricle.detect("#{header}\n")).to eq(:ps)
@@ -122,12 +125,30 @@ RSpec.describe "Claricle format detection" do
     # The field match reads one byte either side of the token, so a token
     # straddling a chunk boundary needs its neighbours carried with it.
     # Both a real field and a decoy are swept across the boundary.
+    # The carry must not let the buffer edge stand in for a token's real
+    # left-hand neighbour: a window made entirely of carried bytes once
+    # matched "EPSF " at position 0, turning "%!PS XEPSF " into an EPS.
     it "decides the same way wherever the token falls across a chunk edge" do
-      (4085..4100).each do |offset|
+      wrong = []
+      (4080..4105).each do |offset|
         padding = " " * (offset - 4)
-        expect(Claricle.detect("%!PS#{padding}EPSF-3.0\n")).to eq(:eps)
-        expect(Claricle.detect("%!PS#{padding}XEPSFY\n")).to eq(:ps)
+        { "EPSF-3.0" => :eps, "EPSF" => :eps, "XEPSF" => :ps, ".EPSF" => :ps }
+          .each do |token, want|
+            ["\n", "", " "].each do |tail|
+              source = "%!PS#{padding}#{token}#{tail}"
+              got = Claricle.detect(source)
+              wrong << "#{offset}/#{token}/#{tail.inspect}=#{got}" unless got == want
+            end
+          end
       end
+
+      expect(wrong).to be_empty
+    end
+
+    # No line ending at all, so the decision is made at end of file.
+    it "decides a token flush against the end of the file" do
+      expect(Claricle.detect("%!PS EPSF")).to eq(:eps)
+      expect(Claricle.detect("%!PS XEPSF")).to eq(:ps)
     end
 
     it "treats a bare %!PS as plain PostScript" do
@@ -395,6 +416,27 @@ RSpec.describe "Claricle format detection" do
                    "<svg width='10'/>")
 
       expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+    end
+
+    # XML accumulates declarations, and the first declaration of an
+    # attribute binds -- so a later ATTLIST neither wipes the earlier
+    # one nor overrides a duplicate.
+    it "accumulates defaults across separate ATTLIST declarations" do
+      ns_decl = %(<!ATTLIST svg xmlns CDATA #FIXED "#{svg_ns}">)
+      width_decl = %(  <!ATTLIST svg width CDATA "10">)
+      source = doc("#{ns_decl}\n#{width_decl}", "<svg/>")
+
+      expect(Claricle.detect(source)).to eq(:svg)
+    end
+
+    it "binds the first of two declarations for the same attribute" do
+      ours = %(<!ATTLIST svg xmlns CDATA #FIXED "#{svg_ns}">)
+      theirs = %(  <!ATTLIST svg xmlns CDATA #FIXED "http://example.com/other">)
+      first_wins = doc("#{ours}\n#{theirs}", "<svg/>")
+      other_first = doc("#{theirs.strip}\n  #{ours}", "<svg/>")
+
+      expect(Claricle.detect(first_wins)).to eq(:svg)
+      expect { Claricle.detect(other_first) }.to raise_error(Claricle::UnknownFormat)
     end
 
     it "does not apply another element's defaults to the root" do

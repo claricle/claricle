@@ -6,6 +6,80 @@ require "rexml/text"
 require "emf"
 
 module Claricle
+  # The EPSF header field, scanned out of a PostScript file's first line.
+  # Its own module because the scan is a self-contained concern with three
+  # collaborating pieces, and Detector is about choosing between formats.
+  module EpsHeader
+    # Whitespace-delimited, per the DSC grammar: `EPSF` or `EPSF-<ver>`
+    # is its own header keyword. Excluding only word characters let
+    # ".EPSF", "EPSF.foo" and "(EPSF)" through. The version suffix is
+    # matched by the lookahead rather than consumed, so the longest match
+    # stays four bytes and the carry can be sized for it.
+    FIELD = /(?<!\S)EPSF(?=-|\s|\z)/
+    # One byte of left context plus the four-byte token.
+    CARRY_BYTES = 5
+
+    private_constant :FIELD, :CARRY_BYTES
+
+    class << self
+      # Streams the first line looking for the EPSF field. `gets` would
+      # materialise the whole line, and a newline-free %!PS file would
+      # allocate its full size -- the SVG probe never runs for
+      # PostScript, so nothing else absorbs that cost. PostScript ends a
+      # line with CR, LF or CRLF, so the scan stops at whichever comes
+      # first.
+      #
+      # The carry is sized for the *field* match, not a bare substring:
+      # the pattern inspects one byte either side of `EPSF`, so a token
+      # split across chunks needs its neighbours to travel with it.
+      def field?(source)
+        each_window(source) do |scan, final, carried|
+          return match?(scan, final: true, carried: carried) if final
+          return true if match?(scan, final: false, carried: carried)
+        end
+        false
+      end
+
+      # Yields the first line a window at a time, flagging the window
+      # that ends it. The carry is sized for the *field* match, not a
+      # bare substring: the pattern inspects one byte either side of
+      # `EPSF`, so a token split across chunks needs its neighbours to
+      # travel with it. The line ending and the end of the file are both
+      # final -- a token against either is genuinely followed by nothing.
+      def each_window(source)
+        carry = "".b
+        loop do
+          chunk = source.read(Detector::CHUNK_BYTES)
+          # nil.to_s is "", so EOF needs no branch of its own here.
+          window = carry + chunk.to_s.b
+          stop = window.index(Detector::LINE_END)
+          final = !stop.nil? || chunk.nil?
+
+          yield(stop ? window[0, stop] : window, final, carry.bytesize)
+          return if final
+
+          carry = window[-CARRY_BYTES..] || window
+        end
+      end
+
+      # A match ending exactly at the buffer's edge had its trailing
+      # delimiter supplied by end-of-string rather than by the file, so
+      # unless this really is the end of the line it is deferred to the
+      # next window, where the following byte is known.
+      def match?(scan, final:, carried: 0)
+        found = FIELD.match(scan)
+        return false unless found
+        # A match starting inside the carried bytes has already been
+        # judged, in the window where its real left-hand neighbour was
+        # visible. Reconsidering it here lets the buffer edge stand in
+        # for that neighbour, which turned "%!PS XEPSF " into an EPS.
+        return false if found.begin(0).zero? && carried.positive?
+
+        final || found.end(0) < scan.bytesize
+      end
+    end
+  end
+
   module Detector
     PNG_SIGNATURE = "\x89PNG\r\n\x1A\n".b.freeze
     PDF_SIGNATURE = "%PDF-".b.freeze
@@ -14,10 +88,6 @@ module Claricle
     # whitespace-delimited field. A bare substring match calls
     # "%!PS-Adobe-3.0 NOT-EPSFILE" and "... XEPSFY" EPS files, which the
     # PostScript parser does not.
-    EPS_FIELD = /(?<![\w-])EPSF(?!\w)/
-    # The field match needs one byte either side of the token, so a
-    # window must carry that much context across a chunk boundary.
-    EPS_CARRY_BYTES = 5
     SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 
     # PostScript ends a line with CR, LF or CRLF.
@@ -75,58 +145,7 @@ module Claricle
       end
 
       def postscript_flavour(source)
-        eps_first_line?(source) ? :eps : :ps
-      end
-
-      # Streams the first line looking for the EPSF field. `gets` would
-      # materialise the whole line, and a newline-free %!PS file would
-      # allocate its full size -- the SVG probe never runs for
-      # PostScript, so nothing else absorbs that cost. PostScript ends a
-      # line with CR, LF or CRLF, so the scan stops at whichever comes
-      # first.
-      #
-      # The carry is sized for the *field* match, not a bare substring:
-      # the pattern inspects one byte either side of `EPSF`, so a token
-      # split across chunks needs its neighbours to travel with it.
-      def eps_first_line?(source)
-        each_first_line_window(source) do |scan, final|
-          return eps_field?(scan, final: true) if final
-          return true if eps_field?(scan, final: false)
-        end
-        false
-      end
-
-      # Yields the first line a window at a time, flagging the window
-      # that ends it. The carry is sized for the *field* match, not a
-      # bare substring: the pattern inspects one byte either side of
-      # `EPSF`, so a token split across chunks needs its neighbours to
-      # travel with it. The line ending and the end of the file are both
-      # final -- a token against either is genuinely followed by nothing.
-      def each_first_line_window(source)
-        carry = "".b
-        loop do
-          chunk = source.read(CHUNK_BYTES)
-          # nil.to_s is "", so EOF needs no branch of its own here.
-          window = carry + chunk.to_s.b
-          stop = window.index(LINE_END)
-          final = !stop.nil? || chunk.nil?
-
-          yield(stop ? window[0, stop] : window, final)
-          return if final
-
-          carry = window[-EPS_CARRY_BYTES..] || window
-        end
-      end
-
-      # A match ending exactly at the buffer's edge had its trailing
-      # delimiter supplied by end-of-string rather than by the file, so
-      # unless this really is the end of the line it is deferred to the
-      # next window, where the following byte is known.
-      def eps_field?(scan, final:)
-        found = EPS_FIELD.match(scan)
-        return false unless found
-
-        final || found.end(0) < scan.bytesize
+        EpsHeader.field?(source) ? :eps : :ps
       end
 
       def metafile_format(header)
@@ -145,7 +164,7 @@ module Claricle
         defaults = {}
         while parser.has_next?
           event = parser.pull
-          defaults[event[0]] = event[1] if event.event_type == :attlistdecl
+          collect_defaults(defaults, event) if event.event_type == :attlistdecl
           return svg_root?(event[0], root_attributes(event, defaults)) if event.start_element?
         end
         false
@@ -158,6 +177,14 @@ module Claricle
       # this an SVG whose xmlns comes from `<!ATTLIST svg xmlns CDATA
       # #FIXED "...">` was rejected as an unknown format. A specified
       # attribute wins over the declared default, hence the merge order.
+      # XML accumulates ATTLIST declarations and the FIRST declaration of
+      # an attribute binds, so a second one neither replaces the element's
+      # earlier defaults nor overrides a duplicate.
+      def collect_defaults(defaults, event)
+        element = event[0]
+        defaults[element] = event[1].merge(defaults[element] || {})
+      end
+
       def root_attributes(event, defaults)
         defaults.fetch(event[0], {}).merge(event[1])
       end
