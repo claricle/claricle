@@ -191,9 +191,22 @@ module Claricle
       # Duplicates *inside one* declaration need the raw source: REXML
       # collapses them last-wins before handing over the parsed hash, so
       # `<!ATTLIST svg xmlns ... "a" xmlns ... "b">` arrives as "b" where
-      # XML binds "a". The parsed values stay authoritative -- the raw
-      # scan only supplies the order, and only for keys REXML already
-      # reported, so a declaration it cannot read changes nothing.
+      # XML binds "a".
+      #
+      # The raw scan wins where the two disagree, which is deliberate but
+      # broader than "it only fixes the order": REXML also mis-reports a
+      # value separated from `#FIXED` by a tab, returning `"#FIXED\t"`,
+      # and the raw scan corrects that too. It is bounded the other way
+      # instead -- only keys REXML already reported are considered, and
+      # only when the scan found a value -- so a declaration the regex
+      # cannot read leaves the parsed hash untouched.
+      #
+      # Known gap, upstream: REXML raises "Bad ATTLIST declaration!" for a
+      # single-quoted default (`#FIXED \'...\'`), which XML permits. That
+      # happens inside REXML before any event reaches us, so the document
+      # is reported as an unknown format. It fails closed rather than
+      # misdetecting, and working around REXML's DTD parser here would
+      # cost more than the gap.
       def collect_defaults(defaults, event)
         element = event[0]
         parsed = event[1]

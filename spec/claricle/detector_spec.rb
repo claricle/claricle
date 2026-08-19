@@ -457,6 +457,16 @@ RSpec.describe "Claricle format detection" do
       expect(Claricle.detect(source)).to eq(:svg)
     end
 
+    # Pinned as a known limitation, not an endorsement: REXML raises
+    # "Bad ATTLIST declaration!" for a single-quoted default before any
+    # event reaches us, so a document XML permits is reported unknown.
+    # If REXML ever fixes this, the example fails and we revisit.
+    it "cannot read a single-quoted default, and fails closed" do
+      source = doc(%(<!ATTLIST svg xmlns CDATA #FIXED 'https://example.invalid/ns'>), "<svg/>")
+
+      expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+    end
+
     it "does not apply another element's defaults to the root" do
       source = doc(%(<!ATTLIST other xmlns CDATA #FIXED "#{svg_ns}">), "<svg width='10'/>")
 
