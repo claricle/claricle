@@ -47,11 +47,23 @@ module Claricle
           # The status still has to be a byte: `exit 256` reports success.
           bounded_status(e.status)
         rescue StandardError, ScriptError, SystemStackError => e
-          output.puts(error_message(e))
+          report(error_message(e), output)
           exit_code(e)
         end
 
         private
+
+        # Writing the diagnostic must not become the failure. `output.puts`
+        # sits inside a rescue body, so nothing above catches it: with
+        # stderr on a closed pipe the EPIPE escaped `run` entirely and the
+        # executable exited 1 -- the status the README reserves for a
+        # nonconformant file. Failing to *report* an error cannot be
+        # allowed to replace that error's own status.
+        def report(message, output)
+          output.puts(message)
+        rescue StandardError
+          nil
+        end
 
         # Returns rather than raises: an ArgumentError from here would be
         # inside the SystemExit rescue and could not reach the next clause.

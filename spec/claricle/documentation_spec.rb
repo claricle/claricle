@@ -2,9 +2,15 @@
 
 RSpec.describe "the documentation" do
   root = File.expand_path("../..", __dir__)
-  readme = File.read(File.join(root, "README.adoc"))
-  File.read(File.join(root, "claricle.gemspec"))
-  png = File.binread(File.join(__dir__, "..", "fixtures", "detector", "valid.png"))
+
+  # `let`, not describe-scope locals: a local here is shared by closure
+  # across every example, so assigning one inside an example silently
+  # rebinds it for the rest of the file -- that happened in models_spec
+  # and broke fifteen unrelated examples. They are also eager I/O at load
+  # time, where a missing fixture fails while the file loads rather than
+  # in the example that names it.
+  let(:readme) { File.read(File.join(root, "README.adoc")) }
+  let(:png) { File.binread(File.join(root, "spec/fixtures/detector/valid.png")) }
 
   # Each example asserts the expression it runs is still IN the README.
   # Without that these are replicas: renaming image.format to image.formatt
@@ -14,11 +20,9 @@ RSpec.describe "the documentation" do
   # Whole lines, not substrings: asserting "image.format" would still pass
   # if the doc said "image.formatt".
   def shows(snippet)
-    lines = readme_text.lines.map(&:strip)
+    lines = readme.lines.map(&:strip)
     expect(lines).to include(snippet), "README no longer shows the line: #{snippet}"
   end
-
-  let(:readme_text) { readme }
 
   describe "the examples in Usage" do
     it "detects from bytes and from an IO" do
@@ -58,8 +62,8 @@ RSpec.describe "the documentation" do
     end
 
     it "distinguishes UnknownFormat from UnsupportedFormat, as documented" do
-      expect(readme_text).to match(/raise `Claricle::UnknownFormat`/)
-      expect(readme_text).to match(/raises\s+`Claricle::UnsupportedFormat`/)
+      expect(readme).to match(/raise `Claricle::UnknownFormat`/)
+      expect(readme).to match(/raises\s+`Claricle::UnsupportedFormat`/)
       expect { Claricle.detect("not an image") }.to raise_error(Claricle::UnknownFormat)
       expect { Claricle::Image.from_content(png).inspection }
         .to raise_error(Claricle::UnsupportedFormat)
@@ -77,12 +81,18 @@ RSpec.describe "the documentation" do
     # would let it be reversed to "compression now works" and still pass.
     # Tied to compression specifically: an unrelated negative sentence
     # elsewhere plus "compression now works" would otherwise pass.
-    it "states plainly that compression was dropped" do
+    # The wording is deliberately "not in v1's scope" rather than "no
+    # longer planned": 0.1.0's published metadata advertised compression,
+    # and retiring a public commitment is the maintainer's call, not a
+    # documentation PR's. "Never implemented" is the factual half and
+    # stays.
+    it "states plainly that compression is not in v1" do
       note = readme[/^\[NOTE\]\n====.*?^====$/m]
       expect(note).to be_a(String), "the 0.1.0 correction note is gone"
       expect(note).to match(/compression/i)
-      expect(note).to match(/never implemented and is no longer\s+planned/)
-      expect(readme).not_to match(/compression (now |is |will be )?(works|supported|available|planned)/i)
+      expect(note).to match(/never implemented/)
+      expect(note).to match(/not in\s+v1's scope/)
+      expect(readme).not_to match(/compression (now |is |will be )?(works|supported|available)/i)
     end
 
     it "names no capability that was dropped, outside that note" do

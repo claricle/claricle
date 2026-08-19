@@ -18,9 +18,9 @@ conversion are being built on top of it.
 Version 0.1.0 was a name reservation. Its `validate`, `convert` and
 `compress` commands printed "coming soon" and did nothing; they have
 been removed rather than left in place. Its metadata also advertised
-image compression -- that was never implemented and is no longer
-planned. Rendering, editing and WMF conversion are likewise out of
-scope.
+image compression, which was never implemented -- compression is not in
+v1's scope. Rendering, editing and WMF conversion are likewise outside
+v1.
 ====
 
 == Etymology & Symbolism

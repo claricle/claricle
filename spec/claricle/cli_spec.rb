@@ -204,6 +204,31 @@ RSpec.describe Claricle::Cli::Runner do
     end
 
     # A mapped Claricle error already reads as a sentence.
+    # `output.puts` runs inside a rescue body, so nothing above catches
+    # it. With stderr on a closed pipe the EPIPE escaped `run` and the
+    # executable exited 1 -- the code the README reserves for a
+    # nonconformant file. Both an original 2 and an original 4 are driven,
+    # so a fix that flattens every status to one code cannot pass.
+    describe "when the diagnostic cannot be written" do
+      def closed_pipe
+        reader, writer = IO.pipe
+        reader.close
+        writer
+      end
+
+      it "still returns the invocation status" do
+        expect(described_class.run(["nope"], output: closed_pipe)).to eq(2)
+      end
+
+      it "still returns the unexpected-failure status" do
+        expect(described_class.run(%w[boom standard], output: closed_pipe)).to eq(4)
+      end
+
+      it "does not let the write error escape" do
+        expect { described_class.run(["nope"], output: closed_pipe) }.not_to raise_error
+      end
+    end
+
     it "does not name the class of a mapped error" do
       stream = StringIO.new
       described_class.run(%w[boom unknown], output: stream)
