@@ -60,14 +60,16 @@ module Claricle
           reader = PngConform::Readers::FullLoadReader.new(path)
           [].tap { |chunks| reader.each_chunk { |chunk| chunks << chunk } }
         end
-      # The allowlist, measured rather than assumed. ParseError descends
-      # from Error, so naming both is redundant. EOFError is what the
-      # reader raises on an empty file, and a file that ends early is a
-      # parse failure, not a defect -- without it the library leaks an
-      # EOFError for an ordinary unreadable file. ENOENT covers a file
-      # that vanishes mid-read. Anything else is a defect and propagates
-      # to exit 4 rather than being absorbed into a tidy result.
-      rescue PngConform::Error, Errno::ENOENT, EOFError
+      # The allowlist, measured rather than assumed. Every entry is a way
+      # the reader fails on *input*, which is a "failed" inspection, not a
+      # defect. ParseError descends from Error, so naming both is
+      # redundant. IOError covers EOFError (its subclass, raised on an
+      # empty file) and the bare "data truncated" raised by a partial
+      # signature. EINVAL is what a chunk declaring a huge length
+      # produces, when the reader asks the OS for that many bytes.
+      # ENOENT covers a file that vanishes mid-read. Anything else is a
+      # defect and propagates to exit 4 rather than being absorbed.
+      rescue PngConform::Error, Errno::ENOENT, Errno::EINVAL, IOError
         nil
       end
 
@@ -131,13 +133,15 @@ module Claricle
         phys = chunks.find { |chunk| chunk.type.to_s == "pHYs" }
         return nil unless phys && phys.data.bytesize >= PHYS_BYTES
 
-        # The x axis alone: dpi is a single number, and a PNG with
-        # non-square pixels has no one value to report. The y figure stays
-        # available in the raw chunk for anything that needs it.
-        pixels_per_unit, _y, unit = phys.data.unpack(PHYS_LAYOUT)
-        return nil unless unit == METRE_UNIT
+        # dpi is a single number, so a PNG with non-square pixels has no
+        # one value to report -- and reporting the x axis alone would say
+        # 72 for an image that is 72x144. Measured: X=2835 Y=5669 is
+        # exactly that case. Unequal axes give nil rather than half the
+        # truth.
+        horizontal, vertical, unit = phys.data.unpack(PHYS_LAYOUT)
+        return nil unless unit == METRE_UNIT && horizontal == vertical
 
-        pixels_per_unit * METRES_PER_INCH
+        horizontal * METRES_PER_INCH
       end
     end
   end

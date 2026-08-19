@@ -96,6 +96,15 @@ RSpec.describe "Claricle PNG handler" do
       expect(inspect_file("valid.png").dpi).to be_nil
     end
 
+    # 2835x5669 is roughly 72x144: reporting the x axis alone would call
+    # it a 72 dpi image, which is half the truth.
+    it "is nil when the axes disagree" do
+      bytes = png_with_phys([2835, 5669, 1].pack("NNC"))
+      inspection = handler.inspection(Claricle::Image.from_content(bytes, format: :png))
+
+      expect(inspection).to have_attributes(dpi: nil, parse_status: "ok")
+    end
+
     # A short pHYs is a malformed chunk, but inspection reports metadata
     # readability, not conformance -- so it degrades to nil rather than
     # raising, and the header it did read still stands.
@@ -168,6 +177,42 @@ RSpec.describe "Claricle PNG handler" do
       image = Claricle::Image.from_content("", format: :png)
 
       expect(handler.inspection(image).parse_status).to eq("failed")
+    end
+
+    # Every way the reader fails on input, driven as a matrix rather than
+    # one example, because each arm comes from a different code path in
+    # the delegate and a single case would leave the others unguarded.
+    {
+      "a 1-byte signature" => "\x89",
+      "a 7-byte signature" => [137, 80, 78, 71, 13, 10, 26].pack("C*"),
+      "an empty file" => "",
+      "a full signature and nothing else" => [137, 80, 78, 71, 13, 10, 26, 10].pack("C*")
+    }.each do |label, bytes|
+      it "reports #{label} as failed rather than raising" do
+        image = Claricle::Image.from_content(bytes, format: :png)
+
+        expect(handler.inspection(image).parse_status).to eq("failed")
+      end
+    end
+
+    # A chunk declaring 0x8000000d bytes makes the reader ask the OS for
+    # that many, which is EINVAL, not a PngConform error.
+    it "reports an absurd chunk length as failed" do
+      header = [4, 3, 8, 6, 0, 0, 0].pack("NNC5")
+      signature = [137, 80, 78, 71, 13, 10, 26, 10].pack("C*")
+      absurd = [0x8000000d].pack("N")
+      crc = [0].pack("N")
+      bytes = "#{signature}#{absurd}IHDR#{header}#{crc}"
+      image = Claricle::Image.from_content(bytes, format: :png)
+
+      expect(handler.inspection(image).parse_status).to eq("failed")
+    end
+
+    it "absorbs the delegate's own error class" do
+      allow(PngConform::Readers::FullLoadReader).to receive(:new)
+        .and_raise(PngConform::ParseError, "bad chunk")
+
+      expect(inspect_file("valid.png").parse_status).to eq("failed")
     end
 
     # A delegate defect is a defect. Absorbing it would report "this file

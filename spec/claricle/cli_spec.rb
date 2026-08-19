@@ -115,6 +115,23 @@ RSpec.describe Claricle::Cli::Runner do
         .to output(/format: png.*dimensions: 4\.0x3\.0.*parse status: ok/m).to_stdout
     end
 
+    # Every field the presenter can emit, or dropping one from the
+    # renderer leaves the assertions above green.
+    it "prints dpi, colour space and the meta fields" do
+      phys = File.join(__dir__, "..", "fixtures", "inspect", "phys.png")
+
+      expect { described_class.run(["inspect", phys]) }
+        .to output(/dpi: 72\.009.*color space: truecolor\+alpha.*bit_depth: 8.*interlace: 0/m)
+        .to_stdout
+    end
+
+    it "prints an issue's severity and message when one is reported" do
+      failed = File.join(__dir__, "..", "fixtures", "inspect", "signature_only.png")
+
+      expect { described_class.run(["inspect", failed]) }
+        .to output(/error: PNG header \(IHDR\) could not be read/).to_stdout
+    end
+
     # Empty collections have to survive serialization, or a consumer
     # cannot tell "no issues" from "field absent".
     it "keeps an empty issues array under --json" do
