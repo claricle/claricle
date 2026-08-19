@@ -40,10 +40,13 @@ RSpec.describe "Claricle::Handlers::Base" do
       expect(child.capabilities).to contain_exactly(:inspect, :conform)
     end
 
-    it "cannot name an operation that is still Base's raising stub" do
+    # Declaring formats is not implementing anything, so a class that only
+    # declares must name NO operation -- including :inspect, which an
+    # earlier version of this example left unguarded.
+    it "cannot name any operation that is still Base's raising stub" do
       subclass = Class.new(base) { formats :png }
 
-      expect(subclass.capabilities).not_to include(:conform, :convert)
+      expect(subclass.capabilities).to be_empty
     end
   end
 

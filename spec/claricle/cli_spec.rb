@@ -121,8 +121,11 @@ RSpec.describe Claricle::Cli::Runner do
       phys = File.join(__dir__, "..", "fixtures", "inspect", "phys.png")
 
       expect { described_class.run(["inspect", phys]) }
-        .to output(/dpi: 72\.009.*color space: truecolor\+alpha.*bit_depth: 8.*interlace: 0/m)
-        .to_stdout
+        .to output(/dpi: 72\.009/).to_stdout
+      expect { described_class.run(["inspect", phys]) }
+        .to output(/color space: truecolor\+alpha/).to_stdout
+      expect { described_class.run(["inspect", phys]) }
+        .to output(/bit_depth: 8.*compression: 0.*filter: 0.*interlace: 0/m).to_stdout
     end
 
     it "prints an issue's severity and message when one is reported" do
