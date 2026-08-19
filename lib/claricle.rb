@@ -22,5 +22,5 @@ module Claricle
     Detector.detect_path(path)
   end
 
-  private_constant :Detector
+  private_constant :Detector, :EpsHeader
 end
