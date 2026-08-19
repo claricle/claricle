@@ -462,7 +462,11 @@ RSpec.describe "Claricle format detection" do
     # event reaches us, so a document XML permits is reported unknown.
     # If REXML ever fixes this, the example fails and we revisit.
     it "cannot read a single-quoted default, and fails closed" do
-      source = doc(%(<!ATTLIST svg xmlns CDATA #FIXED 'https://example.invalid/ns'>), "<svg/>")
+      # The SVG namespace deliberately: with a foreign one the example
+      # would pass whether or not REXML is fixed, pinning nothing. This
+      # document is a valid SVG, so the day REXML parses it, detection
+      # succeeds and this example goes red.
+      source = doc(%(<!ATTLIST svg xmlns CDATA #FIXED '#{svg_ns}'>), "<svg/>")
 
       expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
     end
