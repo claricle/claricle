@@ -318,6 +318,19 @@ RSpec.describe Claricle::Models do
           .to raise_error(TypeError, /unsupported Claricle marshal payload/)
       end
 
+      # The payload carries attributes, not classes, so a subclass would
+      # come back as its parent with its own attributes gone. Refused at
+      # dump time rather than silently erased -- validation accepts
+      # subclasses, so nothing else catches this.
+      it "refuses to marshal a nested subclass rather than erasing it" do
+        subclass = Class.new(models::Issue) { attribute :vendor_code, :string }
+        nested = subclass.new(severity: "error", message: "m", vendor_code: "X1")
+        report = models::Report.new(format: "png", issues: [nested])
+
+        expect { Marshal.dump(report) }
+          .to raise_error(TypeError, /was declared/)
+      end
+
       # lutaml omits explicitly-empty values from `to_hash`, so a payload
       # built from it lost the difference between "absent" and "empty".
       it "keeps an explicitly empty hash rather than reloading it as nil" do
