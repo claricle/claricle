@@ -10,12 +10,11 @@ module Claricle
     # one lifecycle -- normalize, validate, freeze -- at both doors.
     class Base < Lutaml::Model::Serializable
       DESERIALIZING = :claricle_models_deserializing
-      BACK_REFERENCES = %i[@lutaml_parent @lutaml_root].freeze
       # Lutaml builds every model -- parent and nested alike -- by calling
       # `new` with exactly this and populating it afterwards. Direct
       # construction always carries real attributes.
       BLANK_CONSTRUCTION = [:lutaml_register].freeze
-      private_constant :DESERIALIZING, :BLANK_CONSTRUCTION, :BACK_REFERENCES
+      private_constant :DESERIALIZING, :BLANK_CONSTRUCTION
 
       # Deserialization builds a blank instance and populates it afterwards,
       # so `initialize` must not finalize during that window. Neither the
@@ -54,29 +53,48 @@ module Claricle
                         Thread.current[DESERIALIZING]
       end
 
-      # dup and clone(freeze: false) hand back an unfrozen copy that would
-      # otherwise accept an invalid reassignment.
-      # Marshal skips initialize entirely, and @claricle_sealed survives the
-      # dump -- so a restored model would be mutable while claiming to be
-      # sealed, which also stops a later seal from freezing it. Restore the
-      # state, drop that claim, and run the lifecycle again.
-      # lutaml threads a parent and root back-reference through every
-      # nested model, and they are cyclic. Marshal serialises the whole
-      # graph, and marshal_load finalizes before the graph is whole, so an
-      # Issue lifted out of a deserialized Report raised ValidationError on
-      # a round trip. They are lutaml's bookkeeping rather than our data,
-      # and a detached copy has no parent by definition, so they are left
-      # out of the dump.
-      def marshal_dump
-        instance_variables
-          .reject { |ivar| BACK_REFERENCES.include?(ivar) }
-          .to_h { |ivar| [ivar, instance_variable_get(ivar)] }
+      # Marshal goes through the replacement-object protocol rather than
+      # the per-object one, because the per-object hooks cannot rebuild
+      # lutaml's parent/root links: Ruby restores depth-first, so Location
+      # then Issue are already frozen before Report#marshal_load runs, and
+      # relinking from the parent raises FrozenError.
+      #
+      # An earlier fix dodged that by dropping the back-references from
+      # the dump. It worked for a lifted model and silently detached every
+      # copied graph, which was a bad trade and is now gone.
+      #
+      # `_dump`/`_load` make the boundary atomic instead. `_load` runs on
+      # the subclass and returns a whole object, so lutaml assigns every
+      # link while building it and `Base.of` then validates and freezes
+      # the finished subtree. A lifted model round-trips as its own root,
+      # and a whole graph keeps its hierarchy.
+      #
+      # `marshal_dump` must stay absent: Ruby prefers it over `_dump`.
+      #
+      # The payload is versioned so a future change to the representation
+      # can be rejected rather than misread. Nested Marshal, not JSON,
+      # because `meta` is free-form and may hold Symbols, Ranges or any
+      # other Marshalable value that JSON would flatten.
+      #
+      # One consequence, deliberate: this is a semantic snapshot, so
+      # aliasing inside the subtree is normalized -- the same Issue given
+      # twice reloads as two equal Issues rather than one shared object.
+      MARSHAL_VERSION = 1
+
+      def _dump(depth)
+        Marshal.dump([MARSHAL_VERSION, to_hash], depth)
       end
 
-      def marshal_load(state)
-        state.each { |ivar, value| instance_variable_set(ivar, value) }
-        @claricle_sealed = false
-        finalize
+      def self._load(payload)
+        # rubocop:disable Security/MarshalLoad -- this IS the Marshal hook.
+        # Ruby calls it with what our own `_dump` wrote, and it is only
+        # reached because the caller already chose to Marshal.load the
+        # outer payload. Unnesting it would not make that choice safer.
+        version, attributes = Marshal.load(payload)
+        # rubocop:enable Security/MarshalLoad
+        raise TypeError, "unsupported Claricle marshal version #{version.inspect}" if version != MARSHAL_VERSION
+
+        from_hash(attributes)
       end
 
       def initialize_copy(other)
