@@ -240,4 +240,58 @@ RSpec.describe Claricle::Image do
       end
     end
   end
+
+  # An image is bytes. The encoding tag on a String handed to
+  # from_content is an artifact of how the caller built it, and Detector
+  # already discards it at its own entry -- so this is the same decision
+  # applied to the bytes a handler actually reads.
+  #
+  # It lives here rather than in each handler because every handler goes
+  # through this one method, and left to them two of two handlers that
+  # touch raw bytes shipped the same bug: the EMF header indexed by
+  # character, and the PostScript delegate raised
+  # Encoding::CompatibilityError, both on files that are perfectly good.
+  describe "#content encoding" do
+    let(:bytes) { File.binread(File.join(__dir__, "..", "fixtures", "inspect", "valid.emf")) }
+
+    %w[UTF-8 UTF-16LE UTF-16BE ISO-8859-1].each do |encoding|
+      it "returns BINARY for content tagged #{encoding}" do
+        tagged = bytes.dup.force_encoding(encoding)
+        image = described_class.from_content(tagged, format: :emf)
+
+        expect(image.content.encoding).to eq(Encoding::BINARY)
+        expect(image.content.bytes).to eq(bytes.bytes)
+      end
+
+      it "leaves the caller's own string tagged #{encoding}" do
+        tagged = bytes.dup.force_encoding(encoding)
+        described_class.from_content(tagged, format: :emf).content
+
+        expect(tagged.encoding).to eq(Encoding.find(encoding))
+      end
+    end
+
+    it "returns BINARY from a path" do
+      path = File.join(__dir__, "..", "fixtures", "inspect", "valid.emf")
+
+      expect(described_class.from_path(path).content.encoding).to eq(Encoding::BINARY)
+    end
+
+    # Normalising must not re-copy on every read, or a handler holding
+    # the result across two calls would be holding two objects.
+    it "is the same object across repeated calls" do
+      image = described_class.from_content(bytes.dup.force_encoding("UTF-8"), format: :emf)
+
+      expect(image.content).to be(image.content)
+    end
+
+    # Already-binary content is passed through, not copied. That is
+    # deliberate: it keeps the common path allocation-free and it is what
+    # the handler specs' identity assertions rest on.
+    it "hands back the caller's own object when it is already BINARY" do
+      image = described_class.from_content(bytes, format: :emf)
+
+      expect(image.content).to be(bytes)
+    end
+  end
 end

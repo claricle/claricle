@@ -34,8 +34,19 @@ module Claricle
 
     # Read on demand, once. Detection already streamed the file; slurping it
     # at construction would waste that.
+    #
+    # Always binary. An image is bytes, and the encoding tag on a String
+    # handed to `from_content` is an artifact of how the caller built it
+    # -- `Detector` already discards it at its own entry, and this is the
+    # same decision applied to the bytes a handler actually reads. It
+    # belongs here because every handler goes through this one method:
+    # left to them, the EMF handler indexed by character and the
+    # PostScript delegate raised `Encoding::CompatibilityError`, the same
+    # bug twice, on files that are perfectly good.
     def content
       @content ||= File.binread(path)
+      @content = @content.b unless @content.encoding == Encoding::BINARY
+      @content
     end
 
     # Most delegates want a path. A content-born image gets a temporary one
