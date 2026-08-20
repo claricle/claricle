@@ -156,8 +156,8 @@ dependency where marked ⚙):
 - **Honesty baseline**: README.adoc and the gemspec description
   describe reality as of 01. (`sig/claricle.rbs` was part of this
   baseline when 01 was written; the maintainer decided on 2026-08-19
-  to drop RBS entirely, so the follow-up PR deletes it.) The current
-  README
+  to drop RBS entirely, and the honesty-baseline step deletes it.) The
+  current README
   advertises validation, conversion, compression and a fictional
   `Claricle::Validator` API, and the gemspec advertises compression.
   Later items extend this baseline; 04 does the final rewrite. Merged
