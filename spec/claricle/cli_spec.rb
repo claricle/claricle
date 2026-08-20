@@ -193,12 +193,15 @@ RSpec.describe Claricle::Cli::Runner do
     # pass if the command printed nothing at all.
     it "does not claim conform or convert yet" do
       expect { described_class.run(["formats"]) }
-        .to output("png\tinspect\n").to_stdout
+        .to output("png\tinspect\nsvg\tinspect\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
       expect { described_class.run(["formats", "--json"]) }
-        .to output(%([{"format":"png","inspect":true,"conform":false,"convert":false,"convert_to":[]}]\n))
+        .to output(
+          %([{"format":"png","inspect":true,"conform":false,"convert":false,"convert_to":[]},) +
+          %({"format":"svg","inspect":true,"conform":false,"convert":false,"convert_to":[]}]\n)
+        )
         .to_stdout
     end
   end

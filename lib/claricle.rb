@@ -24,5 +24,5 @@ module Claricle
     source.respond_to?(:read) ? Detector.detect(source.read) : Detector.detect(source)
   end
 
-  private_constant :Detector, :EpsHeader, :Registry, :Handlers
+  private_constant :Detector, :EpsHeader, :AttributeDefaults, :Registry, :Handlers
 end
