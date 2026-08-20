@@ -30,22 +30,19 @@ module Claricle
         "q" => PX_PER_INCH / 101.6
       }.freeze
 
-      # A relative unit has no absolute value without a viewport, font
-      # metrics or some other context we do not have, so the dimension is
-      # nil and the declaration stays in `meta`. Reporting the numeric
-      # prefix would be worse than reporting nothing.
-      RELATIVE_UNITS = %w[% em ex rem ch vw vh vmin vmax].freeze
-
       # SVG's own number grammar, not Ruby's: `Float("1.")` is 1.0 and
       # `Float("1.e2")` is 100.0, but SVG requires a digit after the
       # decimal point, so those are not dimensions at all.
       NUMBER = /[+-]?(?:\d+\.\d+|\.\d+|\d+)(?:e[+-]?\d+)?/i
-      DIMENSION = /\A(?<number>#{NUMBER})(?<unit>[a-z%]*)\z/i
+      # Surrounding whitespace survives XML attribute-value normalization
+      # for a CDATA attribute -- `width=" 100"` arrives with the space --
+      # and it is not part of the value the document means.
+      DIMENSION = /\A\s*(?<number>#{NUMBER})(?<unit>[a-z%]*)\s*\z/i
       ISSUE_CODE = "svg.root_unreadable"
       ISSUE_MESSAGE = "SVG root element could not be read"
 
-      private_constant :PX_PER_INCH, :ABSOLUTE_UNITS, :RELATIVE_UNITS,
-                       :NUMBER, :DIMENSION, :ISSUE_CODE, :ISSUE_MESSAGE
+      private_constant :PX_PER_INCH, :ABSOLUTE_UNITS, :NUMBER, :DIMENSION,
+                       :ISSUE_CODE, :ISSUE_MESSAGE
 
       def inspection(image)
         # Detector.read_root, not a second reader: it owns the 8192-byte
@@ -64,7 +61,10 @@ module Claricle
           format: image.format.to_s,
           width: dimension(attributes["width"]),
           height: dimension(attributes["height"]),
-          meta: attributes,
+          # A copy: `read_root` hands back its own hash, and an
+          # inspection handing out a reference to it would let a caller
+          # mutate what the reader produced.
+          meta: attributes.dup,
           parse_status: "ok"
         )
       end

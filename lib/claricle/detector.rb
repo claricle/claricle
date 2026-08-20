@@ -183,8 +183,6 @@ module Claricle
     # arbitrarily long prolog, so this is a sniffing limit, not a
     # complete one.
     SVG_PROLOG_BYTES = 8192
-    # One "name TYPE [#DEFAULT] value" group of an ATTLIST body, enough to
-    # recover declaration order. Values may be absent (#REQUIRED etc).
 
     CHUNK_BYTES = 4096
 
@@ -204,8 +202,11 @@ module Claricle
         end
       end
 
-      # The root element's qname and its resolved attributes, or nil if
-      # there is no root inside the bound. Public because Handlers::Svg
+      # The root element's qname and its resolved attributes, or nil.
+      # nil covers every way the root can be unavailable: no root inside
+      # the bound, markup REXML refuses, and an encoding name it cannot
+      # use. Callers treat all three the same -- there is nothing to
+      # report about -- so they are not distinguished here. Public because Handlers::Svg
       # needs exactly this and a second reader would have to reimplement
       # the bound, the ATTLIST precedence and the reference resolution --
       # three rules this file spent four review rounds getting right --
@@ -294,11 +295,6 @@ module Claricle
         svg_root?(*root)
       end
 
-      # XML 1.0 requires a processor to apply attribute defaults declared
-      # in the internal subset, and REXML's own DOM does -- so without
-      # this an SVG whose xmlns comes from `<!ATTLIST svg xmlns CDATA
-      # #FIXED "...">` was rejected as an unknown format. A specified
-      # attribute wins over the declared default, hence the merge order.
       # Only the prolog and the root start tag can matter here, and both
       # fit well inside the bound. Takes an IO or a String: detection
       # streams from a file, while a handler already holds the content.

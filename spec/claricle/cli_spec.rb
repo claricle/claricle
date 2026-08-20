@@ -155,8 +155,21 @@ RSpec.describe Claricle::Cli::Runner do
         file.write(%(<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="5mm"/>))
         file.flush
 
-        expect { expect(described_class.run(["inspect", file.path])).to eq(0) }
-          .to output(/format: svg.*dimensions: 37\.795.*width: 10mm/m).to_stdout
+        expect(described_class.run(["inspect", file.path])).to eq(0)
+      end
+    end
+
+    it "prints both SVG dimensions and the declared units" do
+      Tempfile.create(["logo", ".svg"]) do |file|
+        file.write(%(<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="5mm"/>))
+        file.flush
+
+        # Both axes, and enough digits that a wrong conversion cannot
+        # hide behind a truncated match.
+        expect { described_class.run(["inspect", file.path]) }
+          .to output(
+            /dimensions: 37\.79527559055118\d*x18\.89763779527559\d*.*height: 5mm.*width: 10mm/m
+          ).to_stdout
       end
     end
 

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "English"
 require "rexml/security"
 
 RSpec.describe "Claricle SVG handler" do
@@ -128,7 +129,7 @@ RSpec.describe "Claricle SVG handler" do
           format: "svg", width: nil, height: nil, dpi: nil,
           color_space: nil, parse_status: "failed"
         )
-        expect(inspection.meta).to be_nil.or be_empty
+        expect(inspection.meta).to be_nil
         expect(inspection.issues.map { |i| [i.severity, i.code, i.message] })
           .to eq([["error", "svg.root_unreadable", "SVG root element could not be read"]])
       end
@@ -160,10 +161,11 @@ RSpec.describe "Claricle SVG handler" do
     end
 
     it "is what the handler consumes" do
+      source = svg(%(width="7"))
       allow(Claricle.const_get(:Detector)).to receive(:read_root)
-        .and_return(["svg", { "width" => "42" }])
+        .with(source).and_return(["svg", { "width" => "42" }])
 
-      expect(inspect_svg(svg(%(width="7"))).width).to eq(42.0)
+      expect(inspect_svg(source).width).to eq(42.0)
     end
 
     it "is what detection consumes" do
@@ -246,8 +248,10 @@ RSpec.describe "Claricle SVG handler" do
     RUBY
     lib = File.expand_path("../../lib", __dir__)
     output = IO.popen([RbConfig.ruby, "-I#{lib}", "-e", script], err: %i[child out], &:read)
+    status = $CHILD_STATUS
 
-    expect(output).to eq("7.0"), "handler could not load alone: #{output}"
+    expect(status).to be_success, "handler could not load alone: #{output}"
+    expect(output).to eq("7.0")
   end
 
   describe "references that cannot be resolved" do
@@ -273,10 +277,15 @@ RSpec.describe "Claricle SVG handler" do
 
     # An escaped reference means the literal text. Resolving twice would
     # turn "&amp;#x67;" into "g" and change what the document says.
-    it "does not resolve an escaped reference twice" do
+    # Both halves: an escaped reference must survive as literal text,
+    # and a plain one must still be resolved. Asserting only the first
+    # would pass an implementation that never resolves anything.
+    it "resolves a reference once and only once" do
       escaped = %(<svg xmlns="http://www.w3.org/2000/sv&amp;#x67;"/>)
-
       expect { Claricle.detect(escaped) }.to raise_error(Claricle::UnknownFormat)
+
+      resolved = %(<svg xmlns="http://www.w3.org/2000/sv&#x67;"/>)
+      expect(Claricle.detect(resolved)).to eq(:svg)
     end
   end
 
