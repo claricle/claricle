@@ -193,13 +193,17 @@ module Claricle
       # `<!ATTLIST svg xmlns ... "a" xmlns ... "b">` arrives as "b" where
       # XML binds "a".
       #
-      # The raw scan wins where the two disagree, which is deliberate but
-      # broader than "it only fixes the order": REXML also mis-reports a
-      # value separated from `#FIXED` by a tab, returning `"#FIXED\t"`,
-      # and the raw scan corrects that too. It is bounded the other way
-      # instead -- only keys REXML already reported are considered, and
-      # only when the scan found a value -- so a declaration the regex
-      # cannot read leaves the parsed hash untouched.
+      # The raw scan is the authority, which is deliberate and broader
+      # than "it only fixes the order". It also carries tombstones REXML
+      # has no way to report -- an `#IMPLIED` attribute is declared with
+      # no default, and that has to outrank a later declaration -- and it
+      # corrects a value REXML mis-reports, such as one separated from
+      # `#FIXED` by a tab, which arrives as `"#FIXED\t"`.
+      #
+      # REXML is the fallback, consulted only for attributes the regex
+      # could not read at all. So a declaration the scan cannot parse
+      # still contributes its parsed value, and one it can parse is taken
+      # whole, tombstone included.
       #
       # Known gap, upstream: REXML raises "Bad ATTLIST declaration!" for a
       # single-quoted default (`#FIXED \'...\'`), which XML permits. That
