@@ -43,6 +43,15 @@ The name reflects what the library is for:
 * `inspect` for PNG -- dimensions, colour space, bit depth and DPI
 * `inspect` for SVG -- dimensions from the root, absolute units
   converted to CSS px; a relative unit such as `%` reports no dimension
+* `inspect` for EPS and PS -- dimensions from a **concrete bounding box
+  declared in the DSC header**, preferring `%%HiResBoundingBox` and
+  falling back to `%%BoundingBox`, plus the title, creator, creation
+  date and language level. Only the header is read, so a box declared
+  `(atend)` and resolved in the trailer reports no dimensions; that is a
+  known gap. The page count is
+  deliberately not reported: the parser fills it in only for the
+  two-argument `%%Pages: n m` form, so it would be present for some
+  files and absent for others with no way to tell the cases apart
 * `formats`, listing each format and what Claricle can do with it
 * `Claricle::Image`, built from a path or from bytes
 * A unified issue and report model, serialising to and from JSON
@@ -50,10 +59,13 @@ The name reflects what the library is for:
 
 == What does not work yet
 
-* `inspect` for WMF, EPS, PS and PDF -- EMF, PNG and SVG have handlers
-  so far, so the rest raise `Claricle::UnsupportedFormat`. WMF is not
-  planned: the parser it would use reports "WMF parser not yet
-  implemented"
+* `inspect` for WMF -- EMF, PNG, SVG, EPS and PS have handlers so far,
+  so the rest raise `Claricle::UnsupportedFormat`. WMF is not planned:
+  the parser it would use reports "WMF parser not yet implemented"
+* **`(atend)` bounding boxes for EPS and PS.** The value lives in the
+  trailer, and resolving it needs the nested-document and data-section
+  handling that reading only the header exists to avoid. Files using it
+  inspect as `ok` with no dimensions
 * `conform` and `convert` for every format. No handler implements
   either yet, so both raise `Claricle::UnsupportedFormat`. `claricle
   formats` reports this per format, and it reads the handlers rather
@@ -154,6 +166,7 @@ lib/claricle/
   handlers/png.rb      # PNG metadata
   handlers/svg.rb      # SVG root metadata
   handlers/metafile.rb # EMF header metadata
+  handlers/postscript.rb # EPS and PS DSC header metadata
   models/              # Location, Issue, Report, Inspection
   errors.rb            # Error, UnknownFormat, UnsupportedFormat, ...
   cli.rb               # Thor CLI and the exit-code Runner
