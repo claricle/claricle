@@ -209,19 +209,32 @@ module Claricle
       # cost more than the gap.
       def collect_defaults(defaults, event)
         element = event[0]
-        parsed = event[1]
-        ordered = parsed.merge(first_declarations(event[2]).slice(*parsed.keys).compact)
-        defaults[element] = ordered.merge(defaults[element] || {})
+        # The raw scan carries the order AND the tombstones: an attribute
+        # declared `#IMPLIED` has no default, and XML binds the first
+        # declaration, so a later one with a value must not fill it in.
+        # REXML's parsed hash has no tombstones, and is consulted only for
+        # attributes the regex could not read.
+        within = first_declarations(event[2])
+        event[1].each { |name, value| within[name] = value unless within.key?(name) }
+        # Earlier declarations win over later ones, tombstones included.
+        defaults[element] = within.merge(defaults[element] || {})
       end
 
+      # nil is a real answer here -- `#IMPLIED` means "declared, no
+      # default" -- so first-wins is decided by key?, never by the value's
+      # truthiness.
       def first_declarations(raw)
         body = raw.to_s.sub(/\A<!ATTLIST\s+\S+/, "").sub(/>\s*\z/, "")
-        body.scan(ATTLIST_DECLARATION)
-            .each_with_object({}) { |(name, quoted, single), a| a[name] ||= quoted || single }
+        body.scan(ATTLIST_DECLARATION).each_with_object({}) do |(name, quoted, single), acc|
+          acc[name] = quoted || single unless acc.key?(name)
+        end
       end
 
+      # Explicit attributes beat declared defaults, and only the final
+      # merged hash is compacted -- dropping tombstones earlier would let
+      # a later declaration resurrect an attribute XML left undeclared.
       def root_attributes(event, defaults)
-        defaults.fetch(event[0], {}).merge(event[1])
+        defaults.fetch(event[0], {}).merge(event[1]).compact
       end
 
       # Only the prolog and the root start tag can matter here, and both
