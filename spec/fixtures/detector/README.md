@@ -26,6 +26,13 @@ The two WMF files are headers with no valid record data behind them.
 The names are historical and describe the *signature*, not the file:
 `valid.emf` is a valid EMF header, not a fully valid EMF.
 
+Measured 2026-08-20, the specific defects in `valid.emf` are `nBytes`
+(declared 0, actual 364) and `nHandles` (declared 1, but object indexes
+1-4 are used, so MS-EMF requires 4). `nRecords` is **correct** at 17 —
+a raw walk finds 17 records ending exactly at byte 364, and
+`metafile.records` returns 16 only because it excludes the header
+record.
+
 That is sufficient here, because the metafile probe matches a signature
 at a fixed offset and never parses a record. It is **not** sufficient for
 `TODO.plan/02-inspect.md`, which reads real records — those metafiles
