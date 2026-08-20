@@ -264,22 +264,46 @@ RSpec.describe Claricle::Models do
         expect(Marshal.load(Marshal.dump(parent)).to_json).to eq(parent.to_json)
       end
 
-      # The cost of the fix above, pinned rather than left implicit. With
-      # the back-references dumped, a whole-Report copy kept its lutaml
-      # hierarchy and only a LIFTED nested model raised; excluding them
-      # reverses that -- the lifted model round-trips and the copied graph
-      # comes back detached. Claricle never reads lutaml_parent or
-      # lutaml_root, so nothing in this gem depends on it, but a consumer
-      # reaching for lutaml's hierarchy on a Marshal copy will find nil.
-      # Relinking is not available: Marshal restores depth-first, so every
-      # descendant is already frozen by the time the parent loads.
-      it "returns a copy detached from the lutaml hierarchy" do
+      # The hierarchy is asserted positively, both links on both levels.
+      # An earlier fix dropped lutaml's back-references from the dump: the
+      # lifted case worked and every copied graph came back detached, and
+      # the spec that replaced this one asserted only the lost parents --
+      # an honest record of the wrong behaviour is still the wrong
+      # behaviour. `_dump`/`_load` keep both.
+      it "keeps every parent and root link through a whole-graph copy" do
         copy = Marshal.load(Marshal.dump(parent))
         nested = copy.issues.first
 
-        expect(nested.lutaml_parent).to be_nil
-        expect(nested.location.lutaml_parent).to be_nil
-        expect(copy.to_json).to eq(parent.to_json)
+        expect(nested.lutaml_parent).to be(copy)
+        expect(nested.lutaml_root).to be(copy)
+        expect(nested.location.lutaml_parent).to be(nested)
+        expect(nested.location.lutaml_root).to be(copy)
+      end
+
+      it "makes a lifted model the root of its own copy" do
+        lifted = Marshal.load(Marshal.dump(parent.issues.first))
+
+        expect(lifted.location.lutaml_parent).to be(lifted)
+        expect(lifted.location.lutaml_root).to be(lifted)
+      end
+
+      # meta is free-form, so the payload nests Marshal rather than JSON.
+      it "preserves Ruby values inside meta that JSON would flatten" do
+        inspection = models::Inspection.new(
+          format: "png", parse_status: "ok",
+          meta: { "sym" => :a_symbol, "range" => (1..5) }
+        )
+        restored = Marshal.load(Marshal.dump(inspection))
+
+        expect(restored.meta["sym"]).to eq(:a_symbol)
+        expect(restored.meta["range"]).to eq(1..5)
+      end
+
+      it "refuses a payload from an unknown marshal version" do
+        payload = Marshal.dump([99, parent.to_hash])
+
+        expect { models::Report._load(payload) }
+          .to raise_error(TypeError, /unsupported Claricle marshal version 99/)
       end
     end
 
