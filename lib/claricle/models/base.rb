@@ -41,15 +41,28 @@ module Claricle
       # payload says what the object holds rather than what is worth
       # rendering.
       def marshal_attributes
-        self.class.attributes.keys.to_h do |name|
-          [name.to_s, Marshalling.plain(public_send(name))]
+        self.class.attributes.to_h do |name, attribute|
+          [name.to_s, Marshalling.plain(public_send(name), attribute.type)]
         end
       end
 
-      def self.plain(value)
+      # The payload carries attributes, not classes, so a nested model is
+      # rebuilt as whatever the attribute declares. A subclass would come
+      # back as its parent with its own attributes silently gone, so it is
+      # refused instead. Validation accepts subclasses, which is why this
+      # has to be checked rather than assumed: `Base` is a private
+      # constant and subclassing is not a supported extension point, so
+      # failing loudly is better than inventing a class discriminator no
+      # caller needs.
+      def self.plain(value, type = nil)
         case value
-        when Array then value.map { |element| plain(element) }
-        when Base then value.marshal_attributes
+        when Array then value.map { |element| plain(element, type) }
+        when Base
+          unless type.nil? || value.instance_of?(type)
+            raise TypeError, "cannot marshal #{value.class}: #{type} was declared"
+          end
+
+          value.marshal_attributes
         else value
         end
       end
