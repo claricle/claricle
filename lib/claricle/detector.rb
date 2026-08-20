@@ -241,8 +241,19 @@ module Claricle
 
       # Every root attribute, not just xmlns: the PullParser hands values
       # back unexpanded, and `width="&#49;&#48;"` means ten, not zero.
+      #
+      # A reference that cannot be resolved keeps its raw declaration.
+      # Two ways that happens, both measured: an out-of-range numeric
+      # reference raises RangeError, and a surrogate such as `&#xD800;`
+      # resolves to INVALID UTF-8, which is worse -- it does not raise
+      # here, it detonates later, either in the dimension parse or in
+      # `to_json`. The raw form is always valid and always truthful.
       def resolved(attributes)
-        attributes.transform_values { |value| resolve_references(value) || value }
+        attributes.transform_values { |value| usable(resolve_references(value)) || value }
+      end
+
+      def usable(value)
+        value if value&.valid_encoding?
       end
 
       # The block yields the source rewound to byte 0. The PNG, PDF and
@@ -292,7 +303,14 @@ module Claricle
       # fit well inside the bound. Takes an IO or a String: detection
       # streams from a file, while a handler already holds the content.
       def bounded(source)
-        prefix = source.respond_to?(:read) ? source.read(SVG_PROLOG_BYTES) : source[0, SVG_PROLOG_BYTES]
+        # byteslice, not slice: the bound is BYTES, and `source[0, n]`
+        # counts characters, so a multibyte prolog would let the handler
+        # read further than detection did and the two would disagree.
+        prefix = if source.respond_to?(:read)
+                   source.read(SVG_PROLOG_BYTES)
+                 else
+                   source.byteslice(0, SVG_PROLOG_BYTES)
+                 end
         StringIO.new(prefix || "")
       end
 
@@ -303,7 +321,10 @@ module Claricle
         declared = attributes[prefix ? "xmlns:#{prefix}" : "xmlns"]
         return false unless declared
 
-        resolve_references(declared) == SVG_NAMESPACE
+        # Already resolved by read_root. Resolving again would expand a
+        # reference the document escaped on purpose: `&amp;#x67;` means
+        # the literal text `&#x67;`, and a second pass turns it into `g`.
+        declared == SVG_NAMESPACE
       end
 
       # PullParser hands back the raw attribute. XML normalization replaces

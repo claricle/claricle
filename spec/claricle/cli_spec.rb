@@ -149,6 +149,17 @@ RSpec.describe Claricle::Cli::Runner do
         .to output(/parse status: failed/).to_stdout
     end
 
+    # The plan requires an SVG example end to end, not just PNG.
+    it "prints SVG dimensions with units resolved" do
+      Tempfile.create(["logo", ".svg"]) do |file|
+        file.write(%(<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="5mm"/>))
+        file.flush
+
+        expect { expect(described_class.run(["inspect", file.path])).to eq(0) }
+          .to output(/format: svg.*dimensions: 37\.795.*width: 10mm/m).to_stdout
+      end
+    end
+
     it "exits 2 for a missing file" do
       expect(described_class.run(["inspect", "no/such.png"], output: StringIO.new)).to eq(2)
     end

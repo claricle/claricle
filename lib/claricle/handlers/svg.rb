@@ -36,12 +36,16 @@ module Claricle
       # prefix would be worse than reporting nothing.
       RELATIVE_UNITS = %w[% em ex rem ch vw vh vmin vmax].freeze
 
-      DIMENSION = /\A(?<number>[+-]?[\d.]+(?:e[+-]?\d+)?)(?<unit>[a-z%]*)\z/i
+      # SVG's own number grammar, not Ruby's: `Float("1.")` is 1.0 and
+      # `Float("1.e2")` is 100.0, but SVG requires a digit after the
+      # decimal point, so those are not dimensions at all.
+      NUMBER = /[+-]?(?:\d+\.\d+|\.\d+|\d+)(?:e[+-]?\d+)?/i
+      DIMENSION = /\A(?<number>#{NUMBER})(?<unit>[a-z%]*)\z/i
       ISSUE_CODE = "svg.root_unreadable"
       ISSUE_MESSAGE = "SVG root element could not be read"
 
       private_constant :PX_PER_INCH, :ABSOLUTE_UNITS, :RELATIVE_UNITS,
-                       :DIMENSION, :ISSUE_CODE, :ISSUE_MESSAGE
+                       :NUMBER, :DIMENSION, :ISSUE_CODE, :ISSUE_MESSAGE
 
       def inspection(image)
         # Detector.read_root, not a second reader: it owns the 8192-byte

@@ -249,4 +249,60 @@ RSpec.describe "Claricle SVG handler" do
 
     expect(output).to eq("7.0"), "handler could not load alone: #{output}"
   end
+
+  describe "references that cannot be resolved" do
+    # A surrogate resolves to invalid UTF-8. It does not raise where it
+    # is produced -- it detonates later, in the dimension parse or in
+    # to_json -- so the raw declaration is kept instead.
+    it "keeps the raw declaration for a surrogate reference" do
+      inspection = inspect_svg(svg(%(width="&#xD800;")))
+
+      expect(inspection.width).to be_nil
+      expect(inspection.meta["width"]).to eq("&#xD800;")
+    end
+
+    it "serializes an attribute holding a surrogate reference" do
+      expect { inspect_svg(svg(%(id="&#xD800;"))).to_json }.not_to raise_error
+    end
+
+    it "keeps the raw declaration for an out-of-range reference" do
+      inspection = inspect_svg(svg(%(width="&#99999999999999999999;")))
+
+      expect(inspection.meta["width"]).to eq("&#99999999999999999999;")
+    end
+
+    # An escaped reference means the literal text. Resolving twice would
+    # turn "&amp;#x67;" into "g" and change what the document says.
+    it "does not resolve an escaped reference twice" do
+      escaped = %(<svg xmlns="http://www.w3.org/2000/sv&amp;#x67;"/>)
+
+      expect { Claricle.detect(escaped) }.to raise_error(Claricle::UnknownFormat)
+    end
+  end
+
+  describe "SVG's number grammar" do
+    # Ruby's Float is broader: Float("1.") is 1.0 and Float("1.e2") is
+    # 100.0, but SVG requires a digit after the decimal point.
+    { "1." => nil, "1.e2" => nil, ".5" => 0.5, "1.5" => 1.5,
+      "+2" => 2.0, "-2" => -2.0, "1e2" => 100.0 }.each do |declared, expected|
+      it "reads #{declared.inspect} as #{expected.inspect}" do
+        expect(inspect_svg(svg(%(width="#{declared}"))).width).to eq(expected)
+      end
+    end
+  end
+
+  describe "the bound is measured in bytes" do
+    # source[0, n] counts CHARACTERS, so a multibyte prolog would let the
+    # handler read past where detection stopped and the two would
+    # disagree about the same file.
+    it "agrees with detection on a multibyte prolog straddling it" do
+      prolog = "<!--#{"é" * 4100}-->"
+      source = prolog + svg(%(width="7"))
+
+      expect(prolog.bytesize).to be > 8192
+      expect(prolog.length).to be < 8192
+      expect(Claricle.const_get(:Detector).read_root(source)).to be_nil
+      expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+    end
+  end
 end
