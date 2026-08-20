@@ -299,11 +299,41 @@ RSpec.describe Claricle::Models do
         expect(restored.meta["range"]).to eq(1..5)
       end
 
-      it "refuses a payload from an unknown marshal version" do
-        payload = Marshal.dump([99, parent.to_hash])
+      # `1.0` and `Rational(1,1)` are both `== 1`, and a longer envelope
+      # would be a different format wearing the right version number, so
+      # the guard checks exact type and exact shape.
+      [99, 1.0, Rational(1, 1)].each do |version|
+        it "refuses a payload versioned #{version.inspect}" do
+          payload = Marshal.dump([version, parent.to_hash])
+
+          expect { models::Report._load(payload) }
+            .to raise_error(TypeError, /unsupported Claricle marshal payload/)
+        end
+      end
+
+      it "refuses an envelope carrying extra fields" do
+        payload = Marshal.dump([1, parent.to_hash, "extra"])
 
         expect { models::Report._load(payload) }
-          .to raise_error(TypeError, /unsupported Claricle marshal version 99/)
+          .to raise_error(TypeError, /unsupported Claricle marshal payload/)
+      end
+
+      # lutaml omits explicitly-empty values from `to_hash`, so a payload
+      # built from it lost the difference between "absent" and "empty".
+      it "keeps an explicitly empty hash rather than reloading it as nil" do
+        inspection = models::Inspection.new(format: "png", parse_status: "ok", meta: {})
+
+        expect(Marshal.load(Marshal.dump(inspection)).meta).to eq({})
+      end
+
+      it "keeps a present but empty nested model" do
+        # Not named `issue`: that is a lambda local at describe scope and
+        # assigning it here rebinds it for every later example. This file
+        # has now caught me twice, which is the argument for `let`.
+        with_location = models::Issue.new(severity: "info", message: "m",
+                                          location: models::Location.new)
+
+        expect(Marshal.load(Marshal.dump(with_location)).location).not_to be_nil
       end
     end
 
