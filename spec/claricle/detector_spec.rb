@@ -471,6 +471,42 @@ RSpec.describe "Claricle format detection" do
       expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
     end
 
+    # `#IMPLIED` means "declared, no default", so it is a real answer and
+    # not an absence. XML binds the first declaration, so a later one
+    # carrying a value must not fill in what the first left undeclared --
+    # a first-wins rule keyed on truthiness rather than presence got this
+    # backwards and reported a plain XML document as an SVG.
+    describe "an attribute declared without a default" do
+      it "is not resurrected by a later declaration in the same ATTLIST" do
+        source = doc(%(<!ATTLIST svg xmlns CDATA #IMPLIED xmlns CDATA #FIXED "#{svg_ns}">),
+                     "<svg/>")
+
+        expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+      end
+
+      it "is not resurrected by a later ATTLIST either" do
+        implied = %(<!ATTLIST svg xmlns CDATA #IMPLIED>)
+        fixed = %(  <!ATTLIST svg xmlns CDATA #FIXED "#{svg_ns}">)
+
+        expect { Claricle.detect(doc("#{implied}\n#{fixed}", "<svg/>")) }
+          .to raise_error(Claricle::UnknownFormat)
+      end
+
+      it "does not disturb a different attribute declared after it" do
+        source = doc(%(<!ATTLIST svg id ID #IMPLIED xmlns CDATA #FIXED "#{svg_ns}">),
+                     "<svg/>")
+
+        expect(Claricle.detect(source)).to eq(:svg)
+      end
+
+      it "is still overridden by an explicit attribute on the root" do
+        source = doc(%(<!ATTLIST svg xmlns CDATA #IMPLIED>),
+                     %(<svg xmlns="#{svg_ns}"/>))
+
+        expect(Claricle.detect(source)).to eq(:svg)
+      end
+    end
+
     it "does not apply another element's defaults to the root" do
       source = doc(%(<!ATTLIST other xmlns CDATA #FIXED "#{svg_ns}">), "<svg width='10'/>")
 
