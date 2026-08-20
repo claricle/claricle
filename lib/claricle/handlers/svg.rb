@@ -61,10 +61,11 @@ module Claricle
           format: image.format.to_s,
           width: dimension(attributes["width"]),
           height: dimension(attributes["height"]),
-          # A copy: `read_root` hands back its own hash, and an
-          # inspection handing out a reference to it would let a caller
-          # mutate what the reader produced.
-          meta: attributes.dup,
+          # Passed straight through: lutaml copies a `:hash` attribute on
+          # assignment, so the inspection never shares the reader's hash.
+          # A `.dup` here would be defending against something that
+          # cannot happen -- measured, and pinned by a spec.
+          meta: attributes,
           parse_status: "ok"
         )
       end

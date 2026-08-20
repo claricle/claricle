@@ -254,6 +254,26 @@ RSpec.describe "Claricle SVG handler" do
     expect(output).to eq("7.0")
   end
 
+  describe "meta" do
+    # read_root hands back its own hash. Handing a reference to it out of
+    # an inspection lets a caller mutate what the reader produced, and
+    # the model's freeze does not reach inside a Hash.
+    # The handler passes the reader's hash straight through, relying on
+    # lutaml to copy a `:hash` attribute on assignment. That is measured
+    # behaviour of a dependency, not a guarantee, so it is pinned here --
+    # if lutaml ever starts aliasing, an inspection would hand callers a
+    # reference to the reader's own hash and this goes red.
+    it "does not share the reader's hash" do
+      readers_hash = { "xmlns" => svg_ns, "width" => "7" }
+      allow(Claricle.const_get(:Detector)).to receive(:read_root)
+        .and_return(["svg", readers_hash])
+
+      inspect_svg(svg(%(width="7"))).meta["injected"] = true
+
+      expect(readers_hash).not_to have_key("injected")
+    end
+  end
+
   describe "references that cannot be resolved" do
     # A surrogate resolves to invalid UTF-8. It does not raise where it
     # is produced -- it detonates later, in the dimension parse or in
