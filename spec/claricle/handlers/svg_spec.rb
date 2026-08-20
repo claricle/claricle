@@ -100,6 +100,27 @@ RSpec.describe "Claricle SVG handler" do
     end
   end
 
+  describe "whitespace around a dimension" do
+    # XML attribute-value normalization keeps surrounding whitespace for
+    # a CDATA attribute, so these arrive with it and it is not part of
+    # the value the document means.
+    { "a leading space" => " 100", "a trailing space" => "100 ",
+      "a tab" => "&#x9;100", "a newline" => "&#xA;100",
+      "a carriage return" => "&#xD;100" }.each do |label, declared|
+      it "ignores #{label}" do
+        expect(inspect_svg(svg(%(width="#{declared}"))).width).to eq(100.0)
+      end
+    end
+
+    # `\s` would accept these; XML's whitespace set does not, so they
+    # are not whitespace and the value is not a dimension.
+    { "a vertical tab" => "&#xB;100", "a form feed" => "&#xC;100" }.each do |label, declared|
+      it "does not treat #{label} as whitespace" do
+        expect(inspect_svg(svg(%(width="#{declared}"))).width).to be_nil
+      end
+    end
+  end
+
   describe "the complete inspection" do
     it "is pinned exactly for a readable root" do
       inspection = inspect_svg(svg(%(width="100" height="50" viewBox="0 0 100 50")))

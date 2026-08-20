@@ -167,9 +167,13 @@ RSpec.describe Claricle::Cli::Runner do
         # Both axes, and enough digits that a wrong conversion cannot
         # hide behind a truncated match.
         expect { described_class.run(["inspect", file.path]) }
-          .to output(
-            /dimensions: 37\.79527559055118\d*x18\.89763779527559\d*.*height: 5mm.*width: 10mm/m
-          ).to_stdout
+          .to output(/format: svg/).to_stdout
+        expect { described_class.run(["inspect", file.path]) }
+          .to output(/dimensions: 37\.79527559055118\d*x18\.89763779527559\d*/).to_stdout
+        expect { described_class.run(["inspect", file.path]) }
+          .to output(/height: 5mm/).to_stdout
+        expect { described_class.run(["inspect", file.path]) }
+          .to output(/width: 10mm/).to_stdout
       end
     end
 

@@ -16,9 +16,11 @@ module Claricle
 
       # CSS absolute lengths, all defined against 1in = 96px. Computed
       # from that anchor rather than copied: 72pt, 6pc and 1in all come
-      # to 96.0. Q is included because CSS defines it -- leaving it out
-      # would drop it through to the relative branch, which is the wrong
-      # answer for an absolute unit.
+      # to 96.0. Q is listed because CSS defines it: an absolute unit
+      # missing from this table is indistinguishable from a relative one,
+      # and both come back nil -- the right answer for `%`, the wrong
+      # answer for `Q`. Relative units need no table of their own; they
+      # are simply anything absent here.
       PX_PER_INCH = 96.0
       ABSOLUTE_UNITS = {
         "px" => 1.0,
@@ -37,11 +39,17 @@ module Claricle
       # Surrounding whitespace survives XML attribute-value normalization
       # for a CDATA attribute -- `width=" 100"` arrives with the space --
       # and it is not part of the value the document means.
-      DIMENSION = /\A\s*(?<number>#{NUMBER})(?<unit>[a-z%]*)\s*\z/i
+      #
+      # XML's whitespace set explicitly, not `\s`: `\s` also matches
+      # vertical tab and form feed, which XML does not treat as
+      # whitespace, so `width="&#xB;100"` would read as 100 when it is
+      # not a dimension at all.
+      XML_SPACE = /[ \t\r\n]*/
+      DIMENSION = /\A#{XML_SPACE}(?<number>#{NUMBER})(?<unit>[a-z%]*)#{XML_SPACE}\z/i
       ISSUE_CODE = "svg.root_unreadable"
       ISSUE_MESSAGE = "SVG root element could not be read"
 
-      private_constant :PX_PER_INCH, :ABSOLUTE_UNITS, :NUMBER, :DIMENSION,
+      private_constant :PX_PER_INCH, :ABSOLUTE_UNITS, :NUMBER, :XML_SPACE, :DIMENSION,
                        :ISSUE_CODE, :ISSUE_MESSAGE
 
       def inspection(image)
