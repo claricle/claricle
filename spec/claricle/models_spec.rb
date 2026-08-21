@@ -652,6 +652,20 @@ RSpec.describe Claricle::Models do
       expect(built.meta).to be_a(Hash)
       expect(loaded.meta).to be_a(Hash)
     end
+
+    # Measured on 0.8.19: `Hash#to_h` returns SELF, so the cast handed the
+    # model the caller's own object. A handler that kept its reference
+    # could then rewrite what an inspection had already reported. Both
+    # halves: the model must not see the later write, and the caller must
+    # keep a usable Hash rather than a frozen one.
+    it "stores its own copy of the hash the caller supplied" do
+      supplied = { "a" => 1 }
+      inspection = described_class.const_get(:Inspection)
+                                  .new(format: "svg", parse_status: "ok", meta: supplied)
+
+      expect { supplied["b"] = 2 }.not_to raise_error
+      expect(inspection.meta).to eq({ "a" => 1 })
+    end
   end
 
   # lutaml accepts a list for a non-collection enum, stores it whole, and
