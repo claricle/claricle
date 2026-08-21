@@ -757,11 +757,16 @@ RSpec.describe Claricle::Models do
 
     # lutaml stores every enum value as an array internally, so the check
     # cannot key on shape alone -- these must still be accepted.
+    #
+    # Not named `issue`, for the third time in this file: that is a lambda
+    # local at describe scope, and assigning it inside an example rebinds
+    # it for every example that runs afterwards. Under `--order random`
+    # these two took 23 others down with them.
     it "still accepts a single value" do
-      issue = described_class.const_get(:Issue)
-                             .new(severity: "error", code: "c", message: "m")
+      single = described_class.const_get(:Issue)
+                              .new(severity: "error", code: "c", message: "m")
 
-      expect(issue.severity).to eq("error")
+      expect(single.severity).to eq("error")
     end
 
     # Cardinality only. By the time this runs lutaml has already turned a
@@ -769,9 +774,9 @@ RSpec.describe Claricle::Models do
     # able from the value it wraps and nothing is lost by taking it. A
     # document is stricter: lutaml rejects any list there itself.
     it "accepts a one-element list but refuses one from a document" do
-      issue = described_class.const_get(:Issue).new(severity: ["error"], message: "m")
+      wrapped = described_class.const_get(:Issue).new(severity: ["error"], message: "m")
 
-      expect(issue.severity).to eq("error")
+      expect(wrapped.severity).to eq("error")
       expect { described_class.const_get(:Issue).from_json(%({"severity":["error"],"message":"m"})) }
         .to raise_error(Lutaml::Model::CollectionTrueMissingError)
     end
