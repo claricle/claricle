@@ -595,4 +595,73 @@ RSpec.describe Claricle::Models do
         .to eq([33, 4, "IDAT"])
     end
   end
+
+  # lutaml-model 0.8.19's `:hash` type is shaped for XML and treats three
+  # key names as structure rather than data. `meta` is whatever a handler
+  # read out of a file, and an SVG root legitimately carries `elements`
+  # or `text` as an attribute name -- inspecting one crashed the CLI.
+  describe "free-form meta" do
+    {
+      "a nested text key" => { "node" => { "text" => "hello", "lang" => "en" } },
+      "an elements key" => { "elements" => { "width" => 1 } },
+      "text as the only key" => { "text" => "hello" },
+      "all three at once" => { "text" => "t", "elements" => { "w" => 1 },
+                               "node" => { "text" => "x", "lang" => "en" } }
+    }.each do |label, meta|
+      it "stores #{label} exactly as given" do
+        inspection = described_class.const_get(:Inspection)
+                                    .new(format: "svg", parse_status: "ok", meta: meta)
+
+        expect(inspection.meta).to eq(meta)
+      end
+
+      it "round-trips #{label} through JSON" do
+        inspection = described_class.const_get(:Inspection)
+                                    .new(format: "svg", parse_status: "ok", meta: meta)
+        back = described_class.const_get(:Inspection).from_json(inspection.to_json)
+
+        expect(back.meta).to eq(meta)
+        expect(back.meta).to be_a(Hash)
+      end
+    end
+
+    # The lutaml type wraps any Hash whose attribute type is not exactly
+    # Type::Hash, so the reader has to unwrap. A caller asked for a Hash.
+    it "hands back a Hash however the model was built" do
+      built = described_class.const_get(:Inspection)
+                             .new(format: "svg", parse_status: "ok", meta: { "a" => 1 })
+      loaded = described_class.const_get(:Inspection).from_json(built.to_json)
+
+      expect(built.meta).to be_a(Hash)
+      expect(loaded.meta).to be_a(Hash)
+    end
+  end
+
+  # lutaml accepts a list for a non-collection enum, stores it whole, and
+  # returns only the first element -- so the extra values vanish between
+  # construction and JSON with nothing to show for it.
+  describe "enum cardinality" do
+    it "refuses a list for Issue#severity" do
+      expect do
+        described_class.const_get(:Issue)
+                       .new(severity: %w[info error], code: "c", message: "m")
+      end.to raise_error(Lutaml::Model::ValidationError, /single value/)
+    end
+
+    it "refuses a list for Inspection#parse_status" do
+      expect do
+        described_class.const_get(:Inspection)
+                       .new(format: "svg", parse_status: %w[ok failed])
+      end.to raise_error(Lutaml::Model::ValidationError, /single value/)
+    end
+
+    # lutaml stores every enum value as an array internally, so the check
+    # cannot key on shape alone -- these must still be accepted.
+    it "still accepts a single value" do
+      issue = described_class.const_get(:Issue)
+                             .new(severity: "error", code: "c", message: "m")
+
+      expect(issue.severity).to eq("error")
+    end
+  end
 end
