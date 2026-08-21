@@ -34,7 +34,16 @@ module Claricle
         # `.dup`, because `Hash#to_h` returns SELF for a Hash. Without it
         # the model shares the caller's object, and a handler holding a
         # reference could mutate what an inspection already reported.
-        value.to_h.dup
+        #
+        # `.freeze` on that copy for the other half of the same promise:
+        # a sealed Inspection could otherwise still have `meta["x"] = 1`
+        # written straight through it, and its JSON changed after the
+        # fact. Here rather than in `Base#freeze_attributes`, because this
+        # is the one place both doors meet -- deserialization wraps the
+        # value afterwards but the wrapped Hash came through here too.
+        # The copy is shallow, so what a handler nested inside stays the
+        # handler's and stays writable.
+        value.to_h.dup.freeze
       end
 
       def self.serialize(value)

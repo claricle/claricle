@@ -80,26 +80,34 @@ RSpec.describe Claricle::Models do
   end
 
   describe "the deferral marker" do
+    # The thread-local itself, not a follow-up construction: a model built
+    # with real attributes finalizes whether the marker leaked or not, so
+    # it cannot tell the two apart. Only the blank signature can, and that
+    # is what the ensure protects.
     it "is cleared after a successful deserialization" do
       models::Report.from_json(%({"source_path":"a"}))
-      expect { models::Issue.new(severity: "bogus", message: "m") }
+
+      expect(Thread.current[:claricle_models_deserializing]).to be_nil
+      expect { models::Issue.new(lutaml_register: :default) }
         .to raise_error(Lutaml::Model::ValidationError)
     end
 
-    # Malformed input raises inside the deserialization call itself, so
-    # this exercises the ensure. A validation failure would not -- that
-    # happens after the marker is already restored.
-    it "is restored when deserialization raises part-way through" do
-      begin
-        models::Report.from_json("{not json")
-      rescue StandardError
-        nil
-      end
-      expect { models::Issue.new(severity: "bogus", message: "m") }
+    # Malformed input fails inside the adapter, before `Base.of` sets the
+    # marker at all -- so this covers the path that never reaches the
+    # ensure. The example below covers the one that does.
+    it "leaves no marker behind when parsing fails" do
+      expect { models::Report.from_json("{not json") }
+        .to raise_error(Lutaml::Model::InvalidFormatError)
+
+      expect(Thread.current[:claricle_models_deserializing]).to be_nil
+      expect { models::Issue.new(lutaml_register: :default) }
         .to raise_error(Lutaml::Model::ValidationError)
     end
 
-    # The thread-local key is guessable; the identity of the value is not.
+    # Neither the key nor the stored value is secret -- it is literally
+    # `true`. The protection is that deferral needs the marker AND
+    # lutaml's blank signature together, so parking a value under the key
+    # does nothing to ordinary construction.
     [true, [], "x"].each do |forged|
       it "cannot be deferred by parking #{forged.inspect} under the key" do
         Thread.current[:claricle_models_deserializing] = forged
@@ -196,11 +204,13 @@ RSpec.describe Claricle::Models do
     # Three members, and the invalid one last: a single-element array
     # cannot catch finalization being applied to only the first.
     it "validates and freezes every member of a top-level array" do
-      json = %([{"severity":"info","message":"a"},{"severity":"warning","message":"b"}])
+      json = %([{"severity":"info","message":"a"},{"severity":"warning","message":"b"},) +
+             %({"severity":"error","message":"c"}])
       parsed = models::Issue.from_json(json)
-      expect(parsed.map(&:severity)).to eq(%w[info warning])
+      expect(parsed.map(&:severity)).to eq(%w[info warning error])
       expect(parsed).to all(be_frozen)
-      bad = %([{"severity":"info","message":"a"},{"severity":"nope","message":"b"}])
+      bad = %([{"severity":"info","message":"a"},{"severity":"warning","message":"b"},) +
+            %({"severity":"nope","message":"c"}])
       expect { models::Issue.from_json(bad) }
         .to raise_error(Lutaml::Model::ValidationError)
     end
@@ -350,8 +360,10 @@ RSpec.describe Claricle::Models do
       end
     end
 
-    # Marshal skips initialize, and @claricle_sealed survives the dump, so
-    # a restored model would be mutable while claiming to be sealed.
+    # The payload carries declared attributes and nothing else, so
+    # @claricle_sealed is not in it -- a restored model is sealed because
+    # `_load` rebuilds it through `from_hash` and finalizes, not because
+    # the marker travelled.
     it "re-runs the lifecycle on an unmarshalled model" do
       restored = Marshal.load(Marshal.dump(original))
       expect(restored).to be_frozen
@@ -364,9 +376,14 @@ RSpec.describe Claricle::Models do
       expect { original.dup.severity = "bogus" }.to raise_error(FrozenError)
     end
 
+    # `be_frozen` on the clone itself, because the assignment alone proves
+    # less than it looks: it raises on the shallow-copied and already
+    # frozen @using_default before it ever reaches the object.
     it "re-freezes an explicitly unfrozen clone" do
-      expect { original.clone(freeze: false).severity = "bogus" }
-        .to raise_error(FrozenError)
+      copy = original.clone(freeze: false)
+
+      expect(copy).to be_frozen
+      expect { copy.severity = "bogus" }.to raise_error(FrozenError)
     end
   end
 
@@ -479,9 +496,10 @@ RSpec.describe Claricle::Models do
       expect { report.issues.first.location.chunk << "x" }.to raise_error(FrozenError)
     end
 
-    # using_default_for is public on lutaml. Flipping an entry on a frozen
-    # model drops the attribute from the document, so a warning report
-    # serializes "issues":null and reloads as clean.
+    # using_default_for is public on lutaml. Flipping an entry drops that
+    # attribute from the document -- measured: mark every one of an
+    # issue's fields and a warning report serializes "issues":null and
+    # reloads valid.
     it "refuses to have its default bookkeeping flipped" do
       expect { report.issues.first.using_default_for(:severity) }
         .to raise_error(FrozenError)
@@ -499,11 +517,23 @@ RSpec.describe Claricle::Models do
     end
 
     # Sealing tracks its own bookkeeping rather than trusting frozen?, so a
-    # model frozen by someone else is not mistaken for a sealed one.
+    # model frozen by someone else is not mistaken for a sealed one. A bare
+    # `allocate.freeze` cannot show that: validation rejects an empty model
+    # long before seal runs. The fixture is a fully populated Issue that
+    # someone froze without ever calling finalize, so seal is reached and
+    # dies writing its own marker -- where a `frozen?` check would have let
+    # it pass as already sealed.
     it "does not treat an externally frozen model as sealed" do
-      unsealed = models::Issue.allocate.freeze
-      expect { models::Report.new(issues: [unsealed]) }
-        .to raise_error(Lutaml::Model::ValidationError)
+      template = models::Issue.new(severity: "info", message: "m")
+      unsealed = models::Issue.allocate
+      template.instance_variables.each do |name|
+        next if name == :@claricle_sealed
+
+        unsealed.instance_variable_set(name, template.instance_variable_get(name))
+      end
+      unsealed.freeze
+
+      expect { models::Report.new(issues: [unsealed]) }.to raise_error(FrozenError)
     end
 
     it "is idempotent, so an aggregate can seal members twice" do
@@ -666,20 +696,47 @@ RSpec.describe Claricle::Models do
       expect { supplied["b"] = 2 }.not_to raise_error
       expect(inspection.meta).to eq({ "a" => 1 })
     end
+
+    # Owning the container is only half of it. Left writable, a sealed
+    # Inspection could still have `meta["x"] = 1` written through it and
+    # its JSON changed afterwards, which is exactly what deep freeze is
+    # there to stop. Both doors, because deserialization stores the value
+    # wrapped rather than bare.
+    it "seals the metadata container at both doors" do
+      built = described_class.const_get(:Inspection)
+                             .new(format: "svg", parse_status: "ok", meta: { "a" => 1 })
+      loaded = described_class.const_get(:Inspection).from_json(built.to_json)
+
+      expect { built.meta["x"] = 1 }.to raise_error(FrozenError)
+      expect { loaded.meta["x"] = 1 }.to raise_error(FrozenError)
+      expect(built.to_json).to eq(loaded.to_json)
+    end
+
+    # lutaml generates `meta(*args)` and the block form of `new` uses the
+    # argument branch to assign. Overriding it with a zero-arity reader
+    # made meta the one attribute that form could not set.
+    it "still sets through the builder form of new" do
+      inspection = described_class.const_get(:Inspection).new do |i|
+        i.parse_status = "ok"
+        i.meta("a" => 1)
+      end
+
+      expect(inspection.meta).to eq({ "a" => 1 })
+    end
   end
 
   # lutaml accepts a list for a non-collection enum, stores it whole, and
   # returns only the first element -- so the extra values vanish between
   # construction and JSON with nothing to show for it.
   describe "enum cardinality" do
-    it "refuses a list for Issue#severity" do
+    it "refuses two values for Issue#severity" do
       expect do
         described_class.const_get(:Issue)
                        .new(severity: %w[info error], code: "c", message: "m")
       end.to raise_error(Lutaml::Model::ValidationError, /single value/)
     end
 
-    it "refuses a list for Inspection#parse_status" do
+    it "refuses two values for Inspection#parse_status" do
       expect do
         described_class.const_get(:Inspection)
                        .new(format: "svg", parse_status: %w[ok failed])
@@ -693,6 +750,18 @@ RSpec.describe Claricle::Models do
                              .new(severity: "error", code: "c", message: "m")
 
       expect(issue.severity).to eq("error")
+    end
+
+    # Cardinality only. By the time this runs lutaml has already turned a
+    # bare "error" into ["error"], so a one-element list is indistinguish-
+    # able from the value it wraps and nothing is lost by taking it. A
+    # document is stricter: lutaml rejects any list there itself.
+    it "accepts a one-element list but refuses one from a document" do
+      issue = described_class.const_get(:Issue).new(severity: ["error"], message: "m")
+
+      expect(issue.severity).to eq("error")
+      expect { described_class.const_get(:Issue).from_json(%({"severity":["error"],"message":"m"})) }
+        .to raise_error(Lutaml::Model::CollectionTrueMissingError)
     end
   end
 end
