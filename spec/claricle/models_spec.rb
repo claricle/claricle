@@ -712,6 +712,18 @@ RSpec.describe Claricle::Models do
       expect(built.to_json).to eq(loaded.to_json)
     end
 
+    # Sealing the model must not follow the value out into a document.
+    # Every other key `to_hash` renders comes back writable, and meta is
+    # not special to whoever asked for the Hash.
+    it "renders a document the caller can still edit" do
+      inspection = described_class.const_get(:Inspection)
+                                  .new(format: "svg", parse_status: "ok", meta: { "a" => 1 })
+      doc = inspection.to_hash
+
+      expect { doc["meta"]["b"] = 2 }.not_to raise_error
+      expect(inspection.meta).to eq({ "a" => 1 })
+    end
+
     # lutaml generates `meta(*args)` and the block form of `new` uses the
     # argument branch to assign. Overriding it with a zero-arity reader
     # made meta the one attribute that form could not set.
