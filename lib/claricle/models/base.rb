@@ -222,11 +222,36 @@ module Claricle
       # it as-is and the failure surfaces much later as a NoMethodError.
       def validate_types
         self.class.attributes.each do |name, attribute|
+          validate_cardinality(name, attribute)
+
           type = attribute.type
           next unless type.is_a?(Class) && type < Base
 
           validate_attribute(name, attribute, type)
         end
+      end
+
+      # An enum that is not a collection must be given one value, not a
+      # list. lutaml 0.8.19 accepts the list, stores it whole, and its
+      # getter returns only the first element -- so
+      # `Issue.new(severity: ["info", "error"])` validates, reports
+      # `"info"`, and drops `"error"` on the way to JSON. Nothing about
+      # that is visible to a caller.
+      #
+      # The raw ivar, because the getter is the thing that hides it.
+      def validate_cardinality(name, attribute)
+        return if attribute.collection?
+        return unless attribute.enum?
+
+        # lutaml stores EVERY enum value as an array, so a valid
+        # `severity: "error"` is `["error"]` here and the shape alone
+        # proves nothing. Only a second element is evidence that a list
+        # was passed, and only that loses data.
+        raw = instance_variable_get(:"@#{name}")
+        return unless raw.is_a?(Array) && raw.length > 1
+
+        raise Lutaml::Model::ValidationError,
+              [TypeError.new("#{name} expects a single value, got #{raw.inspect}")]
       end
 
       def validate_attribute(name, attribute, type)
