@@ -26,7 +26,11 @@ module Claricle
         map "height", to: :height
         map "dpi", to: :dpi
         map "color_space", to: :color_space
-        map "meta", to: :meta
+        # render_empty, so a handler that deliberately reported an empty
+        # `meta` gets `{}` back rather than nil. Without it the key is
+        # omitted from JSON and reloads as nil, turning "I looked and
+        # there was nothing" into "I did not look".
+        map "meta", to: :meta, render_empty: true
         map "parse_status", to: :parse_status
         map "issues", to: :issues, render_empty: true
       end

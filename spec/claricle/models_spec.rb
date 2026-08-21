@@ -625,6 +625,23 @@ RSpec.describe Claricle::Models do
       end
     end
 
+    # An empty meta is a report -- "I looked and there was nothing" --
+    # and must survive the round trip as {}. Without render_empty the key
+    # is omitted from JSON and reloads as nil, which says "I did not
+    # look". Absent meta must still reload as nil, so the two stay
+    # distinguishable.
+    it "keeps an empty hash distinct from an absent one" do
+      empty = described_class.const_get(:Inspection)
+                             .new(format: "png", parse_status: "ok", meta: {})
+      absent = described_class.const_get(:Inspection)
+                              .new(format: "png", parse_status: "ok")
+
+      expect(described_class.const_get(:Inspection).from_json(empty.to_json).meta)
+        .to eq({})
+      expect(described_class.const_get(:Inspection).from_json(absent.to_json).meta)
+        .to be_nil
+    end
+
     # The lutaml type wraps any Hash whose attribute type is not exactly
     # Type::Hash, so the reader has to unwrap. A caller asked for a Hash.
     it "hands back a Hash however the model was built" do
