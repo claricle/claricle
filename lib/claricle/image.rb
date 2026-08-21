@@ -29,7 +29,7 @@ module Claricle
 
       @format = format
       @path = path
-      @content = content
+      @content = content && binary(content)
     end
 
     # Read on demand, once. Detection already streamed the file; slurping it
@@ -66,6 +66,19 @@ module Claricle
     end
 
     private
+
+    # Bytes, whatever the caller tagged them. `File.binread` already gives
+    # that; detection binary-copies its own view (detector.rb:137) and
+    # never the String we keep, so a content-born image was the one place
+    # `content` depended on how the caller happened to read the file.
+    # Measured: the same 70-byte PNG through `File.read` arrives UTF-8,
+    # where `length` is 69 and `valid_encoding?` is false -- a handler
+    # indexing or scanning it would disagree with the path-born image.
+    # Re-tagged on a copy, so the caller keeps their String as it was, and
+    # only when it has to be: `.b` allocates a second whole image.
+    def binary(bytes)
+      bytes.encoding == Encoding::BINARY ? bytes : bytes.b
+    end
 
     # Per call: handlers are stateless, and a cache would buy nothing.
     def handler
