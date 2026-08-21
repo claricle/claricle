@@ -18,6 +18,15 @@ module Claricle
         def formats(*symbols)
           raise Error, "#{self} already declared formats #{@formats.inspect}" if @formats
 
+          # Symbols only. The registry keys its map on these and sorts the
+          # keys for `Registry.formats`, so one String among them is not a
+          # near miss -- measured: after `formats "png", :svg` the sort
+          # raises `comparison of String with :svg failed`, and
+          # `handler_for(:png)` calls :png unsupported. Refused where the
+          # typo is rather than at the first call that trips over it.
+          bad = symbols.grep_v(Symbol)
+          raise Error, "#{self} declared non-Symbol formats #{bad.inspect}" if bad.any?
+
           @formats = symbols.freeze
         end
 
