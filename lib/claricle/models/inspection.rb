@@ -75,6 +75,13 @@ module Claricle
       def freeze_attributes
         super
         meta&.freeze
+        # And the wrapper the reader unwraps. Freezing only what `meta`
+        # hands back leaves the FreeFormHash deserialization stored in
+        # the ivar writable -- measured: after `from_json`,
+        # `@meta.instance_variable_set(:@value, {"changed" => true})`
+        # gave a frozen Inspection a different `meta` and different JSON,
+        # without ever touching a frozen object.
+        @meta.freeze
       end
 
       def nested_models

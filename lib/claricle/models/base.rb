@@ -264,12 +264,35 @@ module Claricle
       def validate_types
         self.class.attributes.each do |name, attribute|
           validate_cardinality(name, attribute)
+          validate_finite(name)
 
           type = attribute.type
           next unless type.is_a?(Class) && type < Base
 
           validate_attribute(name, attribute, type)
         end
+      end
+
+      # JSON has neither Infinity nor NaN. lutaml coerces both without
+      # complaint -- measured: `{"width":1e400}` deserialized to
+      # Float::INFINITY, the lifecycle froze the model around it, and the
+      # `to_json` that followed raised `JSON::GeneratorError`, so a
+      # document that parsed could not be written back out. Refused here,
+      # where the attribute name is still in hand.
+      def validate_finite(name)
+        value = public_send(name)
+        return unless value.is_a?(Numeric) && !value.finite?
+
+        refuse(name, "a finite number", value)
+      end
+
+      # One sentence for every one of these checks, and one place that
+      # knows lutaml's ValidationError carries exceptions rather than
+      # Strings -- handed bare Strings, its own `error_messages` blows
+      # up. Subclasses raise through here too.
+      def refuse(name, expectation, got)
+        raise Lutaml::Model::ValidationError,
+              [TypeError.new("#{name} expects #{expectation}, got #{got}")]
       end
 
       # An enum that is not a collection must be given one value, never
@@ -299,18 +322,14 @@ module Claricle
         raw = instance_variable_get(:"@#{name}")
         return unless raw.is_a?(Array) && raw.length > 1
 
-        raise Lutaml::Model::ValidationError,
-              [TypeError.new("#{name} expects a single value, got #{raw.inspect}")]
+        refuse(name, "a single value", raw.inspect)
       end
 
       def validate_attribute(name, attribute, type)
         value = public_send(name)
         return validate_type(name, type, value, nullable: true) unless attribute.collection?
 
-        unless value.is_a?(Array)
-          raise Lutaml::Model::ValidationError,
-                [TypeError.new("#{name} expects a collection, got #{value.class}")]
-        end
+        refuse(name, "a collection", value.class) unless value.is_a?(Array)
 
         value.each { |element| validate_type(name, type, element, nullable: false) }
       end
@@ -321,8 +340,7 @@ module Claricle
         return if nullable && element.nil?
         return if element.is_a?(type)
 
-        raise Lutaml::Model::ValidationError,
-              [TypeError.new("#{name} expects #{type}, got #{element.class}")]
+        refuse(name, type, element.class)
       end
 
       def nested_models

@@ -672,9 +672,62 @@ RSpec.describe Claricle::Models do
     it "leaves dpi nullable" do
       expect(models::Inspection.new(format: "png", parse_status: "ok").dpi).to be_nil
     end
+
+    # JSON has neither Infinity nor NaN. lutaml took both, the lifecycle
+    # froze the model around them, and the to_json that followed raised
+    # JSON::GeneratorError -- so a document that parsed could not be
+    # written back out. All three dimensions, and both doors.
+    it "refuses a dimension JSON could not write back out" do
+      expect { models::Inspection.from_json(%({"parse_status":"ok","width":1e400})) }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /width expects a finite number, got Infinity/)
+      expect { models::Inspection.new(parse_status: "ok", height: Float::NAN) }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /height expects a finite number, got NaN/)
+      expect { models::Inspection.new(parse_status: "ok", dpi: -Float::INFINITY) }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /dpi expects a finite number, got -Infinity/)
+    end
+
+    # The guard keys on finiteness, not on the value being unusual: 0.0
+    # and a huge-but-finite dimension both stay legal and both serialize.
+    it "still accepts every finite dimension" do
+      wide = models::Inspection.new(parse_status: "ok", width: 0.0, height: 1e308)
+
+      expect([wide.width, wide.height]).to eql([0.0, 1e308])
+      expect(models::Inspection.from_json(wide.to_json).height).to eql(1e308)
+    end
   end
 
   describe "Location" do
+    # lutaml coerces the type and never looks at the value, so both ends
+    # of a zero-based half-open range came back negative from a document.
+    it "refuses a negative byte range at both doors" do
+      expect { models::Location.new(byte_offset: -1) }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /byte_offset expects a non-negative integer, got -1/)
+      expect { models::Location.from_json(%({"byte_length":-4})) }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /byte_length expects a non-negative integer, got -4/)
+    end
+
+    # Zero is a legal offset and a legal length, so the guard has to key
+    # on the sign rather than on the value being falsy or blank.
+    it "still accepts a zero-length range at offset zero" do
+      empty = models::Location.new(byte_offset: 0, byte_length: 0)
+
+      expect([empty.byte_offset, empty.byte_length]).to eq([0, 0])
+    end
+
+    # Nested, because Location is reached through an Issue in practice
+    # and the aggregate walks its own children.
+    it "refuses a negative range nested in a report" do
+      json = %({"issues":[{"severity":"error","message":"m",) +
+             %("location":{"byte_offset":-1}}]})
+      expect { models::Report.from_json(json) }
+        .to raise_error(Lutaml::Model::ValidationError, /byte_offset expects a non-negative/)
+    end
+
     it "round-trips a chunk and both ends of the byte range" do
       located = issue["error", location: models::Location.new(byte_offset: 33, byte_length: 4,
                                                               chunk: "IDAT")]
@@ -768,6 +821,22 @@ RSpec.describe Claricle::Models do
       expect { built.meta["x"] = 1 }.to raise_error(FrozenError)
       expect { loaded.meta["x"] = 1 }.to raise_error(FrozenError)
       expect(built.to_json).to eq(loaded.to_json)
+    end
+
+    # Sealing the Hash the reader unwraps is only half of it.
+    # Deserialization stores a FreeFormHash around that Hash, and the
+    # wrapper is a separate object -- left writable, it could be pointed
+    # at another Hash without ever touching a frozen one, and the frozen
+    # Inspection's own JSON changed with it.
+    it "seals the wrapper deserialization stores, not only the hash inside" do
+      loaded = described_class.const_get(:Inspection)
+                              .from_json(%({"parse_status":"ok","meta":{"a":1}}))
+      wrapper = loaded.instance_variable_get(:@meta)
+
+      expect(wrapper).to be_frozen
+      expect { wrapper.instance_variable_set(:@value, { "changed" => true }) }
+        .to raise_error(FrozenError)
+      expect(loaded.meta).to eq({ "a" => 1 })
     end
 
     # Sealing the model must not follow the value out into a document.
