@@ -41,4 +41,9 @@ module Claricle
 
     private_constant :HANDLER_CLASSES, :HANDLERS
   end
+
+  # Here rather than in the entry point, for the same reason the requires
+  # above are: requiring this file on its own is a supported path, and it
+  # used to leave Registry public until claricle.rb happened to run.
+  private_constant :Registry
 end
