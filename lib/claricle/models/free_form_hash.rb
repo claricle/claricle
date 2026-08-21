@@ -31,7 +31,10 @@ module Claricle
         return nil if value.nil?
 
         value = value.value if value.is_a?(Lutaml::Model::Type::Value)
-        value.to_h
+        # `.dup`, because `Hash#to_h` returns SELF for a Hash. Without it
+        # the model shares the caller's object, and a handler holding a
+        # reference could mutate what an inspection already reported.
+        value.to_h.dup
       end
 
       def self.serialize(value)
