@@ -1,5 +1,5 @@
 AllCops:
-  TargetRubyVersion: 3.0
+  TargetRubyVersion: 3.3
   NewCops: enable
   SuggestExtensions: false
 
@@ -11,3 +11,12 @@ Style/StringLiteralsInInterpolation:
 
 Style/Documentation:
   Enabled: false
+
+Metrics/BlockLength:
+  # Add to RuboCop's default Exclude rather than replacing it, which would
+  # drop the *.gemspec exemption.
+  inherit_mode:
+    merge:
+      - Exclude
+  Exclude:
+    - 'spec/**/*'
