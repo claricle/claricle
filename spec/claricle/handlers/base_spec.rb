@@ -4,6 +4,52 @@ RSpec.describe "Claricle::Handlers::Base" do
   base = Claricle.const_get(:Handlers).const_get(:Base)
   image = Struct.new(:format)
 
+  # Derived, never declared -- so these cover the three shapes the
+  # derivation can meet. A direct-only implementation loses the inherited
+  # case and still passes a spec that only checks a direct override.
+  describe "capabilities" do
+    it "are empty when a handler implements nothing" do
+      expect(Class.new(base).capabilities).to be_empty
+    end
+
+    it "name the operation a handler overrides directly" do
+      subclass = Class.new(base) do
+        def inspection(image) = image
+      end
+
+      expect(subclass.capabilities).to eq([:inspect])
+    end
+
+    it "are inherited by a subclass that overrides nothing further" do
+      parent = Class.new(base) do
+        def inspection(image) = image
+      end
+      child = Class.new(parent)
+
+      expect(child.capabilities).to eq([:inspect])
+    end
+
+    it "add the child's own operation to the inherited one" do
+      parent = Class.new(base) do
+        def inspection(image) = image
+      end
+      child = Class.new(parent) do
+        def conformance_report(image) = image
+      end
+
+      expect(child.capabilities).to contain_exactly(:inspect, :conform)
+    end
+
+    # Declaring formats is not implementing anything, so a class that only
+    # declares must name NO operation -- including :inspect, which an
+    # earlier version of this example left unguarded.
+    it "cannot name any operation that is still Base's raising stub" do
+      subclass = Class.new(base) { formats :png }
+
+      expect(subclass.capabilities).to be_empty
+    end
+  end
+
   describe "the formats declaration" do
     it "reads back what a subclass declared" do
       subclass = Class.new(base) { formats :png, :svg }

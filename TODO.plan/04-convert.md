@@ -153,7 +153,8 @@ svg/emf/eps/ps were measured working, so v1 ships the full matrix.
   it is a handler class plus a detector edit plus a require plus a
   registry entry plus a lossiness edge, and the README says so rather
   than repeating the one-class claim. Gemspec description/homepage
-  refreshed (org moved ribose → claricle). `sig/` brought up to date.
+  refreshed (org moved ribose → claricle). No `sig/` work: RBS was
+  dropped on 2026-08-19.
   Drop `"convert"` from 01's stub-removal spec assertion (a real
   `convert` now exists).
 
@@ -183,7 +184,7 @@ Plumbing first again, then one edge family per commit.
    write a general round-trip assertion). Add a feature-loss rule only
    when a fixture demonstrates the loss.
 6. `formats` full-matrix spec once the last edge lands.
-7. README rewrite + gemspec metadata + RBS update + stub-spec update.
+7. README rewrite + gemspec metadata + stub-spec update.
 
 ## Done when
 
@@ -206,6 +207,6 @@ Plumbing first again, then one edge family per commit.
 `lib/claricle/models/conversion.rb`, `lib/claricle/handlers/
 {metafile,postscript,svg}.rb`, `lib/claricle/writer.rb` (write
 lifecycle service), `lib/claricle/registry.rb`, `lib/claricle.rb`,
-`lib/claricle/cli.rb`, `README.adoc`, `claricle.gemspec`, `sig/`,
+`lib/claricle/cli.rb`, `README.adoc`, `claricle.gemspec`,
 `spec/claricle/conversion/*_spec.rb`, `spec/claricle/writer_spec.rb`,
 `spec/claricle/cli_spec.rb`.

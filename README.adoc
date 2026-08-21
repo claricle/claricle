@@ -39,14 +39,20 @@ The name reflects what the library is for:
 == What works today
 
 * Format detection for PNG, SVG, EMF, WMF, EPS, PS and PDF
+* `inspect` for PNG -- dimensions, colour space, bit depth and DPI
+* `formats`, listing each format and what Claricle can do with it
 * `Claricle::Image`, built from a path or from bytes
 * A unified issue and report model, serialising to and from JSON
 * An error taxonomy mapped to documented CLI exit codes
 
 == What does not work yet
 
-* `inspect`, `conform` and `convert` -- the handler registry ships
-  empty, so every operation raises `Claricle::UnsupportedFormat`
+* `inspect` for SVG, EMF, WMF, EPS, PS and PDF -- only PNG has a
+  handler so far, so the rest raise `Claricle::UnsupportedFormat`
+* `conform` and `convert` for every format. No handler implements
+  either yet, so both raise `Claricle::UnsupportedFormat`. `claricle
+  formats` reports this per format, and it reads the handlers rather
+  than a list, so it cannot claim an operation that is not there
 * WMF beyond detection. `detect` returns `:wmf`, but no handler
   registers it, so every operation on a WMF raises
   `UnsupportedFormat`. That is deliberate: the upstream parser this
@@ -56,16 +62,19 @@ The name reflects what the library is for:
 
 === Available commands
 
-[source,sh]
-----
-$ claricle help
-Commands:
-  claricle help [COMMAND]  # Describe available commands or one specific command
-  claricle version         # Display Claricle version
-----
+[cols="1,3"]
+|===
+| Command | What it does
 
-The operations are added as they are implemented, so `claricle help`
-never lists a command that does nothing.
+| `claricle inspect FILE` | Report a file's format and metadata
+| `claricle formats` | List the formats Claricle handles, and what it can do with each
+| `claricle version` | Print the version
+|===
+
+`claricle help` lists these, plus the commands Thor contributes itself.
+
+The operations are added as they are implemented, so this table never
+lists a command that does nothing.
 
 === Version
 
@@ -135,8 +144,9 @@ end
 lib/claricle/
   detector.rb          # magic-byte and XML-root format detection
   image.rb             # the object every operation takes
-  registry.rb          # frozen format -> handler map, empty today
+  registry.rb          # frozen format -> handler map
   handlers/base.rb     # what a handler subclasses
+  handlers/png.rb      # PNG metadata
   models/              # Location, Issue, Report, Inspection
   errors.rb            # Error, UnknownFormat, UnsupportedFormat, ...
   cli.rb               # Thor CLI and the exit-code Runner

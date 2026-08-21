@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "json"
+
 module Claricle
   # Command-line interface for Claricle
   class Cli < Thor
@@ -11,6 +13,103 @@ module Claricle
     def version
       puts "Claricle version #{Claricle::VERSION}"
     end
+
+    desc "inspect FILE", "Report a file's format and metadata"
+    option :json, type: :boolean, default: false, desc: "Emit JSON"
+    # Named `inspect_file` and mapped, because a Thor command is an
+    # instance method and `def inspect(file)` would override
+    # `Object#inspect` on every Cli instance -- `p cli` then raises
+    # ArgumentError. This is D2's rule (`Image#inspect` became
+    # `#inspection`) applied one layer up. The command is still `inspect`.
+    def inspect_file(file)
+      inspection = Image.from_path(file).inspection
+      puts(options[:json] ? inspection.to_json : Presenter.inspection(inspection))
+    end
+    # Thor registers a command under its METHOD name and `map` only adds
+    # an alias on top, so `inspect_file` stayed callable -- and Thor's
+    # `normalize_command_name` translates dashes to underscores, so
+    # `inspect-file` worked too. Three spellings, one documented.
+    #
+    # Re-keying the command and dropping both the method-named entry and
+    # the alias leaves exactly `inspect`. The Command object keeps its
+    # `inspect_file` name, so dispatch still reaches the method above and
+    # `Object#inspect` is never shadowed.
+    #
+    # Neither obvious one-liner works: removing the command alone breaks
+    # `inspect` too, because the alias then points at nothing, and
+    # keeping the alias re-resolves `inspect` back to the removed name.
+    commands["inspect"] = commands.delete("inspect_file")
+    map.delete("inspect")
+
+    desc "formats", "List the formats Claricle handles and what it can do with each"
+    option :json, type: :boolean, default: false, desc: "Emit JSON"
+    def formats
+      rows = Registry.formats.map { |format| Presenter.format_row(format) }
+      puts(options[:json] ? JSON.generate(rows) : Presenter.format_table(rows))
+    end
+
+    # Rendering, kept together so the commands above stay one line each.
+    # Nothing here touches `options` or writes output; the commands do
+    # both.
+    module Presenter
+      module_function
+
+      # Capabilities are derived from the handler, so this cannot
+      # advertise an operation that is still a raising stub. `convert_to`
+      # stays empty until item 04 gives handlers a target list.
+      def format_row(format)
+        capabilities = Registry.capabilities_for(format)
+
+        {
+          "format" => format.to_s,
+          "inspect" => capabilities.include?(:inspect),
+          "conform" => capabilities.include?(:conform),
+          "convert" => capabilities.include?(:convert),
+          # The list of targets is item 04's; the boolean above already
+          # tells the truth about whether convert works at all.
+          "convert_to" => []
+        }
+      end
+
+      def format_table(rows)
+        rows.map do |row|
+          operations = %w[inspect conform convert].select { |name| row[name] }
+          "#{row["format"]}\t#{operations.join(", ")}"
+        end.join("\n")
+      end
+
+      def inspection(inspection)
+        rows(inspection)
+          .filter_map { |label, value| "#{label}: #{value}" unless value.nil? }
+          .join("\n")
+      end
+
+      # Label/value pairs filtered once, rather than a conditional per
+      # field: a nil field is simply absent, and adding a field later does
+      # not add a branch. Pairs rather than a Hash, because two issues can
+      # share a severity and a Hash would silently drop one.
+      def rows(inspection)
+        [
+          ["format", inspection.format], *dimension_rows(inspection),
+          ["dpi", inspection.dpi], ["color space", inspection.color_space],
+          *inspection.meta.to_a.sort, ["parse status", inspection.parse_status],
+          *inspection.issues.map { |issue| [issue.severity, issue.message] }
+        ]
+      end
+
+      # One line when both are known, separate lines when only one is.
+      # SVG can carry a width and no height, and "7.0x" is not a
+      # dimension -- but dropping the line would lose the width entirely.
+      def dimension_rows(inspection)
+        width = inspection.width
+        height = inspection.height
+        return [["dimensions", "#{width}x#{height}"]] if width && height
+
+        [["width", width], ["height", height]]
+      end
+    end
+
+    private_constant :Presenter
 
     # Turns an exception into a process status. `run` returns an Integer
     # for everything it maps, and never exits -- only exe/claricle exits,
@@ -36,6 +135,11 @@ module Claricle
           freeze
         end
       end
+
+      # Errors Claricle recognises, whose own message already reads as a
+      # sentence. Everything else gets its class named.
+      MAPPED = [Error, Thor::Error, Errno::ENOENT].freeze
+      private_constant :MAPPED
 
       class << self
         def run(argv, output: $stderr)
@@ -80,10 +184,11 @@ module Claricle
         end
 
         # An unexpected failure names its class: "claricle: missing gem" is
-        # not much help when the class was LoadError. A mapped Claricle
-        # error already reads as a sentence, so it does not need one.
+        # not much help when the class was LoadError. A recognised error
+        # does not need one -- ENOENT included, now that `inspect` takes a
+        # path and a typo is an ordinary user error rather than a defect.
         def error_message(error)
-          return "claricle: #{error.message}" if error.is_a?(Error) || error.is_a?(Thor::Error)
+          return "claricle: #{error.message}" if MAPPED.any? { |kind| error.is_a?(kind) }
 
           "claricle: #{error.class}: #{error.message}"
         end
