@@ -35,17 +35,18 @@ module Claricle
         # the model shares the caller's object, and a handler holding a
         # reference could mutate what an inspection already reported.
         #
-        # `.freeze` on that copy for the other half of the same promise:
-        # a sealed Inspection could otherwise still have `meta["x"] = 1`
-        # written straight through it, and its JSON changed after the
-        # fact. Here rather than in `Base#freeze_attributes`, because this
-        # is the one place both doors meet -- deserialization wraps the
-        # value afterwards but the wrapped Hash came through here too.
-        # The copy is shallow, so what a handler nested inside stays the
-        # handler's and stays writable.
-        value.to_h.dup.freeze
+        # Not frozen here, even though what Inspection ends up storing is:
+        # measured, lutaml runs this same cast on the way OUT, so a freeze
+        # here would also reach the `meta` inside a rendered document and
+        # take it away from whoever asked for the Hash.
+        value.to_h.dup
       end
 
+      # Measured on 0.8.19: the key_value pipeline never reaches this --
+      # `cast` runs in both directions and does the whole job. It stays
+      # because it is the other half of the Type contract, and what it
+      # would otherwise inherit is the XML-shaped `serialize` this class
+      # exists to keep away from `meta`.
       def self.serialize(value)
         return nil if value.nil?
 
