@@ -20,8 +20,10 @@ module Claricle
     # legitimately carries `elements` or `text` as an attribute name, and
     # inspecting one crashed the CLI.
     #
-    # So this type does no normalisation in either direction. It is a
-    # Hash going in and the same Hash coming out.
+    # So this type does no normalisation in either direction. Every key
+    # and value goes in and comes back untouched. The container itself is
+    # a copy, so a handler that kept its reference cannot rewrite what an
+    # inspection already reported.
     class FreeFormHash < Lutaml::Model::Type::Hash
       # lutaml's `hash_type?` compares the class EXACTLY, so a subclass
       # is not recognised as a hash and the value arrives wrapped in an
