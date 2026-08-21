@@ -98,6 +98,24 @@ module Claricle
       @content = self.class.send(:binary, content) unless content.nil?
     end
 
+    # Ruby's default Marshal writes the ivars and reads them straight back
+    # into a fresh object, running neither `initialize` nor any of its
+    # guards -- measured: `Marshal.load(Marshal.dump(image))` came back
+    # with mutable content, and replacing those bytes with an EMF file
+    # left the copy reporting :png over EMF. So the boundary goes through
+    # the constructor, and every check and freeze runs again.
+    def marshal_dump
+      [format, path, @content]
+    end
+
+    def marshal_load(state)
+      format, path, content = state
+      initialize(format: format, path: path, content: path.nil? ? content : nil)
+      # A path-born image may already have read its file. Keeping that
+      # spares the copy a second read, and survives the file going away.
+      @content = self.class.send(:binary, content) if path && content
+    end
+
     # Read lazily and then remembered. Detection already streamed the file;
     # slurping it at construction would waste that. Frozen for the same
     # reason a content-born image keeps a copy: a handler that mutated
