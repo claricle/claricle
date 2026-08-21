@@ -146,6 +146,30 @@ RSpec.describe "Claricle::Registry" do
       expect(ok).to be(true), "subprocess failed: #{output}"
       expect(output).to eq("format :png is not supported for inspect")
     end
+
+    # The privacy examples below cannot prove privacy on their own: the
+    # around hook re-privatises HANDLERS after every example, so once one
+    # example has run the suite has established what the code is supposed
+    # to. A process that only requires the gem has no such help.
+    it "ships every one of them private" do
+      ok, output = run.call(<<~RUBY)
+        require "claricle"
+        probes = [
+          -> { Claricle::Registry }, -> { Claricle::Handlers },
+          -> { Claricle.const_get(:Registry)::HANDLERS },
+          -> { Claricle.const_get(:Registry)::HANDLER_CLASSES },
+          -> { Claricle.const_get(:Handlers)::Base }
+        ]
+        print(probes.map do |probe|
+          probe.call
+          "public"
+        rescue NameError => e
+          e.message.include?("private constant") ? "private" : "missing"
+        end.join(","))
+      RUBY
+      expect(ok).to be(true), "subprocess failed: #{output}"
+      expect(output).to eq((["private"] * 5).join(","))
+    end
   end
 
   describe "visibility" do
