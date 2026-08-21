@@ -131,6 +131,17 @@ RSpec.describe "Claricle metafile handler" do
     end
   end
 
+  # The declared size must fit in what is actually there. An aligned
+  # header claiming 100 bytes with 99 present isolates that guard from
+  # the alignment and minimum checks beside it.
+  it "refuses a header declaring more bytes than the file holds" do
+    bytes = File.binread(fixture("declared_100_have_99"))
+    expect(bytes.bytesize).to eq(99)
+    expect(bytes.byteslice(4, 4).unpack1("V")).to eq(100)
+
+    expect(inspect_emf("declared_100_have_99").parse_status).to eq("failed")
+  end
+
   describe "the complete inspection" do
     it "is pinned exactly for a readable header" do
       inspection = inspect_emf("valid")
@@ -342,6 +353,28 @@ RSpec.describe "Claricle metafile handler" do
         parse_status: "ok", width: 100.0, height: 50.0
       )
       expect(inspect_emf("bad_comment").meta)
+        .to include("emf_plus_present" => false)
+    end
+
+    # Each of these puts a real carrier at the offset a WEAKENED guard
+    # would advance to, so the fixture separates the guard from its
+    # neighbours rather than merely ending in "no EMF+" like everything
+    # else. Measured: with size 13 and size 0 alone, weakening the
+    # alignment to `% 2` or the minimum to a zero-only check still
+    # passed every example.
+    it "refuses a record size that is even but not four-byte aligned" do
+      bytes = File.binread(fixture("record_size_10"))
+      expect(bytes.byteslice(88, 8).unpack("VV")).to eq([40, 10])
+
+      expect(inspect_emf("record_size_10").meta)
+        .to include("emf_plus_present" => false)
+    end
+
+    it "refuses a record too small to hold its own header" do
+      bytes = File.binread(fixture("record_size_4"))
+      expect(bytes.byteslice(88, 8).unpack("VV")).to eq([40, 4])
+
+      expect(inspect_emf("record_size_4").meta)
         .to include("emf_plus_present" => false)
     end
 
