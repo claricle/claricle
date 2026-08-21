@@ -19,13 +19,9 @@ module Claricle
   # never rewound, so a caller who has already consumed part of it gets a
   # verdict on the remainder. It should be in binary mode; newline
   # translation would corrupt the signatures this matches on. Pass a path to
-  # `detect_path` to stream from a file instead of buffering.
+  # `Image.from_path` to stream from a file instead of buffering.
   def self.detect(source)
     source.respond_to?(:read) ? Detector.detect(source.read) : Detector.detect(source)
-  end
-
-  def self.detect_path(path)
-    Detector.detect_path(path)
   end
 
   private_constant :Detector, :EpsHeader, :Registry, :Handlers

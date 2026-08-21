@@ -12,56 +12,82 @@ module Claricle
       puts "Claricle version #{Claricle::VERSION}"
     end
 
-    desc "validate FILE_PATTERN", "Validate image files (placeholder)"
-    long_desc <<~LONGDESC
-      Validate image files against their respective standards.
+    # Turns an exception into a process status. `run` returns an Integer
+    # for everything it maps, and never exits -- only exe/claricle exits,
+    # so every code is reachable from a spec without trapping SystemExit.
+    # Interrupt and other signals are deliberately not mapped and do
+    # propagate, so Ctrl-C behaves like Ctrl-C.
+    module Runner
+      # A command sets its status by returning one of these. A bare Integer
+      # is ignored, because thor passes a command's return value straight
+      # through and any incidental `File.write` would otherwise become the
+      # exit status.
+      class Status
+        RANGE = (0..255)
 
-      This command will validate PNG, SVG, and other image formats
-      for conformance and correctness.
+        attr_reader :code
 
-      Note: This is a placeholder command. Functionality will be
-      implemented in future versions.
+        def initialize(code)
+          unless code.is_a?(Integer) && RANGE.cover?(code)
+            raise ArgumentError, "status must be an Integer in #{RANGE}, got #{code.inspect}"
+          end
 
-      Examples:
-        claricle validate image.png
-        claricle validate *.svg
-        claricle validate "images/*.png"
-    LONGDESC
-    def validate(_pattern)
-      puts "Image validation functionality coming soon!"
-      puts "This gem is currently a placeholder to reserve the name."
-    end
+          @code = code
+          freeze
+        end
+      end
 
-    desc "convert SOURCE DEST", "Convert image formats (placeholder)"
-    long_desc <<~LONGDESC
-      Convert images between different formats.
+      class << self
+        def run(argv, output: $stderr)
+          result = Cli.start(argv, debug: true)
+          result.is_a?(Status) ? result.code : 0
+        rescue SystemExit => e
+          # Thor turns Errno::EPIPE into SystemExit(0) even under debug,
+          # and a command may exit deliberately. Neither is an error.
+          # The status still has to be a byte: `exit 256` reports success.
+          bounded_status(e.status)
+        rescue StandardError, ScriptError, SystemStackError => e
+          report(error_message(e), output)
+          exit_code(e)
+        end
 
-      Note: This is a placeholder command. Functionality will be
-      implemented in future versions.
+        private
 
-      Examples:
-        claricle convert image.png image.svg
-        claricle convert logo.svg logo.png
-    LONGDESC
-    def convert(_source, _dest)
-      puts "Image conversion functionality coming soon!"
-      puts "This gem is currently a placeholder to reserve the name."
-    end
+        # Writing the diagnostic must not become the failure. `output.puts`
+        # sits inside a rescue body, so nothing above catches it: with
+        # stderr on a closed pipe the EPIPE escaped `run` entirely and the
+        # executable exited 1 -- the status the README reserves for a
+        # nonconformant file. Failing to *report* an error cannot be
+        # allowed to replace that error's own status.
+        def report(message, output)
+          output.puts(message)
+        rescue StandardError
+          nil
+        end
 
-    desc "compress FILE_PATTERN", "Compress image files (placeholder)"
-    long_desc <<~LONGDESC
-      Compress image files while maintaining quality.
+        # Returns rather than raises: an ArgumentError from here would be
+        # inside the SystemExit rescue and could not reach the next clause.
+        def bounded_status(code)
+          Status::RANGE.cover?(code) ? code : 4
+        end
 
-      Note: This is a placeholder command. Functionality will be
-      implemented in future versions.
+        def exit_code(error)
+          case error
+          when Thor::Error, Errno::ENOENT, InvocationError then 2
+          when UnknownFormat, UnsupportedFormat then 3
+          else 4
+          end
+        end
 
-      Examples:
-        claricle compress image.png
-        claricle compress *.jpg
-    LONGDESC
-    def compress(_pattern)
-      puts "Image compression functionality coming soon!"
-      puts "This gem is currently a placeholder to reserve the name."
+        # An unexpected failure names its class: "claricle: missing gem" is
+        # not much help when the class was LoadError. A mapped Claricle
+        # error already reads as a sentence, so it does not need one.
+        def error_message(error)
+          return "claricle: #{error.message}" if error.is_a?(Error) || error.is_a?(Thor::Error)
+
+          "claricle: #{error.class}: #{error.message}"
+        end
+      end
     end
   end
 end
