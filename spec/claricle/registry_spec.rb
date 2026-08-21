@@ -30,11 +30,7 @@ RSpec.describe "Claricle::Registry" do
   around do |example|
     example.run
   ensure
-    begin
-      registry.send(:private_constant, :HANDLERS)
-    rescue NameError
-      nil
-    end
+    registry.send(:private_constant, :HANDLERS)
   end
 
   describe "the derived map" do
