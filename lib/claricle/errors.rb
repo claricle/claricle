@@ -9,7 +9,14 @@ module Claricle
   # the operation asked for. The class builds its own sentence: callers
   # pass what they were doing, not a phrase.
   class UnsupportedFormat < Error
-    def initialize(format, operation = nil, target: nil)
+    # A target nobody can pass, so "not given" and "given as nil" stay
+    # different things. `convert(image, to:)` requires the keyword, so a
+    # nil arriving here is a caller who forgot their target, not one who
+    # has none, and the message says so.
+    ABSENT = Object.new.freeze
+    private_constant :ABSENT
+
+    def initialize(format, operation = nil, target: ABSENT)
       super(build_message(format, operation, target))
     end
 
@@ -19,15 +26,16 @@ module Claricle
     # A target without an operation reads as nonsense, so it is ignored
     # rather than rendered.
     #
-    # `nil?`, not truthiness: `convert(image, to: false)` was asked about
-    # a target and the message dropped it, so the error named the
-    # operation and hid what it was refused for.
+    # Every supplied target is named, however unhelpful it looks. Tested
+    # by truthiness the message dropped `false`; tested for nil it
+    # dropped `nil`. Both had been supplied, and both times the error
+    # named the operation and hid what it was refused for.
     def build_message(format, operation, target)
       message = "format #{format.inspect} is not supported"
       return message unless operation
 
       message << " for #{operation}"
-      message << " to #{target.inspect}" unless target.nil?
+      message << " to #{target.inspect}" unless target.equal?(ABSENT)
       message
     end
   end
