@@ -29,7 +29,7 @@ module Claricle
 
       @format = format
       @path = path
-      @content = content && binary(content)
+      @content = binary(content) unless content.nil?
     end
 
     # Read on demand, once. Detection already streamed the file; slurping it
@@ -76,7 +76,15 @@ module Claricle
     # indexing or scanning it would disagree with the path-born image.
     # Re-tagged on a copy, so the caller keeps their String as it was, and
     # only when it has to be: `.b` allocates a second whole image.
+    #
+    # Refused here rather than assumed, because `false` clears the
+    # exactly-one check above and is still falsy -- measured:
+    # `Image.from_content(false, format: :png)` built an image, and its
+    # `content` then read the nil path and raised "no implicit conversion
+    # of nil into String".
     def binary(bytes)
+      raise ArgumentError, "content must be a String, got #{bytes.class}" unless bytes.is_a?(String)
+
       bytes.encoding == Encoding::BINARY ? bytes : bytes.b
     end
 

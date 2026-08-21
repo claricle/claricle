@@ -72,6 +72,15 @@ RSpec.describe Claricle::Image do
       end
     end
 
+    # `false` clears the exactly-one check and is still falsy, so it used
+    # to build an image whose `content` went reading the nil path.
+    it "refuses content that is not a String" do
+      expect { described_class.from_content(false, format: :png) }
+        .to raise_error(ArgumentError, /content must be a String, got FalseClass/)
+      expect { described_class.new(format: :png, content: 123) }
+        .to raise_error(ArgumentError, /content must be a String, got Integer/)
+    end
+
     it "requires exactly one of path or content" do
       expect { described_class.new(format: :png) }
         .to raise_error(ArgumentError, /exactly one/)
