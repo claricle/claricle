@@ -18,22 +18,29 @@ RSpec.describe "Claricle::Registry" do
   # failure mode requiring from registry.rb cannot catch.
   describe "what ships registered" do
     it "lists exactly the handler classes it names" do
+      handlers = Claricle.const_get(:Handlers)
+
       expect(registry.const_get(:HANDLER_CLASSES))
-        .to eq([Claricle.const_get(:Handlers).const_get(:Png)])
+        .to eq([handlers.const_get(:Png), handlers.const_get(:Svg)])
     end
 
     it "exposes exactly the formats those handlers declare" do
-      expect(registry.formats).to eq([:png])
+      expect(registry.formats).to eq(%i[png svg])
     end
 
-    it "maps png to the PNG handler" do
-      expect(registry.handler_for(:png))
-        .to be(Claricle.const_get(:Handlers).const_get(:Png))
+    # Ownership, not membership: a format list alone would pass a handler
+    # registered against the wrong class.
+    it "maps each format to its owning handler" do
+      handlers = Claricle.const_get(:Handlers)
+
+      expect(registry.handler_for(:png)).to be(handlers.const_get(:Png))
+      expect(registry.handler_for(:svg)).to be(handlers.const_get(:Svg))
     end
 
     # Derived, so it cannot advertise an operation still on Base.
-    it "reports only the capabilities png has implemented" do
+    it "reports only the capabilities each handler has implemented" do
       expect(registry.capabilities_for(:png)).to eq([:inspect])
+      expect(registry.capabilities_for(:svg)).to eq([:inspect])
     end
   end
 
@@ -149,7 +156,7 @@ RSpec.describe "Claricle::Registry" do
       ok, output = run.call('require "claricle/registry"; ' \
                             "print Claricle.const_get(:Registry).formats.inspect")
       expect(ok).to be(true), "subprocess failed: #{output}"
-      expect(output).to eq("[:png]")
+      expect(output).to eq("[:png, :svg]")
     end
 
     it "loads handlers/base.rb without the entry point" do

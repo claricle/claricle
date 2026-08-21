@@ -149,6 +149,34 @@ RSpec.describe Claricle::Cli::Runner do
         .to output(/parse status: failed/).to_stdout
     end
 
+    # The plan requires an SVG example end to end, not just PNG.
+    it "prints SVG dimensions with units resolved" do
+      Tempfile.create(["logo", ".svg"]) do |file|
+        file.write(%(<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="5mm"/>))
+        file.flush
+
+        expect(described_class.run(["inspect", file.path])).to eq(0)
+      end
+    end
+
+    it "prints both SVG dimensions and the declared units" do
+      Tempfile.create(["logo", ".svg"]) do |file|
+        file.write(%(<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="5mm"/>))
+        file.flush
+
+        # Both axes, and enough digits that a wrong conversion cannot
+        # hide behind a truncated match.
+        expect { described_class.run(["inspect", file.path]) }
+          .to output(/format: svg/).to_stdout
+        expect { described_class.run(["inspect", file.path]) }
+          .to output(/dimensions: 37\.79527559055118\d*x18\.89763779527559\d*/).to_stdout
+        expect { described_class.run(["inspect", file.path]) }
+          .to output(/height: 5mm/).to_stdout
+        expect { described_class.run(["inspect", file.path]) }
+          .to output(/width: 10mm/).to_stdout
+      end
+    end
+
     it "exits 2 for a missing file" do
       expect(described_class.run(["inspect", "no/such.png"], output: StringIO.new)).to eq(2)
     end
@@ -193,12 +221,15 @@ RSpec.describe Claricle::Cli::Runner do
     # pass if the command printed nothing at all.
     it "does not claim conform or convert yet" do
       expect { described_class.run(["formats"]) }
-        .to output("png\tinspect\n").to_stdout
+        .to output("png\tinspect\nsvg\tinspect\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
       expect { described_class.run(["formats", "--json"]) }
-        .to output(%([{"format":"png","inspect":true,"conform":false,"convert":false,"convert_to":[]}]\n))
+        .to output(
+          %([{"format":"png","inspect":true,"conform":false,"convert":false,"convert_to":[]},) +
+          %({"format":"svg","inspect":true,"conform":false,"convert":false,"convert_to":[]}]\n)
+        )
         .to_stdout
     end
   end

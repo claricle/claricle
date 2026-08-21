@@ -5,11 +5,12 @@
 require_relative "errors"
 require_relative "handlers/base"
 require_relative "handlers/png"
+require_relative "handlers/svg"
 
 module Claricle
   module Registry
     # One list. A new format adds its handler file above and its class here.
-    HANDLER_CLASSES = [Handlers::Png].freeze
+    HANDLER_CLASSES = [Handlers::Png, Handlers::Svg].freeze
 
     class << self
       def handler_for(format)

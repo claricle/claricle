@@ -6,6 +6,67 @@ require "rexml/text"
 require "emf"
 
 module Claricle
+  # Attribute defaults declared in an internal DTD subset. XML 1.0
+  # requires a processor to apply them and REXML's DOM does, but the
+  # PullParser hands the declarations over raw, so this reassembles them.
+  # Its own module because the precedence rules are a self-contained
+  # concern, and Detector is about choosing between formats.
+  #
+  # Known gap, upstream: REXML raises "Bad ATTLIST declaration!" for a
+  # single-quoted default, which XML permits. That happens inside REXML
+  # before any event reaches us, so such a document is reported as an
+  # unknown format. It fails closed rather than misdetecting, and working
+  # around REXML's DTD parser would cost more than the gap.
+  module AttributeDefaults
+    # One "name TYPE [#DEFAULT] value" group of an ATTLIST body, enough
+    # to recover declaration order. Values may be absent (#REQUIRED etc).
+    DECLARATION = /
+      (?<name>[\w:.-]+)\s+
+      (?:\([^)]*\)|[A-Z]+(?:\s*\([^)]*\))?)\s*
+      (?:\#(?:REQUIRED|IMPLIED)|(?:\#FIXED\s+)?(?:"(?<dq>[^"]*)"|'(?<sq>[^']*)'))
+    /x
+
+    private_constant :DECLARATION
+
+    class << self
+      # XML accumulates ATTLIST declarations and the FIRST declaration of
+      # an attribute binds, so a later one neither replaces the element's
+      # earlier defaults nor overrides a duplicate.
+      #
+      # Duplicates inside ONE declaration need the raw source: REXML
+      # collapses them last-wins before handing over the parsed hash. The
+      # raw scan is the authority -- it carries tombstones REXML cannot
+      # report, and corrects a value REXML mis-reports, such as one
+      # separated from `#FIXED` by a tab. REXML is the fallback, for
+      # attributes the regex could not read at all.
+      def collect(defaults, event)
+        element = event[0]
+        within = first_of(event[2])
+        event[1].each { |name, value| within[name] = value unless within.key?(name) }
+        defaults[element] = within.merge(defaults[element] || {})
+      end
+
+      # Explicit attributes beat declared defaults, and only the final
+      # merged hash is compacted -- dropping tombstones earlier would let
+      # a later declaration resurrect an attribute XML left undeclared.
+      def for_root(event, defaults)
+        defaults.fetch(event[0], {}).merge(event[1]).compact
+      end
+
+      private
+
+      # nil is a real answer here -- `#IMPLIED` means "declared, no
+      # default" -- so first-wins is decided by key?, never by the
+      # value's truthiness.
+      def first_of(raw)
+        body = raw.to_s.sub(/\A<!ATTLIST\s+\S+/, "").sub(/>\s*\z/, "")
+        body.scan(DECLARATION).each_with_object({}) do |(name, quoted, single), acc|
+          acc[name] = quoted || single unless acc.key?(name)
+        end
+      end
+    end
+  end
+
   # The EPSF header field, scanned out of a PostScript file's first line.
   # Its own module because the scan is a self-contained concern with three
   # collaborating pieces, and Detector is about choosing between formats.
@@ -122,13 +183,6 @@ module Claricle
     # arbitrarily long prolog, so this is a sniffing limit, not a
     # complete one.
     SVG_PROLOG_BYTES = 8192
-    # One "name TYPE [#DEFAULT] value" group of an ATTLIST body, enough to
-    # recover declaration order. Values may be absent (#REQUIRED etc).
-    ATTLIST_DECLARATION = /
-      (?<name>[\w:.-]+)\s+
-      (?:\([^)]*\)|[A-Z]+(?:\s*\([^)]*\))?)\s*
-      (?:\#(?:REQUIRED|IMPLIED)|(?:\#FIXED\s+)?(?:"(?<dq>[^"]*)"|'(?<sq>[^']*)'))
-    /x
 
     CHUNK_BYTES = 4096
 
@@ -148,7 +202,60 @@ module Claricle
         end
       end
 
+      # The root element's qname and its resolved attributes, or nil.
+      # nil covers every way the root can be unavailable: no root inside
+      # the bound, markup REXML refuses, and an encoding name it cannot
+      # use. Callers treat all three the same -- there is nothing to
+      # report about -- so they are not distinguished here. Public because Handlers::Svg
+      # needs exactly this and a second reader would have to reimplement
+      # the bound, the ATTLIST precedence and the reference resolution --
+      # three rules this file spent four review rounds getting right --
+      # and then agree with this one. `Detector` is itself a private
+      # constant, so nothing about the gem's documented surface changes.
+      def read_root(source)
+        found = root_event(source)
+        return nil unless found
+
+        # Resolution sits OUTSIDE the rescue below on purpose. That
+        # rescue exists for the parser's own failures -- including the
+        # bare ArgumentError REXML raises for an unusable encoding name
+        # -- and an ArgumentError or RuntimeError raised while resolving
+        # references is a different fault that must not be reported as
+        # "this file has no root".
+        [found.first, resolved(found.last)]
+      end
+
       private
+
+      def root_event(source)
+        parser = REXML::Parsers::PullParser.new(bounded(source))
+        defaults = {}
+        while parser.has_next?
+          event = parser.pull
+          AttributeDefaults.collect(defaults, event) if event.event_type == :attlistdecl
+          return [event[0], AttributeDefaults.for_root(event, defaults)] if event.start_element?
+        end
+        nil
+      rescue REXML::ParseException, ArgumentError
+        nil
+      end
+
+      # Every root attribute, not just xmlns: the PullParser hands values
+      # back unexpanded, and `width="&#49;&#48;"` means ten, not zero.
+      #
+      # A reference that cannot be resolved keeps its raw declaration.
+      # Two ways that happens, both measured: an out-of-range numeric
+      # reference raises RangeError, and a surrogate such as `&#xD800;`
+      # resolves to INVALID UTF-8, which is worse -- it does not raise
+      # here, it detonates later, either in the dimension parse or in
+      # `to_json`. The raw form is always valid and always truthful.
+      def resolved(attributes)
+        attributes.transform_values { |value| usable(resolve_references(value)) || value }
+      end
+
+      def usable(value)
+        value if value&.valid_encoding?
+      end
 
       # The block yields the source rewound to byte 0. The PNG, PDF and
       # metafile probes match at fixed offsets and read `header`; the
@@ -182,84 +289,25 @@ module Claricle
       # would turn a malformed file into an internal error rather than
       # UnknownFormat. Undecodable bytes already arrive as a ParseException.
       def svg?(source)
-        parser = REXML::Parsers::PullParser.new(bounded(source))
-        defaults = {}
-        while parser.has_next?
-          event = parser.pull
-          collect_defaults(defaults, event) if event.event_type == :attlistdecl
-          return svg_root?(event[0], root_attributes(event, defaults)) if event.start_element?
-        end
-        false
-      rescue REXML::ParseException, ArgumentError
-        false
-      end
+        root = read_root(source)
+        return false unless root
 
-      # XML 1.0 requires a processor to apply attribute defaults declared
-      # in the internal subset, and REXML's own DOM does -- so without
-      # this an SVG whose xmlns comes from `<!ATTLIST svg xmlns CDATA
-      # #FIXED "...">` was rejected as an unknown format. A specified
-      # attribute wins over the declared default, hence the merge order.
-      # XML accumulates ATTLIST declarations and the FIRST declaration of
-      # an attribute binds, so a later one neither replaces the element's
-      # earlier defaults nor overrides a duplicate.
-      #
-      # Duplicates *inside one* declaration need the raw source: REXML
-      # collapses them last-wins before handing over the parsed hash, so
-      # `<!ATTLIST svg xmlns ... "a" xmlns ... "b">` arrives as "b" where
-      # XML binds "a".
-      #
-      # The raw scan is the authority, which is deliberate and broader
-      # than "it only fixes the order". It also carries tombstones REXML
-      # has no way to report -- an `#IMPLIED` attribute is declared with
-      # no default, and that has to outrank a later declaration -- and it
-      # corrects a value REXML mis-reports, such as one separated from
-      # `#FIXED` by a tab, which arrives as `"#FIXED\t"`.
-      #
-      # REXML is the fallback, consulted only for attributes the regex
-      # could not read at all. So a declaration the scan cannot parse
-      # still contributes its parsed value, and one it can parse is taken
-      # whole, tombstone included.
-      #
-      # Known gap, upstream: REXML raises "Bad ATTLIST declaration!" for a
-      # single-quoted default (`#FIXED \'...\'`), which XML permits. That
-      # happens inside REXML before any event reaches us, so the document
-      # is reported as an unknown format. It fails closed rather than
-      # misdetecting, and working around REXML's DTD parser here would
-      # cost more than the gap.
-      def collect_defaults(defaults, event)
-        element = event[0]
-        # The raw scan carries the order AND the tombstones: an attribute
-        # declared `#IMPLIED` has no default, and XML binds the first
-        # declaration, so a later one with a value must not fill it in.
-        # REXML's parsed hash has no tombstones, and is consulted only for
-        # attributes the regex could not read.
-        within = first_declarations(event[2])
-        event[1].each { |name, value| within[name] = value unless within.key?(name) }
-        # Earlier declarations win over later ones, tombstones included.
-        defaults[element] = within.merge(defaults[element] || {})
-      end
-
-      # nil is a real answer here -- `#IMPLIED` means "declared, no
-      # default" -- so first-wins is decided by key?, never by the value's
-      # truthiness.
-      def first_declarations(raw)
-        body = raw.to_s.sub(/\A<!ATTLIST\s+\S+/, "").sub(/>\s*\z/, "")
-        body.scan(ATTLIST_DECLARATION).each_with_object({}) do |(name, quoted, single), acc|
-          acc[name] = quoted || single unless acc.key?(name)
-        end
-      end
-
-      # Explicit attributes beat declared defaults, and only the final
-      # merged hash is compacted -- dropping tombstones earlier would let
-      # a later declaration resurrect an attribute XML left undeclared.
-      def root_attributes(event, defaults)
-        defaults.fetch(event[0], {}).merge(event[1]).compact
+        svg_root?(*root)
       end
 
       # Only the prolog and the root start tag can matter here, and both
-      # fit well inside the bound.
+      # fit well inside the bound. Takes an IO or a String: detection
+      # streams from a file, while a handler already holds the content.
       def bounded(source)
-        StringIO.new(source.read(SVG_PROLOG_BYTES) || "")
+        # byteslice, not slice: the bound is BYTES, and `source[0, n]`
+        # counts characters, so a multibyte prolog would let the handler
+        # read further than detection did and the two would disagree.
+        prefix = if source.respond_to?(:read)
+                   source.read(SVG_PROLOG_BYTES)
+                 else
+                   source.byteslice(0, SVG_PROLOG_BYTES)
+                 end
+        StringIO.new(prefix || "")
       end
 
       def svg_root?(qname, attributes)
@@ -269,7 +317,10 @@ module Claricle
         declared = attributes[prefix ? "xmlns:#{prefix}" : "xmlns"]
         return false unless declared
 
-        resolve_references(declared) == SVG_NAMESPACE
+        # Already resolved by read_root. Resolving again would expand a
+        # reference the document escaped on purpose: `&amp;#x67;` means
+        # the literal text `&#x67;`, and a second pass turns it into `g`.
+        declared == SVG_NAMESPACE
       end
 
       # PullParser hands back the raw attribute. XML normalization replaces
