@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "json"
+
 require_relative "base"
 require_relative "free_form_hash"
 require_relative "issue"
@@ -66,29 +68,39 @@ module Claricle
 
       def validate_types
         super
-        refuse_infinite(meta)
+        refuse_unrenderable
       end
 
-      # A handler that divided by zero can leave Infinity in `meta`, and
-      # JSON has none: the model took it, froze around it, and then could
-      # not produce a document at all -- measured, `to_json` raised
-      # `JSON::GeneratorError`. Everything else meta holds survives as a
-      # String -- a Symbol, a Range and a bare Object all render -- so
-      # this is the one value worth walking the container for.
+      # `meta` is stored verbatim, and JSON is what the CLI reports, so a
+      # meta JSON will not write leaves an Inspection nothing can report:
+      # the model took the value, froze around it, and the
+      # `JSON::GeneratorError` surfaced later, nowhere near the handler
+      # that supplied it.
       #
-      # `seen`, because meta is stored verbatim and a handler is free to
-      # point a container back at itself. A Hash yields its pairs as
-      # Arrays, so keys are walked by the same branch as values.
-      def refuse_infinite(value, seen = {}.compare_by_identity)
-        case value
-        when Numeric
-          refuse("meta", "finite numbers throughout", value) unless value.finite?
-        when Hash, Array
-          return if seen[value]
+      # Rendered rather than inspected, because the list of what JSON
+      # refuses is longer than it looks and every item of it would be a
+      # guess at another library's rules. Measured: Infinity and NaN, a
+      # String that will not become UTF-8 (`"\xFF".b` is valid
+      # ASCII-8BIT and still unwritable, while Latin-1 and UTF-16 are
+      # both fine, so `valid_encoding?` is not the rule), a container
+      # that leads back to itself, and anything nested past the depth
+      # limit. Everything else survives as a String -- a Symbol, a Range
+      # and a bare Object all render.
+      #
+      # `JSON.generate` with its defaults, because that is exactly what
+      # lutaml renders with (json/standard_adapter.rb:34), so this asks
+      # the same question the same way.
+      #
+      # Only `meta` needs it: lutaml scrubs a declared `:string`
+      # attribute to valid UTF-8 on the way in, and `validate_finite`
+      # covers the declared numbers.
+      def refuse_unrenderable
+        raw = meta
+        return if raw.nil?
 
-          seen[value] = true
-          value.each { |element| refuse_infinite(element, seen) }
-        end
+        JSON.generate(raw)
+      rescue JSON::JSONError => e
+        refuse("meta", "values JSON can render", e.message)
       end
 
       # Base freezes Strings and collections, so a Hash has to be sealed

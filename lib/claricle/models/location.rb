@@ -9,11 +9,13 @@ module Claricle
     # `byte_length` are a zero-based half-open range -- issue #1 asks for a
     # byte range, which a bare offset cannot express.
     class Location < Base
-      # The two ends of that range. Neither can be negative, and lutaml
-      # coerces the type without ever looking at the value -- measured:
+      # Every position this model carries, and none of them can be
+      # negative: the two ends of that range, and a line and a column,
+      # which are counts into a document. lutaml coerces the type without
+      # ever looking at the value -- measured:
       # `{"byte_offset":-1,"byte_length":-4}` deserialized, froze, and
       # rendered both numbers straight back out.
-      BYTE_RANGE = %i[byte_offset byte_length].freeze
+      POSITIONS = %i[byte_offset byte_length line column].freeze
 
       attribute :byte_offset, :integer
       attribute :byte_length, :integer
@@ -26,7 +28,7 @@ module Claricle
 
       def validate_types
         super
-        BYTE_RANGE.each do |name|
+        POSITIONS.each do |name|
           value = public_send(name)
           next unless value.is_a?(Integer) && value.negative?
 
