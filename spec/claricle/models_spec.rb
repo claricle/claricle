@@ -341,6 +341,47 @@ RSpec.describe Claricle::Models do
           .to raise_error(TypeError, /was declared/)
       end
 
+      # `meta` copies only its top level, so a container the caller keeps
+      # can be pointed back at the model afterwards. A model reached that
+      # way is written by Ruby, not by `plain`, and opens a stream of its
+      # own that Ruby's cycle table cannot see into -- the dump recursed
+      # until SystemStackError. It says so now.
+      it "refuses a meta that leads back to its own model" do
+        box = {}
+        inspection = models::Inspection.new(format: "svg", parse_status: "ok",
+                                            meta: { "box" => box })
+        box["self"] = inspection
+
+        expect { Marshal.dump(inspection) }
+          .to raise_error(TypeError, /leads back to it/)
+      end
+
+      # The guard covers re-entry, not repetition: a model that merely
+      # appears twice in one meta still round-trips.
+      it "still marshals a model that meta holds twice" do
+        held = models::Issue.new(severity: "info", message: "m")
+        inspection = models::Inspection.new(format: "svg", parse_status: "ok",
+                                            meta: { "a" => held, "b" => held })
+        restored = Marshal.load(Marshal.dump(inspection))
+
+        expect([restored.meta["a"].severity, restored.meta["b"].severity])
+          .to eq(%w[info info])
+      end
+
+      # A refused dump must not leave the guard armed, or the next one
+      # reports a cycle that is not there.
+      it "clears the guard after refusing" do
+        box = {}
+        inspection = models::Inspection.new(format: "svg", parse_status: "ok",
+                                            meta: { "box" => box })
+        box["self"] = inspection
+        expect { Marshal.dump(inspection) }.to raise_error(TypeError)
+
+        expect(Thread.current[:claricle_models_dumping]).to be_nil
+        box.delete("self")
+        expect(Marshal.load(Marshal.dump(inspection)).meta).to eq({ "box" => {} })
+      end
+
       # lutaml omits explicitly-empty values from `to_hash`, so a payload
       # built from it lost the difference between "absent" and "empty".
       it "keeps an explicitly empty hash rather than reloading it as nil" do
