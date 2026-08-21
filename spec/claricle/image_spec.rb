@@ -21,11 +21,7 @@ RSpec.describe Claricle::Image do
   around do |example|
     example.run
   ensure
-    begin
-      registry.send(:private_constant, :HANDLERS)
-    rescue NameError
-      nil
-    end
+    registry.send(:private_constant, :HANDLERS)
   end
 
   describe "construction" do
@@ -73,12 +69,26 @@ RSpec.describe Claricle::Image do
     end
 
     # `false` clears the exactly-one check and is still falsy, so it used
-    # to build an image whose `content` went reading the nil path.
+    # to build an image whose `content` went reading the nil path. Without
+    # a format too, because detection reads the bytes first and would
+    # otherwise answer with its own NoMethodError.
     it "refuses content that is not a String" do
+      expect { described_class.from_content(false) }
+        .to raise_error(ArgumentError, /content must be a String, got FalseClass/)
       expect { described_class.from_content(false, format: :png) }
         .to raise_error(ArgumentError, /content must be a String, got FalseClass/)
       expect { described_class.new(format: :png, content: 123) }
         .to raise_error(ArgumentError, /content must be a String, got Integer/)
+    end
+
+    # `path: false` used to clear the exactly-one check and then read as
+    # "no path" in with_path, so the image took the temporary-file branch
+    # and died on File.binread(false).
+    it "refuses a path that is not a String" do
+      expect { described_class.new(format: :png, path: false) }
+        .to raise_error(ArgumentError, /path must be a String, got FalseClass/)
+      expect { described_class.new(format: :png, path: 123) }
+        .to raise_error(ArgumentError, /path must be a String, got Integer/)
     end
 
     it "requires exactly one of path or content" do
