@@ -13,8 +13,16 @@ module Claricle
         # registry derives a frozen map at load, so a later redeclaration
         # would leave the two disagreeing about who owns a format --
         # measured: after `Png.formats(:svg)` the registry still answered
-        # :png while the handler claimed :svg. Refusing makes that
-        # unrepresentable rather than merely unlikely.
+        # :png while the handler claimed :svg.
+        #
+        # What this refuses is a change of mind, not a late first
+        # declaration. A class that has declared nothing by the time
+        # registry.rb reads the list owns nothing in the map, and
+        # declaring afterwards leaves it claiming a format the registry
+        # does not route. No handler does that -- the declaration sits in
+        # the class body, which has run before the list is read -- so the
+        # guarantee here is "no take-backs", not "the two can never
+        # disagree".
         def formats(*symbols)
           raise Error, "#{self} already declared formats #{@formats.inspect}" if @formats
 
