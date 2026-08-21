@@ -107,6 +107,31 @@ RSpec.describe Claricle::Image do
     it "returns exactly the bytes a content-born image was given" do
       expect(described_class.from_content(png).content).to eq(png)
     end
+
+    # `File.read` instead of `File.binread` is all it takes: the same 70
+    # PNG bytes then report a `length` of 69 and `valid_encoding?` false.
+    # Detection normalizes its own copy and not the one Image keeps, so
+    # without this the two constructors hand a handler different objects
+    # for identical bytes.
+    it "hands back binary bytes however the image was built" do
+      tagged = png.dup.force_encoding(Encoding::UTF_8)
+
+      expect(described_class.from_content(tagged).content.encoding)
+        .to eq(Encoding::BINARY)
+      expect(described_class.from_content(tagged).content).to eq(png)
+      with_file.call(png) do |path|
+        expect(described_class.from_path(path).content.encoding)
+          .to eq(Encoding::BINARY)
+      end
+    end
+
+    # Re-tagging happens on our copy. The caller's String is theirs.
+    it "leaves the caller's string tagged as they had it" do
+      tagged = png.dup.force_encoding(Encoding::UTF_8)
+      described_class.from_content(tagged)
+
+      expect(tagged.encoding).to eq(Encoding::UTF_8)
+    end
   end
 
   describe "#with_path" do
