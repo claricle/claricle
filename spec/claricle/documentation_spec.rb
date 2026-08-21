@@ -76,11 +76,12 @@ RSpec.describe "the documentation" do
   describe "what the README claims" do
     # A mapped command is documented under the name users type, not the
     # method behind it. Flag aliases (-h, --tree) are Thor's, not commands.
+    # The registry keys ARE the command names now. This used to invert
+    # `Cli.map` to translate `inspect_file` back to `inspect`; the
+    # command is re-keyed at the source, so there is no alias left to
+    # resolve and that branch would be dead code.
     def self.cli_command_names
-      aliases = Claricle::Cli.map
-                             .reject { |name, _| name.to_s.start_with?("-") }
-                             .invert.transform_keys(&:to_s)
-      Claricle::Cli.all_commands.keys.map { |name| aliases.fetch(name, name) }
+      Claricle::Cli.all_commands.keys
     end
 
     it "lists no command the CLI does not have" do

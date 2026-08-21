@@ -25,7 +25,21 @@ module Claricle
       inspection = Image.from_path(file).inspection
       puts(options[:json] ? inspection.to_json : Presenter.inspection(inspection))
     end
-    map "inspect" => :inspect_file
+    # Thor registers a command under its METHOD name and `map` only adds
+    # an alias on top, so `inspect_file` stayed callable -- and Thor's
+    # `normalize_command_name` translates dashes to underscores, so
+    # `inspect-file` worked too. Three spellings, one documented.
+    #
+    # Re-keying the command and dropping both the method-named entry and
+    # the alias leaves exactly `inspect`. The Command object keeps its
+    # `inspect_file` name, so dispatch still reaches the method above and
+    # `Object#inspect` is never shadowed.
+    #
+    # Neither obvious one-liner works: removing the command alone breaks
+    # `inspect` too, because the alias then points at nothing, and
+    # keeping the alias re-resolves `inspect` back to the removed name.
+    commands["inspect"] = commands.delete("inspect_file")
+    map.delete("inspect")
 
     desc "formats", "List the formats Claricle handles and what it can do with each"
     option :json, type: :boolean, default: false, desc: "Emit JSON"

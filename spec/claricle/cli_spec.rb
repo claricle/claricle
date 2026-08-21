@@ -107,6 +107,32 @@ RSpec.describe Claricle::Cli::Runner do
     end
   end
 
+  # Thor registers a command under its METHOD name, and `map` only adds
+  # an alias -- so `inspect_file` stayed callable, and Thor translates
+  # dashes to underscores, so `inspect-file` did too. Three spellings for
+  # one documented command.
+  describe "the inspect command's spelling" do
+    it "answers to the documented name" do
+      expect { described_class.run(["inspect", File.join(__dir__, "..", "fixtures", "inspect", "valid.png")]) }
+        .to output(/format: png/).to_stdout
+    end
+
+    %w[inspect_file inspect-file].each do |spelling|
+      it "does not answer to #{spelling}" do
+        expect { expect(described_class.run([spelling, "x.png"])).to eq(2) }
+          .to output(/Could not find command/).to_stderr
+      end
+    end
+
+    # described_class here is the Runner, not the Thor class.
+    it "lists only the documented command" do
+      names = Claricle.const_get(:Cli).all_commands.keys
+
+      expect(names).to include("inspect")
+      expect(names).not_to include("inspect_file")
+    end
+  end
+
   describe "inspect" do
     let(:png) { File.join(__dir__, "..", "fixtures", "inspect", "valid.png") }
 
