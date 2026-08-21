@@ -233,7 +233,8 @@ subjects in quotes):
 
 `claricle.gemspec`, `.rubocop.yml`, `.github/workflows/main.yml`,
 `lib/claricle.rb`, `lib/claricle/errors.rb`, `lib/claricle/models/
-{base,location,issue,report,inspection}.rb`, `lib/claricle/detector.rb`,
+{base,free_form_hash,location,issue,report,inspection}.rb`,
+`lib/claricle/detector.rb`,
 `lib/claricle/registry.rb`, `lib/claricle/handlers/base.rb`,
 `lib/claricle/image.rb`, `lib/claricle/cli.rb`, `exe/claricle`,
 `README.adoc`, `sig/claricle.rbs`, `spec/claricle/*_spec.rb`,

@@ -161,9 +161,9 @@ module Claricle
       end
 
       # Idempotent on our own bookkeeping rather than on `frozen?`, so a
-      # model frozen by other code is not mistaken for a sealed one. Such a
-      # model does not reach here in practice -- validation rejects it
-      # first -- and would raise FrozenError on the marker if it did.
+      # model frozen by other code is not mistaken for a sealed one. An
+      # empty one never reaches here -- validation rejects it first -- and
+      # a populated one dies on the marker below, which is the point.
       def seal
         return self if @claricle_sealed
 
@@ -173,10 +173,10 @@ module Claricle
         freeze_attributes
         # Lutaml tracks which attributes still hold defaults in a mutable
         # hash, and `using_default_for` is public. Flipping an entry on a
-        # frozen model drops the attribute from the document -- marking an
-        # issue's fields turns "issues":[...] into "issues":null, so the
-        # report reloads clean. Freezing it here, after the attribute pass,
-        # leaves composition intact.
+        # frozen model drops that attribute from the document -- measured:
+        # marking every one of an issue's fields turns "issues":[...] into
+        # "issues":null, and a warning report then reloads valid. Freezing
+        # it here, after the attribute pass, leaves composition intact.
         instance_variable_get(:@using_default)&.freeze
         freeze
       end
@@ -188,7 +188,8 @@ module Claricle
       # caller. It does NOT copy what is nested inside a free-form Hash, so
       # descending into `meta` would freeze containers the caller still
       # holds -- and 01-core.md:47 asks for the issue collection, not for
-      # every value a handler chose to attach.
+      # every value a handler chose to attach. `meta`'s own container is
+      # frozen where it is copied, in FreeFormHash.cast.
       # Works on the backing storage, not the getters. An enum declared with
       # `values:` is stored as a mutable Array behind a String getter, so
       # freezing what the getter returns leaves that array writable and a
@@ -231,12 +232,20 @@ module Claricle
         end
       end
 
-      # An enum that is not a collection must be given one value, not a
-      # list. lutaml 0.8.19 accepts the list, stores it whole, and its
-      # getter returns only the first element -- so
+      # An enum that is not a collection must be given one value, never
+      # two. lutaml 0.8.19 accepts a list, stores it whole, and its getter
+      # returns only the first element -- so
       # `Issue.new(severity: ["info", "error"])` validates, reports
       # `"info"`, and drops `"error"` on the way to JSON. Nothing about
       # that is visible to a caller.
+      #
+      # Cardinality only, and deliberately so: `severity: ["error"]`
+      # is accepted, because lutaml has already normalised a bare
+      # `"error"` to the same `["error"]` by the time this runs and the
+      # two are no longer distinguishable. Nothing is lost either way.
+      # Deserialization is stricter -- lutaml's own
+      # `CollectionTrueMissingError` rejects any list from a document
+      # before this runs.
       #
       # The raw ivar, because the getter is the thing that hides it.
       def validate_cardinality(name, attribute)
