@@ -49,6 +49,7 @@ RSpec.describe Claricle::Models do
        -> { models::Location.new(byte_offset: -1) },
        -> { models::Inspection.new(parse_status: "ok", width: Float::NAN) },
        -> { models::Inspection.new(parse_status: "ok", meta: { "r" => Float::INFINITY }) },
+       -> { models::Inspection.new(parse_status: "ok", meta: { "r" => "\xFF".b }) },
        -> { models::Report.new(issues: [42]) },
        -> { models::Report.new(issues: models::Issue.new(severity: "info", message: "m")) }]
         .each do |build|
@@ -735,12 +736,24 @@ RSpec.describe Claricle::Models do
                         /byte_length expects a non-negative integer, got -4/)
     end
 
+    # A line and a column are counts into a document, so they are no more
+    # negative than the byte range is. Checking only the two the comment
+    # names would have left the other half of the model open.
+    it "refuses a negative line or column too" do
+      expect { models::Location.new(line: -5) }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /line expects a non-negative integer, got -5/)
+      expect { models::Location.from_json(%({"column":-2})) }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /column expects a non-negative integer, got -2/)
+    end
+
     # Zero is a legal offset and a legal length, so the guard has to key
     # on the sign rather than on the value being falsy or blank.
     it "still accepts a zero-length range at offset zero" do
-      empty = models::Location.new(byte_offset: 0, byte_length: 0)
+      empty = models::Location.new(byte_offset: 0, byte_length: 0, line: 0, column: 0)
 
-      expect([empty.byte_offset, empty.byte_length]).to eq([0, 0])
+      expect([empty.byte_offset, empty.byte_length, empty.line]).to eq([0, 0, 0])
     end
 
     # Nested, because Location is reached through an Issue in practice
@@ -875,37 +888,61 @@ RSpec.describe Claricle::Models do
       expect(inspection.meta).to eq({ "a" => 1 })
     end
 
-    # Everything else meta holds renders as a String on the way to JSON
-    # -- a Symbol, a Range and a bare Object all do. Infinity is the one
-    # value that stops the document being produced at all, so an
-    # Inspection that took one could never be written out.
-    it "refuses a number JSON could not write, however deep in meta" do
-      %w[width nested list key].zip(
-        [{ "width" => Float::INFINITY },
-         { "box" => { "dpi" => -Float::INFINITY } },
-         { "sizes" => [1.0, Float::NAN] },
-         { Float::INFINITY => "wide" }]
-      ).each do |label, meta|
+    # meta is verbatim and JSON is what the CLI reports, so a value JSON
+    # will not write leaves an Inspection nothing can report. Both kinds
+    # it refuses, at every depth, and as a key as well as a value.
+    {
+      "a number at the top level" => { "width" => Float::INFINITY },
+      "a number nested in a hash" => { "box" => { "dpi" => -Float::INFINITY } },
+      "a number inside an array" => { "sizes" => [1.0, Float::NAN] },
+      "bytes that are not UTF-8" => { "raw" => "\xFF\xFE".b },
+      "invalid UTF-8" => { "name" => (+"bad \xFF byte").force_encoding(Encoding::UTF_8) },
+      "bytes nested in an array" => { "chunks" => [{ "data" => "\xC3".b }] },
+      "a container that leads back to itself" => {}.tap { |h| h["self"] = h }
+    }.each do |label, meta|
+      it "refuses #{label} in meta, which JSON could not write" do
         expect { models::Inspection.new(parse_status: "ok", meta: meta) }
-          .to raise_error(Lutaml::Model::ValidationError,
-                          /meta expects finite numbers throughout/), label
+          .to raise_error(Lutaml::Model::ValidationError, /meta expects values JSON can render/)
       end
-      expect { models::Inspection.from_json(%({"parse_status":"ok","meta":{"v":1e400}})) }
-        .to raise_error(Lutaml::Model::ValidationError, /meta expects finite numbers/)
     end
 
-    # The walk refuses one kind of value, not the free-form contract:
-    # everything meta is documented to carry still goes in untouched,
-    # including a container that leads back to itself, which would
-    # otherwise take the walk down with it.
-    it "still stores every finite value, and survives a self-referential hash" do
-      loop_hash = { "n" => 1.0 }
-      loop_hash["self"] = loop_hash
-      kept = models::Inspection.new(parse_status: "ok",
-                                    meta: { "s" => :sym, "r" => (1..5), "deep" => loop_hash })
+    it "refuses an unrenderable value arriving from a document too" do
+      expect { models::Inspection.from_json(%({"parse_status":"ok","meta":{"v":1e400}})) }
+        .to raise_error(Lutaml::Model::ValidationError, /meta expects values JSON can render/)
+    end
+
+    # It refuses what JSON refuses and nothing more, which is why it asks
+    # JSON instead of listing rules. Every one of these tempts a
+    # hand-written check into a wrong answer: `"\xFF".b` is valid
+    # ASCII-8BIT and still unwritable while Latin-1 and UTF-16 are both
+    # fine; the same container held twice side by side is not a cycle;
+    # and an Infinity used as a KEY renders happily as "Infinity" even
+    # though the same value refuses to render as a value.
+    it "still stores everything JSON can write" do
+      shared = { "n" => 1.0 }
+      kept = models::Inspection.new(
+        parse_status: "ok",
+        meta: { "s" => :sym, "r" => (1..5), "ascii" => "plain".b,
+                "latin" => (+"caf\xE9").force_encoding(Encoding::ISO_8859_1),
+                "wide" => "x".encode(Encoding::UTF_16),
+                Float::INFINITY => "as a key", "a" => shared, "b" => shared }
+      )
 
       expect(kept.meta["s"]).to eq(:sym)
-      expect(kept.meta["deep"]["self"]).to equal(kept.meta["deep"])
+      expect(kept.meta["r"]).to eq(1..5)
+      expect { kept.to_json }.not_to raise_error
+    end
+
+    # The whole point of rendering rather than listing rules: a handler
+    # that nests deeply enough trips JSON's depth limit, which no
+    # hand-written check for Infinity or encodings would ever have seen.
+    it "refuses meta nested deeper than JSON will write" do
+      deep = (1..200).reduce("leaf") { |inner, _| { "n" => inner } }
+
+      expect { models::Inspection.new(parse_status: "ok", meta: deep) }
+        .to raise_error(Lutaml::Model::ValidationError, /meta expects values JSON can render/)
+      expect(models::Inspection.new(parse_status: "ok", meta: { "n" => { "n" => "leaf" } }).meta)
+        .to eq({ "n" => { "n" => "leaf" } })
     end
 
     # lutaml generates `meta(*args)` and the block form of `new` uses the

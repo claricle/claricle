@@ -105,6 +105,29 @@ RSpec.describe Claricle::Image do
       end
     end
 
+    # The path is the other half of owning the bytes. Sharing the
+    # caller's String let them repoint a detected image at another file:
+    # format stayed :png while content came from somewhere else.
+    it "keeps its own copy of the path it was given" do
+      with_file.call(png) do |path|
+        supplied = path.dup
+        image = described_class.from_path(supplied)
+        supplied.replace("/nonexistent")
+
+        expect(image.path).to eq(path)
+        expect(image.content).to eq(png)
+      end
+    end
+
+    it "hands back a path nobody can rewrite in place" do
+      with_file.call(png) do |path|
+        image = described_class.from_path(path.dup)
+
+        expect(image.path).to be_frozen
+        expect { image.path << "-tampered" }.to raise_error(FrozenError)
+      end
+    end
+
     it "requires exactly one of path or content" do
       expect { described_class.new(format: :png) }
         .to raise_error(ArgumentError, /exactly one/)
@@ -194,29 +217,6 @@ RSpec.describe Claricle::Image do
       frozen = png.b.freeze
 
       expect(described_class.from_content(frozen).content).to equal(frozen)
-    end
-
-    # The path is the other half of the same argument. Sharing the
-    # caller's String let them repoint a detected image at a different
-    # file: format stayed :png while content came from somewhere else.
-    it "keeps its own copy of the path it was given" do
-      with_file.call(png) do |path|
-        supplied = path.dup
-        image = described_class.from_path(supplied)
-        supplied.replace("/nonexistent")
-
-        expect(image.path).to eq(path)
-        expect(image.content).to eq(png)
-      end
-    end
-
-    it "hands back a path nobody can rewrite in place" do
-      with_file.call(png) do |path|
-        image = described_class.from_path(path.dup)
-
-        expect(image.path).to be_frozen
-        expect { image.path << "-tampered" }.to raise_error(FrozenError)
-      end
     end
   end
 
