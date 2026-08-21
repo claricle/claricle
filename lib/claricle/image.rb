@@ -98,43 +98,6 @@ module Claricle
       @content = self.class.send(:binary, content) unless content.nil?
     end
 
-    # Ruby's default Marshal writes the ivars and reads them straight back
-    # into a fresh object, running neither `initialize` nor any of its
-    # guards -- measured: `Marshal.load(Marshal.dump(image))` came back
-    # with mutable content, and replacing those bytes with an EMF file
-    # left the copy reporting :png over EMF. So the boundary goes through
-    # the constructor, and every check and freeze runs again.
-    #
-    # The bytes travel even for a path-born image that never read them,
-    # so the copy has them without going back to the file, and it loads
-    # under `Marshal.load(..., freeze: true)` where a lazy read cannot --
-    # measured, `#content` raised FrozenError trying to memoize into the
-    # already-frozen copy. `#with_path` still uses the path it was given,
-    # on the copy exactly as on the original: a path-born image is a
-    # reference to a file, and Marshal does not change that.
-    #
-    # Private, because Marshal reaches them anyway (measured) and a public
-    # `marshal_load` is a second constructor that skips the exactly-one
-    # check -- measured: handing one image another's state left it
-    # reporting :emf over PNG bytes.
-    def marshal_dump
-      # `@content`, not `#content`: reading through the memoizing reader
-      # writes into the image being dumped, so dumping a frozen one
-      # raised FrozenError before it produced anything, and dumping an
-      # unfrozen one left the whole file cached on it either way.
-      [format, path, @content || File.binread(path).freeze]
-    end
-
-    def marshal_load(state)
-      format, path, content = state
-      initialize(format: format, path: path, content: path.nil? ? content : nil)
-      # `initialize` takes one source or the other; a path-born image
-      # carries both, and its bytes are settled here.
-      @content = self.class.send(:binary, content)
-    end
-
-    private :marshal_dump, :marshal_load
-
     # Read lazily and then remembered. Detection already streamed the file;
     # slurping it at construction would waste that. Frozen for the same
     # reason a content-born image keeps a copy: a handler that mutated
@@ -175,6 +138,41 @@ module Claricle
     # Per call: handlers are stateless, and a cache would buy nothing.
     def handler
       Registry.handler_for(format).new
+    end
+
+    # Ruby's default Marshal writes the ivars and reads them straight back
+    # into a fresh object, running neither `initialize` nor any of its
+    # guards -- measured: `Marshal.load(Marshal.dump(image))` came back
+    # with mutable content, and replacing those bytes with an EMF file
+    # left the copy reporting :png over EMF. So the boundary goes through
+    # the constructor, and every check and freeze runs again.
+    #
+    # The bytes travel even for a path-born image that never read them,
+    # so the copy has them without going back to the file, and it loads
+    # under `Marshal.load(..., freeze: true)` where a lazy read cannot --
+    # measured, `#content` raised FrozenError trying to memoize into the
+    # already-frozen copy. `#with_path` still uses the path it was given,
+    # on the copy exactly as on the original: a path-born image is a
+    # reference to a file, and Marshal does not change that.
+    #
+    # Private, because Marshal reaches them anyway (measured) and a public
+    # `marshal_load` is a second constructor that skips the exactly-one
+    # check -- measured: handing one image another's state left it
+    # reporting :emf over PNG bytes.
+    def marshal_dump
+      # `@content`, not `#content`: reading through the memoizing reader
+      # writes into the image being dumped, so dumping a frozen one
+      # raised FrozenError before it produced anything, and dumping an
+      # unfrozen one left the whole file cached on it either way.
+      [format, path, @content || File.binread(path).freeze]
+    end
+
+    def marshal_load(state)
+      format, path, content = state
+      initialize(format: format, path: path, content: path.nil? ? content : nil)
+      # `initialize` takes one source or the other; a path-born image
+      # carries both, so its bytes are settled here instead.
+      @content = self.class.send(:binary, content) if path
     end
   end
 end
