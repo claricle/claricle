@@ -67,15 +67,30 @@ module Claricle
       # unless this really is the end of the line it is deferred to the
       # next window, where the following byte is known.
       def match?(scan, final:, carried: 0)
-        found = FIELD.match(scan)
-        return false unless found
-        # A match starting inside the carried bytes has already been
-        # judged, in the window where its real left-hand neighbour was
-        # visible. Reconsidering it here lets the buffer edge stand in
-        # for that neighbour, which turned "%!PS XEPSF " into an EPS.
-        return false if found.begin(0).zero? && carried.positive?
+        offset = 0
 
-        final || found.end(0) < scan.bytesize
+        while (found = FIELD.match(scan, offset))
+          offset = found.end(0)
+          # A match starting inside the carried bytes has already been
+          # judged, in the window where its real left-hand neighbour was
+          # visible. Reconsidering it here lets the buffer edge stand in
+          # for that neighbour, which turned "%!PS XEPSF " into an EPS.
+          #
+          # Rejecting it must not end the search, which is what an
+          # earlier version did by examining only the first match: a
+          # decoy straddling the boundary then hid a real `EPSF` later in
+          # the same window, and the file read as :ps.
+          next if found.begin(0).zero? && carried.positive?
+
+          return true if final || found.end(0) < scan.bytesize
+
+          # This one ends exactly at the edge, so its trailing delimiter
+          # came from the buffer rather than the file. Nothing after it
+          # can end sooner, so the whole window defers.
+          return false
+        end
+
+        false
       end
     end
   end
