@@ -23,16 +23,49 @@ module Claricle
     #
     # `marshal_dump` must stay absent: Ruby prefers it over `_dump`.
     #
-    # Two consequences, both deliberate. The payload is a nested Marshal
+    # Three consequences, all deliberate. The payload is a nested Marshal
     # stream, so it does not inherit the outer load's `freeze:` or load
-    # proc -- that is inherent to `_dump` returning a String. And it is a
+    # proc -- that is inherent to `_dump` returning a String. It is a
     # semantic snapshot, so aliasing inside the subtree is normalized:
-    # the same Issue given twice reloads as two equal Issues.
+    # the same Issue given twice reloads as two equal Issues. And the
+    # nested stream has a cycle table of its own, so a model that leads
+    # back to itself through `meta` is refused by name rather than
+    # followed -- see `guarding` below.
     module Marshalling
       VERSION = 1
+      DUMPING = :claricle_models_dumping
 
       def _dump(depth)
-        Marshal.dump([VERSION, marshal_attributes], depth)
+        Marshalling.guarding(self) do
+          Marshal.dump([VERSION, marshal_attributes], depth)
+        end
+      end
+
+      # A model reached through `meta` is written by Ruby rather than by
+      # `plain`, so it re-enters `_dump` and opens a stream of its own.
+      # Ruby's cycle table belongs to the outer stream and cannot see into
+      # this one, so a `meta` that leads back to its own model recursed
+      # until the stack gave out -- measured: `meta["box"]["self"]`
+      # pointing at the Inspection whose `box` that is, `SystemStackError`
+      # rather than any message a caller could act on. Named instead, the
+      # same trade `plain` makes for a nested subclass.
+      #
+      # Only what is open right now, so the same model written twice side
+      # by side is fine -- and Ruby links the second occurrence anyway.
+      # `compare_by_identity`, because two equal models are two models,
+      # and because hashing a lutaml model walks the parent links this is
+      # here to keep out of.
+      def self.guarding(model)
+        active = (Thread.current[DUMPING] ||= {}.compare_by_identity)
+        raise TypeError, "cannot marshal #{model.class}: its meta leads back to it" if active[model]
+
+        active[model] = true
+        begin
+          yield
+        ensure
+          active.delete(model)
+          Thread.current[DUMPING] = nil if active.empty?
+        end
       end
 
       # Not `to_hash`: lutaml omits explicitly-empty values from it, so a
