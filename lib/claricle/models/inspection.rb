@@ -64,13 +64,14 @@ module Claricle
         self.issues = [] if issues.nil?
       end
 
-      # Base freezes Strings and collections; `meta` is a Hash and needs
-      # saying so here. Left writable, a sealed Inspection could still
-      # have `meta["x"] = 1` written through it and its JSON changed
-      # afterwards, which is what sealing is for. Through the reader, so
-      # the wrapper deserialization stores is unwrapped first and both
-      # doors seal the same object. Shallow, because the copy is: what a
-      # handler nested inside `meta` is still the handler's.
+      # Base freezes Strings and collections, so a Hash has to be sealed
+      # here. Without it a sealed Inspection still takes `meta["x"] = 1`
+      # and reports the change in its JSON.
+      #
+      # Through the reader, because deserialization stores the value
+      # wrapped and the reader unwraps it -- both doors then seal the
+      # same object. The freeze is shallow, matching the copy that cast
+      # made: what a handler nested inside `meta` stays the handler's.
       def freeze_attributes
         super
         meta&.freeze
