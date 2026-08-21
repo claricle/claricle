@@ -13,7 +13,14 @@ module Claricle
 
     class << self
       def from_path(path)
-        new(format: Detector.detect_path(path), path: path)
+        # Checked before anything opens it, for the same reason `binary`
+        # runs first in `from_content`. `Detector.detect_path` opens
+        # whatever it is handed and `File.open` takes a descriptor as
+        # happily as a name -- measured: `Image.from_path(io.fileno)`
+        # detected :png, and by the time `initialize` refused the Integer
+        # the caller's IO read `Errno::EBADF` while `io.closed?` still
+        # said false.
+        new(format: Detector.detect_path(checked_path(path)), path: path)
       end
 
       def from_content(content, format: nil)
@@ -28,16 +35,34 @@ module Claricle
 
       private
 
-      # Bytes, whatever the caller tagged them. `File.binread` already
-      # gives that; detection binary-copies its own view (detector.rb:137)
-      # and never the String we keep, so a content-born image was the one
-      # place `content` depended on how the caller happened to read the
-      # file. Measured: the same 70-byte PNG through `File.read` arrives
-      # UTF-8, where `length` is 69 and `valid_encoding?` is false -- a
-      # handler indexing or scanning it would disagree with the path-born
-      # image. Re-tagged on a copy, so the caller keeps their String as it
-      # was, and only when it has to be: `.b` allocates a second whole
-      # image.
+      # A path is read and joined, so it has to be a name.
+      #
+      # Refused rather than assumed, because `false` would clear the
+      # exactly-one check in `initialize` and then read as "no path" in
+      # `with_path`, so the image took the temporary-file branch and died
+      # on `File.binread(false)`.
+      def checked_path(path)
+        raise ArgumentError, "path must be a String, got #{path.class}" unless path.is_a?(String)
+
+        path
+      end
+
+      # Bytes this image owns, whatever the caller tagged them.
+      # `File.binread` already gives binary; detection binary-copies its
+      # own view (detector.rb:137) and never the String we keep, so a
+      # content-born image was the one place `content` depended on how the
+      # caller happened to read the file. Measured: the same 70-byte PNG
+      # through `File.read` arrives UTF-8, where `length` is 69 and
+      # `valid_encoding?` is false -- a handler indexing or scanning it
+      # would disagree with the path-born image.
+      #
+      # Copied and frozen, not merely re-tagged. An Image is a value, and
+      # a caller who kept their String could otherwise rewrite the bytes
+      # out from under the format we detected -- measured:
+      # `bytes.replace("not a PNG")` after `from_content(bytes)` left the
+      # image reporting :png over nine bytes of text. A String that is
+      # already frozen and already binary cannot do that, so it is kept
+      # as-is rather than costing a second copy of the whole image.
       #
       # Refused rather than assumed, because `false` clears the
       # exactly-one check in `initialize` and is still falsy -- measured:
@@ -47,16 +72,16 @@ module Claricle
       def binary(bytes)
         raise ArgumentError, "content must be a String, got #{bytes.class}" unless bytes.is_a?(String)
 
-        bytes.encoding == Encoding::BINARY ? bytes : bytes.b
+        return bytes if bytes.frozen? && bytes.encoding == Encoding::BINARY
+
+        bytes.b.freeze
       end
     end
 
     def initialize(format:, path: nil, content: nil)
       raise ArgumentError, "format must be a Symbol, got #{format.class}" unless format.is_a?(Symbol)
-      # A path is read and joined; `false` would clear the exactly-one
-      # check below and then read as "no path" in `with_path`, so the
-      # image took the temporary-file branch and died on `File.binread`.
-      raise ArgumentError, "path must be a String, got #{path.class}" unless path.nil? || path.is_a?(String)
+
+      path = self.class.send(:checked_path, path) unless path.nil?
       # Exactly one source. Neither leaves #content reading from a nil
       # path; both is contradictory and would silently prefer one.
       raise ArgumentError, "give exactly one of path: or content:" unless path.nil? ^ content.nil?
@@ -67,9 +92,11 @@ module Claricle
     end
 
     # Read lazily and then remembered. Detection already streamed the file;
-    # slurping it at construction would waste that.
+    # slurping it at construction would waste that. Frozen for the same
+    # reason a content-born image keeps a copy: a handler that mutated
+    # these bytes in place would change what every later handler sees.
     def content
-      @content ||= File.binread(path)
+      @content ||= File.binread(path).freeze
     end
 
     # Most delegates want a path. A content-born image gets a temporary one
