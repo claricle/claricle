@@ -145,6 +145,30 @@ RSpec.describe "Claricle format detection" do
       expect(wrong).to be_empty
     end
 
+    # Rejecting a boundary decoy must not end the search of its window.
+    # Examining only the FIRST match meant a decoy straddling the chunk
+    # edge hid a real `EPSF` later on the same line, and the file read
+    # as :ps -- through both entry points.
+    it "keeps looking after rejecting a decoy at the chunk boundary" do
+      source = "%!PS#{" " * 4086}XEPSF EPSF\n"
+
+      expect(Claricle.detect(source)).to eq(:eps)
+
+      Tempfile.create(["decoy", ".eps"]) do |file|
+        file.binmode
+        file.write(source)
+        file.flush
+        expect(Claricle.detect_path(file.path)).to eq(:eps)
+      end
+    end
+
+    # The decoy alone still decides :ps -- the fix must not turn every
+    # rejected match into an accepted one.
+    it "still refuses a window whose only field is a decoy" do
+      expect(Claricle.detect("%!PS#{" " * 4086}XEPSF\n")).to eq(:ps)
+      expect(Claricle.detect("%!PS#{" " * 4086}XEPSFY\n")).to eq(:ps)
+    end
+
     # No line ending at all, so the decision is made at end of file.
     it "decides a token flush against the end of the file" do
       expect(Claricle.detect("%!PS EPSF")).to eq(:eps)
