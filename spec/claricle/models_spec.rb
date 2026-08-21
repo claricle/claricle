@@ -936,13 +936,24 @@ RSpec.describe Claricle::Models do
     # The whole point of rendering rather than listing rules: a handler
     # that nests deeply enough trips JSON's depth limit, which no
     # hand-written check for Infinity or encodings would ever have seen.
-    it "refuses meta nested deeper than JSON will write" do
-      deep = (1..200).reduce("leaf") { |inner, _| { "n" => inner } }
+    #
+    # On the exact boundary, because the limit is counted from the
+    # outside and meta sits one level inside the document. Checked bare,
+    # 100 passed validation and `to_json` still raised; a spec at 200
+    # would never have seen that. Both sides here: 99 must survive the
+    # round trip, 100 must be refused.
+    nest = ->(depth) { (1..depth).reduce("leaf") { |inner, _| { "n" => inner } } }
 
-      expect { models::Inspection.new(parse_status: "ok", meta: deep) }
+    it "refuses meta one level deeper than the document can carry" do
+      expect { models::Inspection.new(parse_status: "ok", meta: nest[100]) }
         .to raise_error(Lutaml::Model::ValidationError, /meta expects values JSON can render/)
-      expect(models::Inspection.new(parse_status: "ok", meta: { "n" => { "n" => "leaf" } }).meta)
-        .to eq({ "n" => { "n" => "leaf" } })
+    end
+
+    it "still writes meta at the deepest level the document can carry" do
+      deepest = models::Inspection.new(parse_status: "ok", meta: nest[99])
+
+      expect { deepest.to_json }.not_to raise_error
+      expect(models::Inspection.from_json(deepest.to_json).meta).to eq(nest[99])
     end
 
     # lutaml generates `meta(*args)` and the block form of `new` uses the

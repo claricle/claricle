@@ -91,6 +91,13 @@ module Claricle
       # lutaml renders with (json/standard_adapter.rb:34), so this asks
       # the same question the same way.
       #
+      # Under the same key it will occupy in the document, because the
+      # depth limit is counted from the outside: rendered bare, a meta
+      # nested 100 deep passes here and the `to_json` that follows still
+      # raises, since the document puts one more level above it.
+      # Measured, the two agree at every depth from 96 to 103 -- both
+      # refuse 100 and both take 99.
+      #
       # Only `meta` needs it: lutaml scrubs a declared `:string`
       # attribute to valid UTF-8 on the way in, and `validate_finite`
       # covers the declared numbers.
@@ -98,7 +105,7 @@ module Claricle
         raw = meta
         return if raw.nil?
 
-        JSON.generate(raw)
+        JSON.generate({ "meta" => raw })
       rescue JSON::JSONError => e
         refuse("meta", "values JSON can render", e.message)
       end

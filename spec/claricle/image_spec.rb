@@ -128,6 +128,33 @@ RSpec.describe Claricle::Image do
       end
     end
 
+    # Ruby's default Marshal reads ivars straight back in without running
+    # any of the guards, so a copy came back with mutable bytes and the
+    # original's format still on it.
+    it "re-applies its guarantees across a marshal round trip" do
+      copy = Marshal.load(Marshal.dump(described_class.from_content(png)))
+
+      expect(copy.format).to eq(:png)
+      expect(copy.content).to eq(png)
+      expect(copy.content).to be_frozen
+    end
+
+    # A path-born image keeps both halves: a frozen path, and whatever it
+    # had already read, which is why the file can go away afterwards.
+    it "keeps a path-born image's path frozen and its bytes cached" do
+      with_file.call(png) do |path|
+        image = described_class.from_path(path)
+        image.content
+        copy = Marshal.load(Marshal.dump(image))
+        File.delete(path)
+
+        expect(copy.path).to eq(path)
+        expect(copy.path).to be_frozen
+        expect(copy.content).to eq(png)
+        expect(copy.content).to be_frozen
+      end
+    end
+
     it "requires exactly one of path or content" do
       expect { described_class.new(format: :png) }
         .to raise_error(ArgumentError, /exactly one/)
