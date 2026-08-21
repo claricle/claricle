@@ -91,6 +91,20 @@ RSpec.describe Claricle::Image do
         .to raise_error(ArgumentError, /path must be a String, got Integer/)
     end
 
+    # `File.open` takes a descriptor as happily as a name, so detecting
+    # before the type check opened and closed the caller's IO. The
+    # ArgumentError alone would pass either way -- it is the surviving
+    # descriptor that pins the ordering.
+    it "refuses a non-String path before anything opens it" do
+      with_file.call(png) do |path|
+        File.open(path, "rb") do |io|
+          expect { described_class.from_path(io.fileno) }
+            .to raise_error(ArgumentError, /path must be a String, got Integer/)
+          expect(io.read(1)).to eq("\x89".b)
+        end
+      end
+    end
+
     it "requires exactly one of path or content" do
       expect { described_class.new(format: :png) }
         .to raise_error(ArgumentError, /exactly one/)
@@ -150,6 +164,36 @@ RSpec.describe Claricle::Image do
       described_class.from_content(tagged)
 
       expect(tagged.encoding).to eq(Encoding::UTF_8)
+    end
+
+    # An Image is a value. Sharing the caller's buffer let them rewrite
+    # the bytes out from under the format we had already detected: the
+    # image kept saying :png over nine bytes of text. Binary input used to
+    # be handed straight through, so only a binary String catches this --
+    # the UTF-8 case above was already copied on the way in.
+    it "keeps its own copy of the bytes it was given" do
+      bytes = png.dup
+      image = described_class.from_content(bytes)
+      bytes.replace("not a PNG")
+
+      expect(image.content).to eq(png)
+      expect(image.format).to eq(:png)
+    end
+
+    it "hands back bytes nobody can rewrite in place" do
+      expect(described_class.from_content(png.dup).content).to be_frozen
+      with_file.call(png) do |path|
+        expect(described_class.from_path(path).content).to be_frozen
+      end
+    end
+
+    # A String that is already frozen and already binary cannot be
+    # rewritten, so it is kept rather than costing a second copy of the
+    # whole image.
+    it "keeps a frozen binary string rather than copying it again" do
+      frozen = png.b.freeze
+
+      expect(described_class.from_content(frozen).content).to equal(frozen)
     end
   end
 
