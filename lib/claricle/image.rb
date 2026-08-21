@@ -20,7 +20,8 @@ module Claricle
         # detected :png, and by the time `initialize` refused the Integer
         # the caller's IO read `Errno::EBADF` while `io.closed?` still
         # said false.
-        new(format: Detector.detect_path(checked_path(path)), path: path)
+        name = checked_path(path)
+        new(format: Detector.detect_path(name), path: name)
       end
 
       def from_content(content, format: nil)
@@ -35,7 +36,13 @@ module Claricle
 
       private
 
-      # A path is read and joined, so it has to be a name.
+      # A path is read and joined, so it has to be a name -- and one this
+      # image owns, for the same reason it owns its bytes. Measured:
+      # `path.replace(other_file)` after `from_path(path)` left the image
+      # reading the other file while still reporting the format detected
+      # from the first, and `image.path << "x"` rewrote it through the
+      # reader. A String already frozen cannot do either, so it is kept
+      # as it came.
       #
       # Refused rather than assumed, because `false` would clear the
       # exactly-one check in `initialize` and then read as "no path" in
@@ -44,7 +51,7 @@ module Claricle
       def checked_path(path)
         raise ArgumentError, "path must be a String, got #{path.class}" unless path.is_a?(String)
 
-        path
+        path.frozen? ? path : path.dup.freeze
       end
 
       # Bytes this image owns, whatever the caller tagged them.
