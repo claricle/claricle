@@ -111,6 +111,16 @@ RSpec.describe "Claricle::Registry" do
       expect(Claricle::UnsupportedFormat.new(:wmf, target: :svg).message)
         .to eq("format :wmf is not supported")
     end
+
+    # Only nil means "no target". Tested by truthiness, the message
+    # dropped a target that was actually supplied and named the operation
+    # without saying what it had been refused for.
+    it "names a falsey target and still omits an absent one" do
+      expect(Claricle::UnsupportedFormat.new(:wmf, :convert, target: false).message)
+        .to eq("format :wmf is not supported for convert to false")
+      expect(Claricle::UnsupportedFormat.new(:wmf, :convert, target: nil).message)
+        .to eq("format :wmf is not supported for convert")
+    end
   end
 
   # The plan's claim is that registry.rb owns its dependencies, so there is

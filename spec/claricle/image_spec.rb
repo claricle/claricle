@@ -139,20 +139,47 @@ RSpec.describe Claricle::Image do
       expect(copy.content).to be_frozen
     end
 
-    # A path-born image keeps both halves: a frozen path, and whatever it
-    # had already read, which is why the file can go away afterwards.
-    it "keeps a path-born image's path frozen and its bytes cached" do
+    # A path-born image keeps both halves: a frozen path, and the bytes,
+    # which is why the file can go away afterwards. Never read before the
+    # dump, so this cannot pass on a cached copy the constructor happened
+    # to have.
+    it "carries a path-born image's bytes even when it never read them" do
       with_file.call(png) do |path|
-        image = described_class.from_path(path)
-        image.content
-        copy = Marshal.load(Marshal.dump(image))
+        dumped = Marshal.dump(described_class.from_path(path))
         File.delete(path)
+        # Two steps, because the file has to go away in between; the cop
+        # only recognises the one-expression form as our own bytes.
+        copy = Marshal.load(dumped) # rubocop:disable Security/MarshalLoad
 
         expect(copy.path).to eq(path)
         expect(copy.path).to be_frozen
         expect(copy.content).to eq(png)
         expect(copy.content).to be_frozen
       end
+    end
+
+    # `freeze: true` freezes the copy before anything reads it, so a lazy
+    # `#content` had nowhere to memoize and raised FrozenError. Both
+    # constructors, because only the path-born one reads late.
+    it "loads under freeze: true, where a lazy read cannot" do
+      from_bytes = Marshal.load(Marshal.dump(described_class.from_content(png)), freeze: true)
+      expect(from_bytes.content).to eq(png)
+
+      with_file.call(png) do |path|
+        copy = Marshal.load(Marshal.dump(described_class.from_path(path)), freeze: true)
+        expect(copy.content).to eq(png)
+      end
+    end
+
+    # A public `marshal_load` is a second constructor with none of the
+    # arity checks: handed another image's state it took the new format
+    # and kept the old bytes.
+    it "keeps the marshal hooks off its public surface" do
+      image = described_class.from_content(png)
+
+      expect(image).not_to respond_to(:marshal_load)
+      expect(image).not_to respond_to(:marshal_dump)
+      expect { image.marshal_load([:emf, "x", nil]) }.to raise_error(NoMethodError, /private/)
     end
 
     it "requires exactly one of path or content" do

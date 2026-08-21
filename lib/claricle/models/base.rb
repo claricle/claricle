@@ -106,7 +106,12 @@ module Claricle
           # rubocop:disable Security/MarshalLoad -- this IS the Marshal
           # hook. Ruby calls it with what our own `_dump` wrote, and it is
           # only reached because the caller already chose to Marshal.load
-          # the outer payload. Unnesting would not make that choice safer.
+          # the outer payload. That premise needs `_load` to be private,
+          # which it is below: public, it was itself an unguarded
+          # `Marshal.load` on the model's own surface, and a payload it
+          # went on to reject had already run whatever the callbacks
+          # inside it wanted. Unnesting would not make the outer choice
+          # safer.
           envelope = Marshal.load(payload)
           # rubocop:enable Security/MarshalLoad
           version, attributes = envelope
@@ -119,6 +124,10 @@ module Claricle
 
           from_hash(attributes)
         end
+
+        # Marshal reaches a private `_load` on the class and on every
+        # subclass -- measured -- so nothing is given up by hiding it.
+        private :_load
       end
     end
 

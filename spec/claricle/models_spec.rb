@@ -334,14 +334,24 @@ RSpec.describe Claricle::Models do
         expect(restored.meta["range"]).to eq(1..5)
       end
 
+      # Public, `_load` was itself an unguarded `Marshal.load` sitting on
+      # the model: a payload it went on to reject had already run the
+      # callbacks inside it. Marshal reaches it privately just the same.
+      it "keeps _load off the model's public surface" do
+        expect { models::Report._load("anything") }
+          .to raise_error(NoMethodError, /private method/)
+        expect(Marshal.load(Marshal.dump(parent)).to_json).to eq(parent.to_json)
+      end
+
       # `1.0` and `Rational(1,1)` are both `== 1`, and a longer envelope
       # would be a different format wearing the right version number, so
-      # the guard checks exact type and exact shape.
+      # the guard checks exact type and exact shape. Through `send`,
+      # because the hook is private.
       [99, 1.0, Rational(1, 1)].each do |version|
         it "refuses a payload versioned #{version.inspect}" do
           payload = Marshal.dump([version, parent.to_hash])
 
-          expect { models::Report._load(payload) }
+          expect { models::Report.send(:_load, payload) }
             .to raise_error(TypeError, /unsupported Claricle marshal payload/)
         end
       end
@@ -349,7 +359,7 @@ RSpec.describe Claricle::Models do
       it "refuses an envelope carrying extra fields" do
         payload = Marshal.dump([1, parent.to_hash, "extra"])
 
-        expect { models::Report._load(payload) }
+        expect { models::Report.send(:_load, payload) }
           .to raise_error(TypeError, /unsupported Claricle marshal payload/)
       end
 
@@ -930,6 +940,11 @@ RSpec.describe Claricle::Models do
 
       expect(kept.meta["s"]).to eq(:sym)
       expect(kept.meta["r"]).to eq(1..5)
+      # The Infinity key by lookup, not just by the model constructing:
+      # stringifying every key on the way in would otherwise pass here
+      # while quietly breaking the verbatim contract.
+      expect(kept.meta[Float::INFINITY]).to eq("as a key")
+      expect(kept.meta.keys).to include(Float::INFINITY)
       expect { kept.to_json }.not_to raise_error
     end
 

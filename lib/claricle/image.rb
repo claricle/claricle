@@ -104,17 +104,30 @@ module Claricle
     # with mutable content, and replacing those bytes with an EMF file
     # left the copy reporting :png over EMF. So the boundary goes through
     # the constructor, and every check and freeze runs again.
+    #
+    # The bytes travel even for a path-born image that never read them.
+    # The copy is then whole: it does not go back to a file that may have
+    # moved, and it survives `Marshal.load(..., freeze: true)`, where a
+    # lazy read cannot -- measured, `#content` raised FrozenError trying
+    # to memoize into the already-frozen copy.
+    #
+    # Private, because Marshal reaches them anyway (measured) and a public
+    # `marshal_load` is a second constructor that skips the exactly-one
+    # check -- measured: handing one image another's state left it
+    # reporting :emf over PNG bytes.
     def marshal_dump
-      [format, path, @content]
+      [format, path, content]
     end
 
     def marshal_load(state)
       format, path, content = state
       initialize(format: format, path: path, content: path.nil? ? content : nil)
-      # A path-born image may already have read its file. Keeping that
-      # spares the copy a second read, and survives the file going away.
-      @content = self.class.send(:binary, content) if path && content
+      # `initialize` takes one source or the other; a path-born image
+      # carries both, and its bytes are settled here.
+      @content = self.class.send(:binary, content)
     end
+
+    private :marshal_dump, :marshal_load
 
     # Read lazily and then remembered. Detection already streamed the file;
     # slurping it at construction would waste that. Frozen for the same
