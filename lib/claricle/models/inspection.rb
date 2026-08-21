@@ -41,9 +41,19 @@ module Claricle
       # caller asked for a Hash and gets one whichever way the model was
       # built.
       #
-      # The ivar directly, not `super` -- lutaml defines its readers
-      # through `method_missing`, so there is no superclass method here.
-      def meta
+      # The ivar directly, not `super`: 0.8.19 defines attribute readers
+      # with `define_method` on this very class, so writing one here
+      # replaces it and there is no superclass method to reach.
+      #
+      # `*args` because the generated reader doubles as the builder-form
+      # setter -- `Inspection.new { |i| i.meta("a" => 1) }`. A zero-arity
+      # reader made `meta` the one attribute that form could not set.
+      def meta(*args)
+        unless args.empty?
+          self.meta = args.first
+          return args.first
+        end
+
         raw = @meta
         raw.is_a?(Lutaml::Model::Type::Value) ? raw.value : raw
       end
