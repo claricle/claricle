@@ -63,4 +63,8 @@ module Claricle
 
     private_constant :Base
   end
+
+  # Private where it is defined, so the guarantee survives this file
+  # being required on its own rather than through the entry point.
+  private_constant :Handlers
 end

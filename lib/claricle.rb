@@ -68,5 +68,7 @@ module Claricle
   end
 
   private_class_method :accumulate, :conclusive?
-  private_constant :Detector, :EpsHeader, :ReservedNamespace, :Registry, :Handlers
+  # Registry and Handlers privatise themselves where they are defined, so
+  # that holds however they were loaded.
+  private_constant :Detector, :EpsHeader, :ReservedNamespace
 end
