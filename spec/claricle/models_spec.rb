@@ -363,6 +363,19 @@ RSpec.describe Claricle::Models do
           .to raise_error(TypeError, /unsupported Claricle marshal payload/)
       end
 
+      # `marshal_attributes` always writes a Hash, so anything else in
+      # that slot is a different format wearing the right version. An
+      # Array there passed the version guard and `from_hash` handed back
+      # an Array where a Report had been asked for.
+      [[], "attributes", nil].each do |slot|
+        it "refuses an envelope holding #{slot.class} where the attributes go" do
+          payload = Marshal.dump([1, slot])
+
+          expect { models::Report.send(:_load, payload) }
+            .to raise_error(TypeError, /unsupported Claricle marshal payload/)
+        end
+      end
+
       # The payload carries attributes, not classes, so a subclass would
       # come back as its parent with its own attributes gone. Refused at
       # dump time rather than silently erased -- validation accepts

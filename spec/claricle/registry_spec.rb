@@ -112,13 +112,15 @@ RSpec.describe "Claricle::Registry" do
         .to eq("format :wmf is not supported")
     end
 
-    # Only nil means "no target". Tested by truthiness, the message
-    # dropped a target that was actually supplied and named the operation
-    # without saying what it had been refused for.
-    it "names a falsey target and still omits an absent one" do
+    # Supplied and absent are different things, and both falsey values
+    # are supplied. Truthiness hid `false`; checking for nil then hid
+    # `nil`, which is what a caller who forgot `--to` actually sends.
+    it "names every supplied target and omits only an absent one" do
       expect(Claricle::UnsupportedFormat.new(:wmf, :convert, target: false).message)
         .to eq("format :wmf is not supported for convert to false")
       expect(Claricle::UnsupportedFormat.new(:wmf, :convert, target: nil).message)
+        .to eq("format :wmf is not supported for convert to nil")
+      expect(Claricle::UnsupportedFormat.new(:wmf, :convert).message)
         .to eq("format :wmf is not supported for convert")
     end
   end

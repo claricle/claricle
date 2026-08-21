@@ -117,9 +117,13 @@ module Claricle
           version, attributes = envelope
           # Exact type and exact shape: `1.0` and `Rational(1,1)` are both
           # `== 1`, and a longer envelope would be a different format
-          # wearing the right version number.
+          # wearing the right version number. `marshal_attributes` always
+          # writes a Hash, so anything else in that slot is a different
+          # format too -- measured, an Array there made `from_hash` hand
+          # back an Array where a Report was asked for.
           valid = envelope.is_a?(Array) && envelope.size == 2 &&
-                  version.instance_of?(Integer) && version == VERSION
+                  version.instance_of?(Integer) && version == VERSION &&
+                  attributes.instance_of?(::Hash)
           raise TypeError, "unsupported Claricle marshal payload #{version.inspect}" unless valid
 
           from_hash(attributes)

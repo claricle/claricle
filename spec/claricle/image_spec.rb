@@ -171,6 +171,30 @@ RSpec.describe Claricle::Image do
       end
     end
 
+    # Dumping must not write into the image it is dumping. Through the
+    # memoizing reader it did: a frozen path-born image could not be
+    # dumped at all, and an unfrozen one came out of `Marshal.dump`
+    # carrying the whole file it had not been asked to read.
+    it "dumps without reading through the image it is dumping" do
+      with_file.call(png) do |path|
+        unread = described_class.from_path(path)
+        Marshal.dump(unread)
+
+        expect(unread.instance_variable_get(:@content)).to be_nil
+        expect { Marshal.dump(described_class.from_path(path).freeze) }.not_to raise_error
+      end
+    end
+
+    # The copy is a copy, not a new kind of image: `with_path` uses the
+    # path it was given, the same as on the original.
+    it "leaves the copy pointing at the same file" do
+      with_file.call(png) do |path|
+        copy = Marshal.load(Marshal.dump(described_class.from_path(path)))
+
+        copy.with_path { |yielded| expect(yielded).to eq(path) }
+      end
+    end
+
     # A public `marshal_load` is a second constructor with none of the
     # arity checks: handed another image's state it took the new format
     # and kept the old bytes.

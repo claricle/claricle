@@ -88,6 +88,15 @@ RSpec.describe "Claricle::Handlers::Base" do
                         "format :wmf is not supported for convert to :svg")
     end
 
+    # `to:` is required, so a nil there is a caller who forgot their
+    # target rather than one who has none. Hiding it left the error
+    # naming the operation without saying what it was refused for.
+    it "names a nil target rather than hiding it" do
+      expect { handler.convert(image.new(:wmf), to: nil) }
+        .to raise_error(Claricle::UnsupportedFormat,
+                        "format :wmf is not supported for convert to nil")
+    end
+
     # The format asked about, not the first one declared: a handler owning
     # two formats would otherwise name the wrong one whichever way it came.
     it "names the format it was actually asked about" do

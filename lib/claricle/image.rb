@@ -105,18 +105,24 @@ module Claricle
     # left the copy reporting :png over EMF. So the boundary goes through
     # the constructor, and every check and freeze runs again.
     #
-    # The bytes travel even for a path-born image that never read them.
-    # The copy is then whole: it does not go back to a file that may have
-    # moved, and it survives `Marshal.load(..., freeze: true)`, where a
-    # lazy read cannot -- measured, `#content` raised FrozenError trying
-    # to memoize into the already-frozen copy.
+    # The bytes travel even for a path-born image that never read them,
+    # so the copy has them without going back to the file, and it loads
+    # under `Marshal.load(..., freeze: true)` where a lazy read cannot --
+    # measured, `#content` raised FrozenError trying to memoize into the
+    # already-frozen copy. `#with_path` still uses the path it was given,
+    # on the copy exactly as on the original: a path-born image is a
+    # reference to a file, and Marshal does not change that.
     #
     # Private, because Marshal reaches them anyway (measured) and a public
     # `marshal_load` is a second constructor that skips the exactly-one
     # check -- measured: handing one image another's state left it
     # reporting :emf over PNG bytes.
     def marshal_dump
-      [format, path, content]
+      # `@content`, not `#content`: reading through the memoizing reader
+      # writes into the image being dumped, so dumping a frozen one
+      # raised FrozenError before it produced anything, and dumping an
+      # unfrozen one left the whole file cached on it either way.
+      [format, path, @content || File.binread(path).freeze]
     end
 
     def marshal_load(state)
