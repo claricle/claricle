@@ -64,6 +64,33 @@ module Claricle
         self.issues = [] if issues.nil?
       end
 
+      def validate_types
+        super
+        refuse_infinite(meta)
+      end
+
+      # A handler that divided by zero can leave Infinity in `meta`, and
+      # JSON has none: the model took it, froze around it, and then could
+      # not produce a document at all -- measured, `to_json` raised
+      # `JSON::GeneratorError`. Everything else meta holds survives as a
+      # String -- a Symbol, a Range and a bare Object all render -- so
+      # this is the one value worth walking the container for.
+      #
+      # `seen`, because meta is stored verbatim and a handler is free to
+      # point a container back at itself. A Hash yields its pairs as
+      # Arrays, so keys are walked by the same branch as values.
+      def refuse_infinite(value, seen = {}.compare_by_identity)
+        case value
+        when Numeric
+          refuse("meta", "finite numbers throughout", value) unless value.finite?
+        when Hash, Array
+          return if seen[value]
+
+          seen[value] = true
+          value.each { |element| refuse_infinite(element, seen) }
+        end
+      end
+
       # Base freezes Strings and collections, so a Hash has to be sealed
       # here. Without it a sealed Inspection still takes `meta["x"] = 1`
       # and reports the change in its JSON.

@@ -39,6 +39,30 @@ RSpec.describe Claricle::Models do
       expect(raised.error_messages).to all(be_a(String))
     end
 
+    # The example above only reaches lutaml's own required-attribute
+    # error, so it says nothing about the errors this library raises
+    # itself. Every one of those goes through `Base#refuse`, and handing
+    # that a bare String would leave the whole suite green while
+    # `error_messages` blew up with NoMethodError.
+    it "raises its own errors so they survive error_messages too" do
+      [-> { models::Issue.new(severity: %w[info error], message: "m") },
+       -> { models::Location.new(byte_offset: -1) },
+       -> { models::Inspection.new(parse_status: "ok", width: Float::NAN) },
+       -> { models::Inspection.new(parse_status: "ok", meta: { "r" => Float::INFINITY }) },
+       -> { models::Report.new(issues: [42]) },
+       -> { models::Report.new(issues: models::Issue.new(severity: "info", message: "m")) }]
+        .each do |build|
+          raised = begin
+            build.call
+            nil
+          rescue Lutaml::Model::ValidationError => e
+            e
+          end
+          expect(raised).to be_a(Lutaml::Model::ValidationError)
+          expect(raised.error_messages).to all(be_a(String))
+        end
+    end
+
     it "rejects a missing message at both doors" do
       expect { models::Issue.new(severity: "error") }
         .to raise_error(Lutaml::Model::ValidationError)
@@ -849,6 +873,39 @@ RSpec.describe Claricle::Models do
 
       expect { doc["meta"]["b"] = 2 }.not_to raise_error
       expect(inspection.meta).to eq({ "a" => 1 })
+    end
+
+    # Everything else meta holds renders as a String on the way to JSON
+    # -- a Symbol, a Range and a bare Object all do. Infinity is the one
+    # value that stops the document being produced at all, so an
+    # Inspection that took one could never be written out.
+    it "refuses a number JSON could not write, however deep in meta" do
+      %w[width nested list key].zip(
+        [{ "width" => Float::INFINITY },
+         { "box" => { "dpi" => -Float::INFINITY } },
+         { "sizes" => [1.0, Float::NAN] },
+         { Float::INFINITY => "wide" }]
+      ).each do |label, meta|
+        expect { models::Inspection.new(parse_status: "ok", meta: meta) }
+          .to raise_error(Lutaml::Model::ValidationError,
+                          /meta expects finite numbers throughout/), label
+      end
+      expect { models::Inspection.from_json(%({"parse_status":"ok","meta":{"v":1e400}})) }
+        .to raise_error(Lutaml::Model::ValidationError, /meta expects finite numbers/)
+    end
+
+    # The walk refuses one kind of value, not the free-form contract:
+    # everything meta is documented to carry still goes in untouched,
+    # including a container that leads back to itself, which would
+    # otherwise take the walk down with it.
+    it "still stores every finite value, and survives a self-referential hash" do
+      loop_hash = { "n" => 1.0 }
+      loop_hash["self"] = loop_hash
+      kept = models::Inspection.new(parse_status: "ok",
+                                    meta: { "s" => :sym, "r" => (1..5), "deep" => loop_hash })
+
+      expect(kept.meta["s"]).to eq(:sym)
+      expect(kept.meta["deep"]["self"]).to equal(kept.meta["deep"])
     end
 
     # lutaml generates `meta(*args)` and the block form of `new` uses the
