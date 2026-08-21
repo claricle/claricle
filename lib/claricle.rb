@@ -3,7 +3,13 @@
 require "thor"
 require_relative "claricle/version"
 require_relative "claricle/errors"
+require_relative "claricle/models/location"
+require_relative "claricle/models/issue"
+require_relative "claricle/models/report"
+require_relative "claricle/models/inspection"
+require_relative "claricle/registry"
 require_relative "claricle/detector"
+require_relative "claricle/image"
 require_relative "claricle/cli"
 
 module Claricle
@@ -22,5 +28,5 @@ module Claricle
     Detector.detect_path(path)
   end
 
-  private_constant :Detector, :EpsHeader
+  private_constant :Detector, :EpsHeader, :Registry, :Handlers
 end

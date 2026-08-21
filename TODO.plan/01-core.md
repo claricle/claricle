@@ -93,19 +93,26 @@ dependency where marked ⚙):
   `supported_formats`; `handler_for(format)` fetches or raises
   `UnsupportedFormat`; `formats -> [Symbol]` (sorted; feeds 02's
   `formats` command); no runtime mutation, no test-only APIs.
-- **Handler metadata carries everything the registry derives**, so the
-  advertised "adding a format = one handler class" is actually true.
+- **Handler metadata carries what the registry derives.** The advertised
+  "adding a format = one handler class" is **not** true under the settled
+  design: a new format needs a handler class, an entry in
+  `HANDLER_CLASSES`, and a probe in the detector (detection is a
+  hand-rolled sequence, not a per-handler sniffer), plus — for an
+  inbound conversion — an entry in the source handler's target list and
+  its feature-loss rules. Step 7b corrects the README
+  claim; making the promise true would mean redesigning discovery and
+  loss-rule ownership, which is out of scope for item 01.
   A handler declares its formats, its capabilities, its conversion
   targets, the **feature-loss rules** for each of those targets (per
   D23, lossiness is classified per conversion from the source's
   content, so a handler declares which source features a target
-  discards, not a flat per-edge label), its canonical file extensions
-  (needed by
-  04's `--to` inference from an `--output` suffix), and its detection
-  sniffer. If any of those stays in a central table, the README must
-  document the real multi-file workflow instead — a new format that
-  needs a detector edit, a require, a registry entry and a
-  feature-loss rule edit is not one class.
+  discards, not a flat per-edge label), and its canonical file
+  extensions (needed by 04's `--to` inference from an `--output`
+  suffix). **Detection is not among them** — probes live in the detector
+  as one ordered sequence, because they are heterogeneous (prefix
+  matches, a delegate call, an XML parse) and their order is
+  load-bearing. That is the central table the README has to be honest
+  about rather than pretend away.
 - **Handlers::Base** (`lib/claricle/handlers/base.rb`): `formats(*syms)`
   class macro is pure declaration; instance `inspection(image)`,
   `conformance_report(image)`, `convert(image, to:)` all raise
@@ -226,7 +233,7 @@ subjects in quotes):
 
 `claricle.gemspec`, `.rubocop.yml`, `.github/workflows/main.yml`,
 `lib/claricle.rb`, `lib/claricle/errors.rb`, `lib/claricle/models/
-{location,issue,report,inspection}.rb`, `lib/claricle/detector.rb`,
+{base,location,issue,report,inspection}.rb`, `lib/claricle/detector.rb`,
 `lib/claricle/registry.rb`, `lib/claricle/handlers/base.rb`,
 `lib/claricle/image.rb`, `lib/claricle/cli.rb`, `exe/claricle`,
 `README.adoc`, `sig/claricle.rbs`, `spec/claricle/*_spec.rb`,

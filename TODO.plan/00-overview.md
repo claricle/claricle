@@ -42,8 +42,11 @@ flowchart TD
 ```
 
 Every handler is a plain subclass declaring its formats once; the
-registry derives a frozen map from one class list. Adding a format =
-one handler class + one entry in `Registry::HANDLER_CLASSES`.
+registry derives a frozen map from one class list. Adding a format costs
+one handler class, one entry in `Registry::HANDLER_CLASSES`, one probe
+in the detector — detection is a hand-rolled sequence, not a per-handler
+sniffer — and, for an inbound conversion, an entry in the source
+handler's target list together with its feature-loss rules.
 
 ## Item topology
 
@@ -162,7 +165,14 @@ A delegate version bump invalidates this section until it is re-run.
 | png_conform | Location survives on **exactly one** path: `ValidationService.new(reader, path).validate` then `context.all_errors` → `{chunk_type: "IDAT", message: "CRC error in IDAT chunk", severity: :error, offset: 33}`. Both `validate_file` **and** `result.validation_result.errors` return `chunk_type: nil, chunk_offset: nil` for the same input, so it is the context object specifically, not the service generally |
 | postscript | **No conformance basis.** `Postscript.parse` accepted an unmatched `}`, an undefined operator, a missing operand, and raw binary. Only an unterminated string raised |
 | pdfrb structural | `Validator.validate` → `[]` on a valid doc. Failure modes are **not uniform**: a catalog-less document raises `Pdfrb::Error`, a `/Pages` pointing at a missing object raises `NoMethodError: undefined method '[]' for nil`, and a dangling unrelated reference returns an error *string*. So the allowlist cannot be a single class |
-| pdfrb profiles | `Conformance::PdfA.validate(doc, level: :a1b)` → `ValidationResult` with `Violation{rule_id, message, object, severity, spec_clause}`, e.g. `6.1-2 "PDF/A requires /Catalog/Metadata XMP stream"`. `PdfUA.validate(doc)` takes no level. Fully usable |
+| svg_conform 0.2.1 result API | `SvgConform.validate_file(path, profile:)` returns a `ValidationResult` exposing `valid?`, `errors`, `warnings`, `error_count`, `warning_count`, `issue_count` and `profile`. There is **no `issues` method** — reading one raises `NoMethodError`. Each entry is a `SvgConform::Errors::ValidationIssue` with `message`, `element_name`, `line`, `column`, `fixable?`, `remediation`. Measured: `line` and `column` are **nil** on every issue, so SVG issues carry no position |
+| svg_conform default profile (D21) | Re-confirmed on **0.2.1**: an ordinary red stroke fails the default profile with `"Color 'red' in attribute 'stroke' is not allowed in this profile"`, and passes under `base`. The same document with no stroke colour passes both |
+| svg_conform wants a viewBox | Measured on 0.2.1: a valid SVG with `width`/`height` but no `viewBox` fails **both** the default and `base` profiles with `"SVG root element must have a viewBox attribute"`. Worth stating in the README — plenty of legitimate SVGs omit it, and `conform` will call them nonconformant |
+| png_conform readers | `Services::ValidationService.new(reader, path)` needs a **`Readers::FullLoadReader.new(path)`**. Measured on 0.1.4: `FullLoadReader.new` takes a filepath **or IO**, so handing it raw bytes raises `ArgumentError: path name contains null byte`. `StreamingReader` fails on every input shape tried — `Errno::EINVAL` for a File in `"rb"`, `IOError` for a `StringIO`, `NoMethodError` for a path |
+| **png_conform leaves a false verdict behind after a failed `validate`** | In all three `StreamingReader` cases above, `validate` raised **and** `context.all_errors` was left holding `{chunk_type: "SIGNATURE", message: "Invalid PNG signature"}` for a byte-perfect valid PNG. A handler that rescues the exception and reads the context gets a confident wrong answer rather than an error. Rescue must not fall through to reading the context |
+| pdfrb profiles | `Conformance::PdfA.validate(doc, level: :a1b)` → `ValidationResult`. Read violations through **`.violations`** (or `.errors`/`.warnings`/`.infos`/`.violation_count`/`.passed?`), never by enumerating the result — see the trap below. Each is a `Violation` struct `{rule_id, message, object, severity, spec_clause}` plus `error?`/`warning?`, e.g. `6.1-2 "PDF/A requires /Catalog/Metadata XMP stream"`, severity `:error`. `PdfUA.validate(doc)` takes no level. Fully usable |
+| **`ValidationResult` is Enumerable over its struct members, not its violations** | Measured on both 0.7.10 and 0.7.23: it is a keyword-init `Struct` including `Enumerable` with members `profile` and `violations`, so `result.size` is **2**, `result.first` is the String `"PDF/A-1"`, and `result.map(&:class)` is `[String, Array]`. On the fixture used, `size` happened to equal `violation_count`, so a naive `.size` looks right and is wrong everywhere else. Use `.violations` |
+| pdfrb version drift | The contracts above were first measured on **0.7.10**; a clean `bundle install` under `~> 0.7.x` now resolves **0.7.23**. Re-measured on 0.7.23: `Document.open`, `Validator.validate` → `[]`, the catalog-less `Pdfrb::Error`, the `Violation` shape, and the silent fallback on an invalid `level:` all still hold. Two changes: the standards list gained `PdfA4Deep`, `PdfUA2Deep`, `PdfUATaggingDeep` and `StructureElements`, and **`Pades` now takes `level:`** as well as `PdfA`/`PdfX`/`PdfVT`. `VeraPdfBridge.validate` takes `(pdf_bytes, profile:)` — bytes, not a document. Ruby floor is still `>= 3.2.0` |
 | pdfrb Arlington | `Arlington::Loader` offers only `list_object_names`, `object_definition`, `clear_cache!`. No document runner, and no `Conformance` profile references it |
 
 **What the delegates' conformance checks actually catch**
@@ -418,7 +428,7 @@ capabilities do.
 - [ ] `Claricle.convert` covers EMF↔SVG, PS/EPS↔SVG, SVG→EPS → 04
 - [ ] CLI inspect/conform/convert, human + JSON → 02/03/04
 - [ ] `claricle formats` support matrix → 02 (command, inspect only), grows in 03 and 04, complete at 04
-- [ ] Handler registry documented; adding a format = one handler class → 01 (code), 04 (README)
+- [ ] Handler registry documented; adding a format costs a handler class + a `HANDLER_CLASSES` entry + a detector probe, plus — for an inbound conversion — an entry in the source handler's target list **and** its feature-loss rules. **Not** one class → 01 (code), 01 step 7b (README correction)
 - [ ] Exit codes match the matrix → 01 (runner, all rows incl. 4), verified per command in 02/03/04; 03 reaches 4 end-to-end
 - [ ] Conformance specs on canonical fixtures; round-trip specs per D11 → 03/04
 - [ ] `compress` stub removed → 01
