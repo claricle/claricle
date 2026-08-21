@@ -41,6 +41,30 @@ RSpec.describe "Claricle::Handlers::Base" do
       subclass = Class.new(base) { formats :png }
       expect(subclass.supported_formats).to be_frozen
     end
+
+    # The registry keys its map on these and sorts the keys, so a String
+    # among them is not a near miss: `Registry.formats` raises
+    # `comparison of String with :svg failed`, and the Symbol the
+    # detector produces misses the map entirely.
+    it "refuses a non-Symbol declaration, naming the offender" do
+      expect { Class.new(base) { formats "png", :svg } }
+        .to raise_error(Claricle::Error, /non-Symbol formats \["png"\]/)
+    end
+
+    # Refused, not half-applied: the author fixes the typo and declares
+    # again in the same class.
+    it "declares nothing when the declaration is refused" do
+      subclass = Class.new(base)
+      begin
+        subclass.formats("png")
+      rescue Claricle::Error
+        nil
+      end
+
+      expect(subclass.supported_formats).to be_empty
+      expect { subclass.formats(:png) }.not_to raise_error
+      expect(subclass.supported_formats).to eq([:png])
+    end
   end
 
   # A handler that has not implemented an operation says which one, rather
