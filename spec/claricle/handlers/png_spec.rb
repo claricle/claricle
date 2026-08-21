@@ -163,7 +163,7 @@ RSpec.describe "Claricle PNG handler" do
 
   describe "error handling" do
     it "absorbs an allowlisted parse error into a failed status" do
-      allow(PngConform::Readers::FullLoadReader).to receive(:new)
+      allow(PngConform::Readers::StreamingReader).to receive(:open)
         .and_raise(Errno::ENOENT, "vanished")
 
       expect(inspect_file("valid.png").parse_status).to eq("failed")
@@ -209,7 +209,7 @@ RSpec.describe "Claricle PNG handler" do
     end
 
     it "absorbs the delegate's own error class" do
-      allow(PngConform::Readers::FullLoadReader).to receive(:new)
+      allow(PngConform::Readers::StreamingReader).to receive(:open)
         .and_raise(PngConform::ParseError, "bad chunk")
 
       expect(inspect_file("valid.png").parse_status).to eq("failed")
@@ -218,7 +218,7 @@ RSpec.describe "Claricle PNG handler" do
     # A delegate defect is a defect. Absorbing it would report "this file
     # does not parse" for a file that parses fine.
     it "lets an off-allowlist error propagate" do
-      allow(PngConform::Readers::FullLoadReader).to receive(:new)
+      allow(PngConform::Readers::StreamingReader).to receive(:open)
         .and_raise(NoMethodError, "undefined method")
 
       expect { inspect_file("valid.png") }.to raise_error(NoMethodError)
@@ -233,5 +233,59 @@ RSpec.describe "Claricle PNG handler" do
       # The whole model, not two fields -- "identically" is the claim.
       expect(from_content.to_json).to eq(inspect_file("valid.png").to_json)
     end
+  end
+
+  # The delegate's full reader is `read_until: :eof`, so it walks past
+  # IEND into whatever follows. A PNG's metadata ends at IEND, and
+  # anything after it belongs to some other file.
+  describe "the IEND boundary" do
+    it "ignores a pHYs chunk appended after IEND" do
+      expect(inspect_file("phys_after_iend.png").dpi).to be_nil
+    end
+
+    # Two concatenated PNGs. The full reader read the second signature as
+    # a chunk length of 0x89504E47, the OS returned EINVAL, and a file
+    # whose first image is perfectly readable reported "failed".
+    it "reads the first image of a doubled PNG" do
+      expect(inspect_file("doubled.png")).to have_attributes(
+        parse_status: "ok", width: 4.0, height: 3.0
+      )
+    end
+
+    it "collects no IDAT chunk" do
+      chunks = handler.send(:read_chunks,
+                            Claricle::Image.from_path(fixture("valid.png")))
+
+      expect(chunks.map { |chunk| chunk.type.to_s }).not_to include("IDAT")
+      expect(chunks.map { |chunk| chunk.type.to_s }).to include("IHDR")
+    end
+  end
+
+  # The full reader owned the file it opened and closed it only on an
+  # explicit #close, which this handler never called -- so every
+  # inspection held a descriptor until GC happened to run.
+  it "closes the file it opens" do
+    path = fixture("valid.png")
+    GC.disable
+    before = Dir["/dev/fd/*"].size
+    50.times { Claricle::Image.from_path(path).inspection }
+    delta = Dir["/dev/fd/*"].size - before
+
+    expect(delta).to eq(0)
+  ensure
+    GC.enable
+  end
+
+  # The delegate accepts only a String path. Detection, #content and
+  # #with_path all take a Pathname, so inspection raising NoMethodError
+  # on `rewind` made PNG the odd handler out -- and NoMethodError is off
+  # the allowlist, so it surfaced as exit 4, the defect code.
+  it "inspects a Pathname the same as a String path" do
+    require "pathname"
+    image = Claricle::Image.from_path(Pathname(fixture("valid.png")))
+
+    expect(image.inspection).to have_attributes(
+      parse_status: "ok", width: 4.0, height: 3.0
+    )
   end
 end

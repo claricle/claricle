@@ -53,12 +53,39 @@ module Claricle
 
       # Lazily required (D5): the detector's `emf` is the sole eager
       # delegate, and a gem should not pay for a parser it may never use.
+      #
+      # `StreamingReader.open`, not `FullLoadReader.new`. The full reader
+      # is `read_until: :eof`, and using it cost three separate defects,
+      # all measured:
+      #
+      # - it reads PAST `IEND`. A valid `pHYs` chunk appended after a
+      #   complete PNG was reported as that file's DPI (72.009), and two
+      #   concatenated PNGs reported `"failed"` although the first image
+      #   is perfectly readable.
+      # - it owns the file it opens and closes it only on `#close`, which
+      #   this never called. 100 inspections held 100 descriptors open
+      #   until GC.
+      # - it accepts only a String, so `Image.from_path(Pathname(...))`
+      #   detected and read fine and then raised `NoMethodError` on
+      #   `rewind` -- an exit-4 defect code for ordinary library input.
+      #
+      # The streaming reader stops at `IEND` itself, closes its own file,
+      # and takes a Pathname.
+      #
+      # IDAT is skipped while collecting: only IHDR and pHYs are read, and
+      # keeping the pixel data made a 33 MB PNG cost 32 MB of live String
+      # for the 13 bytes actually wanted.
       def read_chunks(image)
         require "png_conform"
 
         image.with_path do |path|
-          reader = PngConform::Readers::FullLoadReader.new(path)
-          [].tap { |chunks| reader.each_chunk { |chunk| chunks << chunk } }
+          PngConform::Readers::StreamingReader.open(path) do |reader|
+            [].tap do |chunks|
+              reader.each_chunk do |chunk|
+                chunks << chunk unless chunk.type.to_s == "IDAT"
+              end
+            end
+          end
         end
       # The allowlist, measured rather than assumed. Every entry is a way
       # the reader fails on *input*, which is a "failed" inspection, not a
