@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "tempfile"
+require "timeout"
 require "claricle"
 
 RSpec.configure do |config|
