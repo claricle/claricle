@@ -154,11 +154,13 @@ RSpec.describe "Claricle format detection" do
 
       expect(Claricle.detect(source)).to eq(:eps)
 
+      # Detector.detect_path, not the public wrapper: #7 removes
+      # Claricle.detect_path, and this spec has to survive that.
       Tempfile.create(["decoy", ".eps"]) do |file|
         file.binmode
         file.write(source)
         file.flush
-        expect(Claricle.detect_path(file.path)).to eq(:eps)
+        expect(Claricle.const_get(:Detector).detect_path(file.path)).to eq(:eps)
       end
     end
 
