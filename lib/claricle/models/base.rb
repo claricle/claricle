@@ -163,11 +163,17 @@ module Claricle
       # Idempotent on our own bookkeeping rather than on `frozen?`, so a
       # model frozen by other code is not mistaken for a sealed one. An
       # empty one never reaches here -- validation rejects it first -- and
-      # a populated one dies on the marker below, which is the point.
+      # a populated one dies partway through, which is the point.
+      #
+      # The marker goes on last, beside the freeze it stands for. Set
+      # first, a child that refused to seal left the parent marked sealed
+      # and still mutable, and every later `seal` returned at the guard --
+      # measured: the block form of `new` handed back a Report that called
+      # itself sealed, took another issue, and changed its own verdict.
+      # There is no cycle for an early marker to break: nesting runs
+      # Report -> Issue -> Location and stops.
       def seal
         return self if @claricle_sealed
-
-        @claricle_sealed = true
 
         nested_models.each(&:seal)
         freeze_attributes
@@ -178,6 +184,7 @@ module Claricle
         # "issues":null, and a warning report then reloads valid. Freezing
         # it here, after the attribute pass, leaves composition intact.
         instance_variable_get(:@using_default)&.freeze
+        @claricle_sealed = true
         freeze
       end
 

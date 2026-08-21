@@ -516,24 +516,41 @@ RSpec.describe Claricle::Models do
       expect { backing[0] << "x" }.to raise_error(FrozenError)
     end
 
-    # Sealing tracks its own bookkeeping rather than trusting frozen?, so a
-    # model frozen by someone else is not mistaken for a sealed one. A bare
-    # `allocate.freeze` cannot show that: validation rejects an empty model
-    # long before seal runs. The fixture is a fully populated Issue that
-    # someone froze without ever calling finalize, so seal is reached and
-    # dies writing its own marker -- where a `frozen?` check would have let
-    # it pass as already sealed.
-    it "does not treat an externally frozen model as sealed" do
+    # A fully populated Issue that someone else froze without ever calling
+    # finalize. A bare `allocate.freeze` will not do: validation rejects an
+    # empty model long before seal is reached.
+    let(:externally_frozen) do
       template = models::Issue.new(severity: "info", message: "m")
-      unsealed = models::Issue.allocate
+      copy = models::Issue.allocate
       template.instance_variables.each do |name|
         next if name == :@claricle_sealed
 
-        unsealed.instance_variable_set(name, template.instance_variable_get(name))
+        copy.instance_variable_set(name, template.instance_variable_get(name))
       end
-      unsealed.freeze
+      copy.freeze
+    end
 
-      expect { models::Report.new(issues: [unsealed]) }.to raise_error(FrozenError)
+    # Sealing tracks its own bookkeeping rather than trusting frozen?, so a
+    # model frozen by someone else is not mistaken for a sealed one: seal
+    # is reached and dies partway through, where a `frozen?` check would
+    # have waved it past as already sealed.
+    it "does not treat an externally frozen model as sealed" do
+      expect { models::Report.new(issues: [externally_frozen]) }
+        .to raise_error(FrozenError)
+    end
+
+    # The block form of `new` hands the caller the model before finalize
+    # runs, so a failed seal leaves a real object in their hands. It must
+    # not claim to be sealed: with the marker set before the children, that
+    # Report stayed mutable, kept taking issues, and `seal` returned at the
+    # marker forever after instead of trying again.
+    it "does not call itself sealed when a child refuses" do
+      retained = nil
+      expect { models::Report.new(issues: [externally_frozen]) { |r| retained = r } }
+        .to raise_error(FrozenError)
+
+      expect(retained.instance_variable_get(:@claricle_sealed)).to be_falsey
+      expect { retained.seal }.to raise_error(FrozenError)
     end
 
     it "is idempotent, so an aggregate can seal members twice" do
