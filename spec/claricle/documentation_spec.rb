@@ -200,17 +200,27 @@ RSpec.describe "the documentation" do
     end
 
     # The list above stops at `Models` and says nothing about what is
-    # inside it, which is how `FreeFormHash` reached the public surface
-    # without the README ever naming it. Assert the nested list too, and
-    # that the README accounts for every constant on it.
+    # inside it, which is how `FreeFormHash` once reached the public
+    # surface without the README ever naming it. Assert the nested list
+    # too, and that the README accounts for every constant on it.
+    #
+    # `FreeFormHash` and `Validation` are private: the first is a
+    # documented workaround for one lutaml-model version, the second a
+    # mixin only the already-private `Base` uses. Neither is API, and
+    # publishing either would bind the gem until a major bump.
     it "accounts for every constant Models exposes" do
       expect(Claricle::Models.constants.sort)
-        .to eq(%i[FreeFormHash Inspection Issue Location Marshalling
-                  Report Validation])
-      %w[FreeFormHash Inspection Issue Location Report].each do |name|
+        .to eq(%i[Inspection Issue Location Report])
+      %w[Inspection Issue Location Report].each do |name|
         expect(readme).to include("Models::#{name}")
       end
-      claims("`Models::Marshalling` and `Models::Validation` are reachable too")
+      # `::`, not `const_get` -- measured: `Module#const_get` walks
+      # straight past `private_constant` and hands the class back, so an
+      # assertion written that way passes whatever the visibility is.
+      expect { Claricle::Models::FreeFormHash }
+        .to raise_error(NameError, /private constant/)
+      expect { Claricle::Models::Validation }
+        .to raise_error(NameError, /private constant/)
     end
   end
 
