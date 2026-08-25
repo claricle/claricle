@@ -7,10 +7,12 @@ module Claricle
       true
     end
 
-    # Thor >= 1.5 adds `tree` to every subclass. This CLI documents and
-    # ships only the commands it declares itself. Guarded because the
-    # gemspec permits Thor down to 1.0, where `tree` does not exist and
-    # `undefine: true` on a missing method raises NameError.
+    # Thor >= 1.5 adds `tree` to every subclass. This CLI ships the
+    # `version` it declares plus the `help` Thor contributes, and the
+    # README documents both -- `tree` is the one it drops. Guarded
+    # because the gemspec permits Thor down to 1.0, where `tree` does
+    # not exist and `undefine: true` on a missing method raises
+    # NameError.
     remove_command :tree, undefine: true if method_defined?(:tree)
 
     desc "version", "Display Claricle version"

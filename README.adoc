@@ -87,9 +87,10 @@ Claricle version 0.1.0
 | 4 | The operation failed, or something unexpected went wrong
 |===
 
-A command may also exit with a status of its own choosing, which is
-passed through unchanged; the codes above are the ones this library
-assigns.
+A command may also exit with a status of its own choosing. A status in
+0-255 is passed through unchanged; one outside that range becomes 4,
+because a process status has to be a byte. The codes above are the ones
+this library assigns.
 
 Exit code 1 is reserved for a nonconformant file, which arrives with
 `conform`.
@@ -112,13 +113,28 @@ image.content   # read lazily, once
 
 `Image.from_path` streams the file while detecting. `Claricle.detect`
 accepts a String of bytes or an IO; an IO is read from wherever it
-currently sits and is never rewound. Reading stops as soon as the
-format is conclusive, the source runs out of data, or a bounded probe
-length is consumed -- whichever comes first. On a source longer than
-that bound, detection stops there: the IO is left positioned mid-stream
-with unread bytes still on it, and `eof?` is false. A caller who needs
-the rest of the stream, or cares whether it reached EOF, should check
-rather than assume either.
+currently sits and is never rewound.
+
+Detection reads the IO in chunks and reclassifies after each one, so it
+stops on the first chunk that settles the format and never reads past
+that chunk. Each read asks for the whole remaining probe allowance --
+the most any detector probe consults -- so how far the IO advances is
+set by how much the source hands over per read. A file or a `StringIO`
+hands over the whole allowance at once, so a source longer than the
+allowance is read that far even though a PNG signature settled it after
+eight bytes. A pipe or a socket hands over what has arrived, so a short
+complete image settles without waiting for bytes nothing needs.
+
+A source beginning `%!PS` is the exception. `:ps` and `:eps` are told
+apart by scanning the first line, and a byte that has not arrived yet
+can still flip one into the other, so that verdict always reads to the
+allowance or to the end of the stream.
+
+Detection never reads beyond the allowance, and it leaves what it did
+not read on the IO: after a source longer than that, the IO sits
+mid-stream and `eof?` is false. A caller who needs the rest of the
+stream, or cares whether it reached EOF, should check rather than
+assume.
 
 Bytes matching no known signature raise `Claricle::UnknownFormat`. A
 format that is recognised but unhandled raises
@@ -139,11 +155,12 @@ end
 [source]
 ----
 lib/claricle/
+  version.rb           # VERSION
   detector.rb          # magic-byte and XML-root format detection
   image.rb             # the object every operation takes
   registry.rb          # frozen format -> handler map, empty today
   handlers/base.rb     # what a handler subclasses
-  models/              # Location, Issue, Report, Inspection
+  models/              # Location, Issue, Report, Inspection, FreeFormHash
   errors.rb            # Error, UnknownFormat, UnsupportedFormat, ...
   cli.rb               # Thor CLI and the exit-code Runner
 ----
@@ -151,8 +168,11 @@ lib/claricle/
 `Detector`, `Registry`, `Handlers::Base` and `Models::Base` are private
 constants. The public surface is `Claricle.detect`, `Claricle::Image`,
 `Claricle::Cli` (including `Cli::Runner` and `Runner::Status`),
-`Claricle::VERSION`, the `Claricle::Models` classes and the error
-classes.
+`Claricle::VERSION`, the error classes, and the model classes
+`Models::FreeFormHash`, `Models::Inspection`, `Models::Issue`,
+`Models::Location` and `Models::Report`. `Models::Marshalling` and
+`Models::Validation` are reachable too, but they are mixins
+`Inspection`, `Issue`, `Location` and `Report` use rather than API.
 
 === Adding a format
 
@@ -165,7 +185,8 @@ Not one file. A new format costs:
   per-handler sniffer, because the probes are heterogeneous and their
   order is load-bearing
 . for an inbound conversion, an entry in the source handler's target
-  list together with its feature-loss rules
+  list together with its feature-loss rules. Neither exists in `lib/`
+  yet; both arrive with `convert`
 
 == Installation
 
