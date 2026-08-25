@@ -684,6 +684,26 @@ RSpec.describe Claricle::Models do
       expect(models::Issue.new(severity: "info", message: "m").code).to be_nil
     end
 
+    # `init_deserialization_state`/`finalize_deserialization` are public
+    # lutaml plumbing for its own XML allocation path -- unused here,
+    # since no model declares an `xml` block -- that resets every
+    # attribute to a shared sentinel. Reachable from the block form of
+    # `new`, they wiped a Report's `source_path` and its whole `issues`
+    # collection down to an empty Array with no error, and the model
+    # sealed reporting `valid: :yes` over an issue the caller had
+    # actually supplied. No value-based check can tell that apart from a
+    # Report the caller genuinely built empty, so both methods are
+    # private instead.
+    %i[init_deserialization_state finalize_deserialization].each do |method_name|
+      it "keeps #{method_name} off the public surface" do
+        report = models::Report.new(source_path: "x", issues: [issue["error"]])
+
+        expect(report).not_to respond_to(method_name)
+        expect { report.public_send(method_name, :default) }
+          .to raise_error(NoMethodError, /private method/)
+      end
+    end
+
     it "is idempotent, so an aggregate can seal members twice" do
       inner = models::Issue.new(severity: "info", message: "m")
       expect { models::Report.new(issues: [inner]) }.not_to raise_error

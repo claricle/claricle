@@ -265,6 +265,23 @@ module Claricle
       BLANK_CONSTRUCTION = [:lutaml_register].freeze
       private_constant :DESERIALIZING, :BLANK_CONSTRUCTION
 
+      # Public on lutaml, for its own XML allocation path
+      # (`allocate_for_deserialization`, reached only through an `xml`
+      # mapping block) to reset every attribute to a shared empty-
+      # collection sentinel or `UninitializedClass.instance` before
+      # filling it in field by field. None of these models declares an
+      # `xml` block, so lutaml never calls either method on one -- but a
+      # caller reached them too, through the block form of `new`, before
+      # this runs. Measured: `init_deserialization_state(:default)` wiped
+      # a Report's `source_path` to the sentinel and its whole `issues`
+      # collection to `[]`, and the model sealed reporting `valid: :yes`
+      # over an issue the caller had actually supplied -- no schema
+      # violation to catch, since the wiped shape is indistinguishable
+      # from a Report the caller genuinely built empty. Hidden rather
+      # than checked for, because the collection wipe leaves no value
+      # anywhere in the object for `validate_types` to catch.
+      private :init_deserialization_state, :finalize_deserialization
+
       # Deserialization builds a blank instance and populates it afterwards,
       # so `initialize` must not finalize during that window. Neither the
       # key nor the value is secret; the protection is that BOTH the extent
