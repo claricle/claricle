@@ -66,9 +66,10 @@ RSpec.describe "Claricle format detection" do
   describe "the EPS/PS split reads the whole first line" do
     # 4096 is the scanner's chunk size. A token starting at 4093 leaves
     # three bytes in the first chunk, at 4094 two, at 4095 one -- so these
-    # are what actually require the carry to be three bytes wide rather
-    # than one. Starting at 4096 or later needs no carry at all.
-    [508, 4089, 4090, 4091, 4092, 4093, 8185, 8186, 8187, 99_996].each do |padding|
+    # are what actually require the carry to be five bytes wide (one byte
+    # of left context plus the four-byte token) rather than one. Starting
+    # at 4096 or later needs no carry at all.
+    [508, 4089, 4090, 4091, 4092, 4093, 8185, 8186, 8187].each do |padding|
       it "finds EPSF starting at byte #{padding + 4}, from content and from a path" do
         content = "%!PS#{" " * padding}EPSF\n"
         expect(Claricle.detect(content)).to eq(:eps)
@@ -96,9 +97,51 @@ RSpec.describe "Claricle format detection" do
     end
 
     it "finds EPSF on a first line that never ends" do
-      content = "%!PS#{" " * 99_996}EPSF"
+      content = "%!PS#{" " * 508}EPSF"
       expect(Claricle.detect(content)).to eq(:eps)
       with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:eps) }
+    end
+
+    it "finds EPSF comfortably inside the scan ceiling" do
+      content = "%!PS#{" " * 12_000}EPSF\n"
+      expect(Claricle.detect(content)).to eq(:eps)
+      with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:eps) }
+    end
+
+    # The literal case this ceiling exists for: an unterminated first line
+    # long enough that scanning it fully would be unbounded. Reusing the
+    # old 99_996 padding this spec used to (wrongly) expect :eps for.
+    it "gives up on a first line that never ends past the scan ceiling" do
+      content = "%!PS#{" " * 99_996}EPSF"
+      expect(Claricle.detect(content)).to eq(:ps)
+      with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:ps) }
+    end
+
+    # A file that ends inside the third window, past HEADER_BYTES and
+    # SVG_PROLOG_BYTES but short of the scan ceiling, has no line
+    # terminator -- so only a genuine end of stream backs the match.
+    # `read` returns fewer than CHUNK_BYTES only at real EOF, and that
+    # has to count the same as a nil read or a line ending does.
+    [8193, 9000, 12_287].each do |size|
+      it "finds EPSF ending exactly at EOF, #{size} bytes in" do
+        content = "%!PS#{" " * (size - 8)}EPSF"
+        expect(content.bytesize).to eq(size)
+        expect(Claricle.detect(content)).to eq(:eps)
+        with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:eps) }
+      end
+    end
+
+    # EPSF landing exactly at the ceiling's edge must not be trusted the
+    # way a token at a genuine line end or EOF is: the byte right after
+    # it was never read, so a disqualifying byte sitting just past the
+    # ceiling has to still win. Padded so EPSF occupies the last four
+    # bytes this scan reads (byte indices 12284-12287) and the
+    # disqualifying X sits at byte 12288 -- one past the 12,288-byte
+    # ceiling.
+    it "does not trust a token landing exactly on the ceiling's edge" do
+      content = "%!PS#{" " * 12_280}EPSFX\n"
+      expect(Claricle.detect(content)).to eq(:ps)
+      with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:ps) }
     end
 
     # EPSF is a whitespace-delimited field in the header, so a substring
@@ -271,7 +314,12 @@ RSpec.describe "Claricle format detection" do
   # value -- an implementation that resolved it would answer :svg, so
   # refusing is the proof.
   describe "general entities are never resolved" do
-    it "does not fetch a file whose contents would make the root an SVG" do
+    # Titled for what it asserts. The file is real and holds the SVG
+    # namespace, so resolving the entity would answer :svg -- refusing is
+    # the proof it stayed unresolved. It says nothing about whether the
+    # file was opened; the nonexistent-path example below is what shows
+    # nothing is fetched.
+    it "does not resolve a SYSTEM entity, even one naming the SVG namespace" do
       Tempfile.create("ns") do |secret|
         secret.write(svg_ns)
         secret.flush
@@ -293,7 +341,12 @@ RSpec.describe "Claricle format detection" do
     end
 
     # In xmlns, not in an unread attribute: this has to reach
-    # resolve_references and its expansion limit to prove anything.
+    # resolve_references to prove anything -- REXML's pull parser never
+    # substitutes a general entity into an attribute value, so the value
+    # handed to resolve_references is the literal "&d;", however deeply
+    # the declarations that reference it are nested. This proves refusal
+    # and proves no time is lost walking those declarations; it is not
+    # evidence that entity_expansion_text_limit ever fires.
     it "does not amplify deeply nested internal entities" do
       nested = [
         %(<!ENTITY a "#{"a" * 100}">),
@@ -333,14 +386,25 @@ RSpec.describe "Claricle format detection" do
         .to raise_error(Claricle::UnknownFormat)
     end
 
-    # Unbounded expansion is prevented by the limit passed to unnormalize
-    # rather than rescued; the out-of-range reference is rescued as
-    # RangeError. Either escaping would exit 4 rather than 3.
-    it "refuses a namespace that tries to expand without bound" do
-      expect { Claricle.detect(%(<svg xmlns="#{"&amp;" * 10_241}"/>)) }
+    # Sized to sit inside the 8192-byte prolog bound. An earlier version
+    # used 10_241 references, which pushed the root tag past the bound --
+    # REXML then gave up on a truncated tag and resolve_references never
+    # ran, so the example passed without resolving anything.
+    #
+    # A reference is never longer expanded than it is in the source, so
+    # this is not a runaway waiting to be capped. What it pins is that
+    # entity_expansion_text_limit does not misfire on many legitimate
+    # references -- it does not pin that resolution ran: the raw and the
+    # resolved string are both != the SVG namespace here, so this example
+    # passes either way. The character-reference example above is what
+    # pins resolution itself.
+    it "refuses a namespace dense with references" do
+      expect { Claricle.detect(%(<svg xmlns="#{"&amp;" * 1000}"/>)) }
         .to raise_error(Claricle::UnknownFormat)
     end
 
+    # Rescued as RangeError inside resolve_references. Unrescued it would
+    # reach the caller instead of UnknownFormat.
     it "refuses a namespace with an out-of-range numeric reference" do
       expect { Claricle.detect(%(<svg xmlns="&#99999999999999999999;"/>)) }
         .to raise_error(Claricle::UnknownFormat)
@@ -408,6 +472,74 @@ RSpec.describe "Claricle format detection" do
         writer&.close
       end
     end
+
+    it "reads a bounded amount from a large IO instead of draining it" do
+      io = StringIO.new(fixture.call("valid.png") + ("x" * 1_000_000))
+      expect(Claricle.detect(io)).to eq(:png)
+      expect(io.pos).to be < 1_000_000
+    end
+
+    # read(length) returns nil at EOF, unlike no-arg read which returns
+    # "". Switching to a bounded read means an already-exhausted IO must
+    # not crash trying to detect nil.
+    it "refuses an IO that is already at EOF" do
+      io = StringIO.new("")
+      expect { Claricle.detect(io) }.to raise_error(Claricle::UnknownFormat)
+    end
+
+    # Simulates a source that never reaches EOF -- a read with no length
+    # would wait for a close that never comes. detect must return once it
+    # has read its own bound instead of waiting on the writer.
+    it "returns from a pipe that stays open past its bound" do
+      reader, writer = IO.pipe
+      writer_thread = Thread.new do
+        writer.write(fixture.call("valid.png") + ("x" * 50_000))
+      rescue IOError, Errno::EPIPE
+        # Expected once the ensure block below closes the pipe out from
+        # under this thread; nothing here depends on the write finishing.
+      end
+
+      expect(Timeout.timeout(2) { Claricle.detect(reader) }).to eq(:png)
+    ensure
+      reader&.close
+      writer&.close
+      writer_thread&.kill
+    end
+
+    # A complete, conclusive image sitting on a pipe the writer never
+    # closes -- no more bytes are coming, but nothing tells detect that.
+    # `read(bound)` blocks until either the bound or EOF, so a full PNG
+    # far short of the bound hung forever. Only readpartial's "whatever
+    # is already there" semantics let a short image settle without
+    # waiting on a writer that has nothing left to say.
+    it "does not block on a short, complete image over a pipe that stays open" do
+      reader, writer = IO.pipe
+      writer.write(fixture.call("valid.png"))
+
+      expect(Timeout.timeout(2) { Claricle.detect(reader) }).to eq(:png)
+    ensure
+      reader&.close
+      writer&.close
+    end
+
+    # A byte that has not arrived yet can still turn EPSF from a trusted
+    # match into a disqualified one, so an :eps read from a still-growing
+    # buffer must not be trusted the way a PNG signature match is --
+    # detect has to keep waiting on the pipe rather than settle early.
+    it "does not settle a PostScript verdict before a disqualifying byte can arrive" do
+      reader, writer = IO.pipe
+      writer.write("%!PS EPSF")
+      verdict = Thread.new { Claricle.detect(reader) }
+
+      expect(verdict.join(0.2)).to be_nil
+
+      writer.write("X\n")
+      writer.close
+      expect(Timeout.timeout(2) { verdict.value }).to eq(:ps)
+    ensure
+      reader&.close
+      writer&.close
+    end
   end
 
   # A file beginning "<" with no ">" made REXML hold one live string for
@@ -448,9 +580,9 @@ RSpec.describe "Claricle format detection" do
     # attribute binds -- so a later ATTLIST neither wipes the earlier
     # one nor overrides a duplicate.
     it "accumulates defaults across separate ATTLIST declarations" do
-      ns_decl = %(<!ATTLIST svg xmlns CDATA #FIXED "#{svg_ns}">)
-      width_decl = %(  <!ATTLIST svg width CDATA "10">)
-      source = doc("#{ns_decl}\n#{width_decl}", "<svg/>")
+      width_decl = %(<!ATTLIST svg width CDATA "10">)
+      ns_decl = %(  <!ATTLIST svg xmlns CDATA #FIXED "#{svg_ns}">)
+      source = doc("#{width_decl}\n#{ns_decl}", "<svg/>")
 
       expect(Claricle.detect(source)).to eq(:svg)
     end
@@ -481,6 +613,19 @@ RSpec.describe "Claricle format detection" do
       source = doc(%(<!ATTLIST svg kind (a|b) "a" xmlns CDATA #FIXED "#{svg_ns}">), "<svg/>")
 
       expect(Claricle.detect(source)).to eq(:svg)
+    end
+
+    # Separate #FIXED from its value by anything but a plain space and
+    # REXML hands over the separator instead of the value -- "#FIXED\t"
+    # for a tab. Only the raw scan recovers the namespace, so without it
+    # both of these are unknown formats rather than SVG.
+    {
+      "a tab" => %(<!ATTLIST svg xmlns CDATA #FIXED\t"#{svg_ns}">),
+      "a newline" => %(<!ATTLIST svg xmlns\n  CDATA\n  #FIXED\n  "#{svg_ns}">)
+    }.each do |separator, attlist|
+      it "reads a default that #{separator} separates from #FIXED" do
+        expect(Claricle.detect(doc(attlist, "<svg/>"))).to eq(:svg)
+      end
     end
 
     # Pinned as a known limitation, not an endorsement: REXML raises
@@ -538,6 +683,99 @@ RSpec.describe "Claricle format detection" do
 
       expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
     end
+
+    # `xml` is permanently bound to the XML namespace and `xmlns` cannot
+    # be used as a prefix at all -- REXML enforces that for an explicit
+    # declaration, but the raw ATTLIST scan bypasses REXML's own
+    # namespace validation, so a DTD default binding either reserved
+    # prefix to the SVG namespace must be rejected here instead.
+    it "rejects a DTD default that rebinds the reserved xml prefix" do
+      source = %(<!DOCTYPE xml:svg [
+  <!ATTLIST xml:svg xmlns:xml CDATA #FIXED "#{svg_ns}">
+]>
+<xml:svg/>)
+
+      expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+    end
+
+    it "rejects a DTD default that uses xmlns itself as a prefix" do
+      source = %(<!DOCTYPE xmlns:svg [
+  <!ATTLIST xmlns:svg xmlns:xmlns CDATA #FIXED "#{svg_ns}">
+]>
+<xmlns:svg/>)
+
+      expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+    end
+
+    # The reserved-prefix constraint is on the declaration, not on
+    # whether the root happens to use that prefix for itself -- a plain,
+    # unprefixed root carrying an unrelated xmlns:xml default is just as
+    # invalid as one where xml: prefixes the root.
+    it "rejects a plain root that DTD-defaults an unrelated xmlns:xml" do
+      source = doc(%(<!ATTLIST svg xmlns CDATA #FIXED "#{svg_ns}">\n  ) +
+                   %(<!ATTLIST svg xmlns:xml CDATA #FIXED "#{svg_ns}">),
+                   "<svg/>")
+
+      expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+    end
+
+    it "still accepts xml redeclared to its own canonical namespace" do
+      xml_ns = "http://www.w3.org/XML/1998/namespace"
+      source = doc(%(<!ATTLIST svg xmlns CDATA #FIXED "#{svg_ns}">\n  ) +
+                   %(<!ATTLIST svg xmlns:xml CDATA #FIXED "#{xml_ns}">),
+                   "<svg/>")
+
+      expect(Claricle.detect(source)).to eq(:svg)
+    end
+
+    # The XML and XMLNS namespace names are just as reserved as the
+    # prefixes that normally carry them -- binding either to some other
+    # prefix is invalid even though neither reserved prefix is declared.
+    {
+      "the XML namespace name" => "http://www.w3.org/XML/1998/namespace",
+      "the XMLNS namespace name" => "http://www.w3.org/2000/xmlns/"
+    }.each do |label, reserved_ns|
+      it "rejects #{label} bound to an unrelated prefix" do
+        source = doc(%(<!ATTLIST svg xmlns CDATA #FIXED "#{svg_ns}">\n  ) +
+                     %(<!ATTLIST svg xmlns:p CDATA #FIXED "#{reserved_ns}">),
+                     "<svg/>")
+
+        expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+      end
+    end
+
+    # The root classifies through its own prefix (p:svg), so only the
+    # reserved-namespace check -- not a mismatched root namespace --
+    # can be what rejects the unrelated default-namespace declaration.
+    it "rejects the XML namespace name bound as the default namespace" do
+      xml_ns = "http://www.w3.org/XML/1998/namespace"
+      source = doc(%(<!ATTLIST p:svg xmlns:p CDATA #FIXED "#{svg_ns}">\n  ) +
+                   %(<!ATTLIST p:svg xmlns CDATA #FIXED "#{xml_ns}">),
+                   "<p:svg/>")
+
+      expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+    end
+
+    # resolve_references deliberately leaves a general entity reference
+    # unexpanded, so a reserved namespace name smuggled in through one
+    # doesn't literally equal XML_NAMESPACE or XMLNS_NAMESPACE -- the
+    # reserved check has to fail closed on the unresolved reference
+    # itself rather than read that as proof the binding is safe.
+    {
+      "the XML namespace name" => "http://www.w3.org/XML/1998/namespace",
+      "the XMLNS namespace name" => "http://www.w3.org/2000/xmlns/"
+    }.each do |label, reserved_ns|
+      it "rejects #{label} smuggled through an unresolved general entity" do
+        source = %(<!DOCTYPE svg [
+  <!ENTITY r "#{reserved_ns}">
+  <!ATTLIST svg xmlns CDATA #FIXED "#{svg_ns}">
+  <!ATTLIST svg xmlns:p CDATA #FIXED "&r;">
+]>
+<svg/>)
+
+        expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+      end
+    end
   end
 
   describe "the SVG prolog bound" do
@@ -560,16 +798,22 @@ RSpec.describe "Claricle format detection" do
       expect(Claricle.detect(padding + svg_tag)).to eq(:svg)
     end
 
-    # One byte further and the comment is truncated, so there is no root
-    # inside the bound. Pinned both sides, or "a big prolog fails" would
-    # pass for any cap.
+    # One byte further and the root tag loses its closing ">". The XML
+    # comment still completes at byte 8131 -- what falls outside the bound
+    # is the tag itself, so there is no root to read. Pinned both sides,
+    # or "a big prolog fails" would pass for any cap.
     it "rejects the same root one byte beyond the bound" do
       padding = "<!--#{"x" * (8192 - svg_tag.bytesize - 6)}-->"
       expect { Claricle.detect(padding + svg_tag) }
         .to raise_error(Claricle::UnknownFormat)
     end
 
-    it "refuses a delimiter-free file without reading it all" do
+    # The title used to say "without reading it all", which nothing here
+    # asserts -- slurping the file and slicing to 8192 afterwards would
+    # leave this green. The two examples above are what pin the bound, on
+    # both sides. This one only covers the shape that provoked the memory
+    # blow-up: a file with no ">" anywhere.
+    it "refuses a delimiter-free file" do
       hostile = "<#{"a" * 1_000_000}"
 
       expect { Claricle.detect(hostile) }.to raise_error(Claricle::UnknownFormat)
@@ -577,12 +821,24 @@ RSpec.describe "Claricle format detection" do
   end
 
   describe "public surface" do
+    # All three constants, not just Detector: dropping one from the
+    # private_constant call used to leave the whole suite green. Written
+    # out rather than looped because const_get walks straight past
+    # private_constant, so only the literal reference raises.
     it "keeps Detector private" do
       expect { Claricle::Detector }.to raise_error(NameError, /private constant/)
     end
 
-    it "does not list Detector among its constants" do
-      expect(Claricle.constants).not_to include(:Detector)
+    it "keeps EpsHeader private" do
+      expect { Claricle::EpsHeader }.to raise_error(NameError, /private constant/)
+    end
+
+    it "keeps ReservedNamespace private" do
+      expect { Claricle::ReservedNamespace }.to raise_error(NameError, /private constant/)
+    end
+
+    it "lists none of them among its constants" do
+      expect(Claricle.constants & %i[Detector EpsHeader ReservedNamespace]).to be_empty
     end
 
     it "loads REXML for itself in a fresh process" do

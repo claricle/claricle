@@ -18,8 +18,21 @@ module Claricle
     FIELD = /(?<!\S)EPSF(?=-|\s|\z)/
     # One byte of left context plus the four-byte token.
     CARRY_BYTES = 5
+    # PostScript ends a line with CR, LF or CRLF.
+    LINE_END = /[\r\n]/
+    CHUNK_BYTES = 4096
+    # A DSC header's first line is short in every real PostScript/EPS file.
+    # A first line that runs past this many windows is treated the same as
+    # one with no EPSF field at all, rather than scanned indefinitely --
+    # the same trade-off SVG_PROLOG_BYTES makes for the SVG probe, and for
+    # the same reason: worst-case cost has to be a fixed constant, not
+    # proportional to an attacker-chosen input.
+    MAX_WINDOWS = 3
+    # The most this module will ever read from a source. Public so
+    # Detector can size its own read bound to match.
+    MAX_SCAN_BYTES = MAX_WINDOWS * CHUNK_BYTES
 
-    private_constant :FIELD, :CARRY_BYTES
+    private_constant :FIELD, :CARRY_BYTES, :LINE_END, :CHUNK_BYTES, :MAX_WINDOWS
 
     class << self
       # Streams the first line looking for the EPSF field. `gets` would
@@ -33,8 +46,8 @@ module Claricle
       # the pattern inspects one byte either side of `EPSF`, so a token
       # split across chunks needs its neighbours to travel with it.
       def field?(source)
-        each_window(source) do |scan, final, carried|
-          return match?(scan, final: true, carried: carried) if final
+        each_window(source) do |scan, final, at_end, carried|
+          return match?(scan, final: at_end, carried: carried) if final
           return true if match?(scan, final: false, carried: carried)
         end
         false
@@ -44,22 +57,44 @@ module Claricle
       # that ends it. The carry is sized for the *field* match, not a
       # bare substring: the pattern inspects one byte either side of
       # `EPSF`, so a token split across chunks needs its neighbours to
-      # travel with it. The line ending and the end of the file are both
-      # final -- a token against either is genuinely followed by nothing.
+      # travel with it.
+      #
+      # `final` and `at_end` differ at the scan ceiling: reaching it
+      # stops the scan (`final`), but the byte after the ceiling was
+      # never read, so a match resting on that unseen byte has no
+      # evidence for it and `at_end` stays false. Only a genuine line
+      # ending or a genuine end of file (`at_end`) can back a match that
+      # ends exactly at the window's edge -- see `match?`.
       def each_window(source)
         carry = "".b
+        windows_read = 0
         loop do
-          chunk = source.read(Detector::CHUNK_BYTES)
-          # nil.to_s is "", so EOF needs no branch of its own here.
-          window = carry + chunk.to_s.b
-          stop = window.index(Detector::LINE_END)
-          final = !stop.nil? || chunk.nil?
+          windows_read += 1
+          window, chunk, stop = next_window(source, carry)
+          at_end, final = window_status(stop, chunk, windows_read)
 
-          yield(stop ? window[0, stop] : window, final, carry.bytesize)
+          yield(stop ? window[0, stop] : window, final, at_end, carry.bytesize)
           return if final
 
           carry = window[-CARRY_BYTES..] || window
         end
+      end
+
+      # nil.to_s is "", so EOF needs no branch of its own here.
+      def next_window(source, carry)
+        chunk = source.read(CHUNK_BYTES)
+        window = carry + chunk.to_s.b
+        [window, chunk, window.index(LINE_END)]
+      end
+
+      # `read(CHUNK_BYTES)` only ever returns fewer bytes than asked for
+      # at genuine end of stream -- a short read is as reliable an EOF
+      # signal as a nil one, and without it a file ending mid-window on
+      # its final, partial chunk was mistaken for one cut off by the
+      # ceiling instead.
+      def window_status(stop, chunk, windows_read)
+        at_end = !stop.nil? || chunk.nil? || chunk.bytesize < CHUNK_BYTES
+        [at_end, at_end || windows_read >= MAX_WINDOWS]
       end
 
       # A match ending exactly at the buffer's edge had its trailing
@@ -95,18 +130,40 @@ module Claricle
     end
   end
 
+  # Whether a value bound to a namespace-declaration attribute name
+  # violates the two prefixes and two namespace names XML reserves for
+  # itself. Its own module because the rule is a self-contained set of
+  # constraints, unrelated to how Detector chooses between formats or
+  # resolves a value's references.
+  module ReservedNamespace
+    # XML permanently binds `xml` to this namespace; no other prefix, or
+    # the default namespace, may be bound to it either.
+    XML = "http://www.w3.org/XML/1998/namespace"
+    # Reserved for the `xmlns` prefix's own use; must never be bound to
+    # any prefix, including `xmlns` itself.
+    XMLNS = "http://www.w3.org/2000/xmlns/"
+    # Whatever survives the caller's character-reference resolution is
+    # an unexpanded general entity -- unproven, not provably safe.
+    GENERAL_ENTITY_REFERENCE = /&[A-Za-z_:][\w.:-]*;/
+
+    module_function
+
+    # `name` is the raw attribute name ("xmlns" or "xmlns:prefix");
+    # `bound` is its value after the caller has already resolved
+    # character references.
+    def violated_by?(name, bound)
+      return true if bound.nil? || bound.match?(GENERAL_ENTITY_REFERENCE)
+      return true if bound == XMLNS
+
+      (name == "xmlns:xml") != (bound == XML)
+    end
+  end
+
   module Detector
     PNG_SIGNATURE = "\x89PNG\r\n\x1A\n".b.freeze
     PDF_SIGNATURE = "%PDF-".b.freeze
     POSTSCRIPT_SIGNATURE = "%!PS".b.freeze
-    # The EPSF spec puts `EPSF` or `EPSF-<version>` in the header as a
-    # whitespace-delimited field. A bare substring match calls
-    # "%!PS-Adobe-3.0 NOT-EPSFILE" and "... XEPSFY" EPS files, which the
-    # PostScript parser does not.
     SVG_NAMESPACE = "http://www.w3.org/2000/svg"
-
-    # PostScript ends a line with CR, LF or CRLF.
-    LINE_END = /[\r\n]/
 
     # The signature probes need 44 bytes: Emf::Detector reads the EMF magic
     # as a uint32 at offset 0x28, and below that every valid EMF raises
@@ -122,6 +179,10 @@ module Claricle
     # arbitrarily long prolog, so this is a sniffing limit, not a
     # complete one.
     SVG_PROLOG_BYTES = 8192
+    # The most any single probe below will ever read from a source. Public
+    # so Claricle.detect can size its own bounded IO read to match --
+    # nothing downstream needs more than this, on any entry point.
+    MAX_PROBE_BYTES = [HEADER_BYTES, SVG_PROLOG_BYTES, EpsHeader::MAX_SCAN_BYTES].max
     # One "name TYPE [#DEFAULT] value" group of an ATTLIST body, enough to
     # recover declaration order. Values may be absent (#REQUIRED etc).
     ATTLIST_DECLARATION = /
@@ -129,8 +190,6 @@ module Claricle
       (?:\([^)]*\)|[A-Z]+(?:\s*\([^)]*\))?)\s*
       (?:\#(?:REQUIRED|IMPLIED)|(?:\#FIXED\s+)?(?:"(?<dq>[^"]*)"|'(?<sq>[^']*)'))
     /x
-
-    CHUNK_BYTES = 4096
 
     class << self
       def detect(bytes)
@@ -209,11 +268,12 @@ module Claricle
       # XML binds "a".
       #
       # The raw scan is the authority, which is deliberate and broader
-      # than "it only fixes the order". It also carries tombstones REXML
-      # has no way to report -- an `#IMPLIED` attribute is declared with
-      # no default, and that has to outrank a later declaration -- and it
-      # corrects a value REXML mis-reports, such as one separated from
-      # `#FIXED` by a tab, which arrives as `"#FIXED\t"`.
+      # than "it only fixes the order". REXML does report a lone
+      # `#IMPLIED` as a nil, but it loses that tombstone to a duplicate
+      # later in the same declaration, and a tombstone has to outrank
+      # that later declaration. The scan also corrects a value REXML
+      # mis-reports, such as one separated from `#FIXED` by a tab, which
+      # arrives as `"#FIXED\t"`.
       #
       # REXML is the fallback, consulted only for attributes the regex
       # could not read at all. So a declaration the scan cannot parse
@@ -231,7 +291,8 @@ module Claricle
         # The raw scan carries the order AND the tombstones: an attribute
         # declared `#IMPLIED` has no default, and XML binds the first
         # declaration, so a later one with a value must not fill it in.
-        # REXML's parsed hash has no tombstones, and is consulted only for
+        # REXML reports a lone `#IMPLIED` as a nil but drops the tombstone
+        # once a duplicate follows it, so it is consulted only for
         # attributes the regex could not read.
         within = first_declarations(event[2])
         event[1].each { |name, value| within[name] = value unless within.key?(name) }
@@ -256,8 +317,10 @@ module Claricle
         defaults.fetch(event[0], {}).merge(event[1]).compact
       end
 
-      # Only the prolog and the root start tag can matter here, and both
-      # fit well inside the bound.
+      # Only the prolog and the root start tag can matter here. XML lets a
+      # prolog run arbitrarily long, so this cuts the source off rather
+      # than promising the root sits inside it. A root past the bound
+      # reads as an unknown format, and the examples pin both sides.
       def bounded(source)
         StringIO.new(source.read(SVG_PROLOG_BYTES) || "")
       end
@@ -265,11 +328,26 @@ module Claricle
       def svg_root?(qname, attributes)
         prefix, local_name = qname.include?(":") ? qname.split(":", 2) : [nil, qname]
         return false unless local_name == "svg"
+        return false if reserved_prefix_declared?(attributes)
 
         declared = attributes[prefix ? "xmlns:#{prefix}" : "xmlns"]
         return false unless declared
 
         resolve_references(declared) == SVG_NAMESPACE
+      end
+
+      # A constraint on the root's own namespace declarations, explicit
+      # or DTD-defaulted, regardless of which prefix the root itself
+      # uses -- delegated to ReservedNamespace once this method has
+      # picked out which merged attributes are namespace declarations
+      # at all and resolved each one's references.
+      def reserved_prefix_declared?(attributes)
+        attributes.any? do |name, value|
+          next true if name == "xmlns:xmlns"
+          next false unless name == "xmlns" || name.start_with?("xmlns:")
+
+          ReservedNamespace.violated_by?(name, resolve_references(value))
+        end
       end
 
       # PullParser hands back the raw attribute. XML normalization replaces
