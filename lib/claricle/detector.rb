@@ -197,22 +197,25 @@ module Claricle
     end
   end
 
-  # The shared leaf of attribute-value resolution. Extracted because it has
-  # TWO consumers that want different things: `Detector.resolve` validates
-  # the result and falls back to its already-normalized input, while
-  # `reserved_prefix_declared?` needs the leaf raw -- a nil from an
+  # The shared leaf of attribute-value resolution. Extracted because its
+  # callers want different things. `Detector.resolve` validates the result
+  # and falls back to its already-normalized input. `svg_root?` and
+  # `reserved_prefix_declared?` need the leaf raw instead: a nil from an
   # out-of-range reference has to reach `ReservedNamespace.violated_by?` so
-  # it fails closed. One entry point cannot serve both without hiding that.
+  # it fails closed, and detection has to see that same failure rather than
+  # read the raw text as if it had resolved to itself. One entry point
+  # cannot serve both without hiding that.
   module AttributeReferences
     # The five entities XML itself defines -- measured: `unnormalize`
     # expands exactly these (plus numeric references) and leaves every
     # other named reference, of any case, byte-for-byte untouched, since
     # it has no entity table beyond them. Checked against the RAW value,
-    # never a resolved one: a resolved value can legitimately CONTAIN
-    # "&amp;" as ordinary literal text -- raw "&amp;amp;" resolves to
-    # "&amp;b=2" verbatim, an escaped ampersand in a query string
-    # followed by unrelated text -- and that is indistinguishable from a
-    # genuinely unresolved reference once resolution has already run.
+    # never a resolved one: raw "&amp;foo;b=2" resolves to "&foo;b=2",
+    # an escaped ampersand in a query string followed by ordinary text,
+    # and once resolution has run that is indistinguishable from a
+    # genuinely unresolved "&foo;". Deliberately not "&amp;" as the
+    # example -- the lookahead already excludes those five, so they read
+    # the same whichever value is checked and prove nothing.
     #
     # The name class is XML 1.0 5th ed. NameStartChar and NameChar,
     # transcribed whole rather than widened to fit a reported case. The
@@ -344,12 +347,12 @@ module Claricle
         end
       end
 
-      # The root element's qname, raw, and its attributes, each of those
-      # resolved once with a fallback to its normalized-but-unresolved
-      # text when resolution cannot answer -- the right default for
-      # something about to be reported as metadata, not decided on. The
-      # qname is deliberately left alone: a reference is not permitted
-      # in a name, so there is nothing there to resolve. nil covers
+      # The root element's qname and its attributes, or nil. The qname
+      # comes back raw: a reference is not permitted in a name, so there
+      # is nothing there to resolve. Each attribute is resolved once,
+      # falling back to its normalized-but-unresolved text when
+      # resolution cannot answer -- the right default for something
+      # about to be reported as metadata, not decided on. nil covers
       # every way the root can be unavailable: no root inside the
       # bound, markup REXML refuses, and an encoding name it cannot
       # use. Callers treat all three the same -- there is nothing to
