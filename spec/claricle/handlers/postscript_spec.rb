@@ -2,6 +2,7 @@
 
 require "json"
 require "postscript"
+require "tempfile"
 
 RSpec.describe "Claricle PostScript handler" do
   let(:handler) { Claricle.const_get(:Handlers).const_get(:Postscript).new }
@@ -185,10 +186,10 @@ RSpec.describe "Claricle PostScript handler" do
     # It has to be a HIRES box: `%%BoundingBox` takes integers, so
     # `-1e308` is not a legal coarse declaration and is refused before
     # the span is ever computed.
-    it "leaves the width nil while still carrying the box" do
+    it "leaves both dimensions nil while still carrying the box" do
       result = inspect_ps("overflow_width.ps", format: :ps)
 
-      expect(result).to have_attributes(width: nil, parse_status: "ok")
+      expect(result).to have_attributes(width: nil, height: nil, parse_status: "ok")
       expect(result.meta["hires_bounding_box"])
         .to eq([-1.0e308, 0.0, 1.0e308, 10.0])
       expect { result.to_json }.not_to raise_error
@@ -459,6 +460,30 @@ RSpec.describe "Claricle PostScript handler" do
                                         parse_status: "ok")
       expect(result.meta).to include("title" => "Kept")
     end
+
+    # DSC makes the colon PART of the keyword, so `%%EndComments: fake`
+    # is not the bare sentinel and not any other DSC comment either.
+    # `endcomments_bogus.ps` above pins the hyphen spelling; this pins
+    # the colon one, which the same `Begin|End|Include` wildcard also
+    # matched, as an `End<Comments>` closer that DSC never defines.
+    it "does not mistake %%EndComments: for the sentinel" do
+      result = inspect_ps("endcomments_colon.ps", format: :ps)
+
+      expect(result).to have_attributes(width: 100.0, height: 50.0,
+                                        parse_status: "ok")
+      expect(result.meta).to include("title" => "Kept")
+    end
+
+    # `%%PageTrailer` has no delimiter between the two words, so neither
+    # the `Page` nor the `Trailer` alternative matches it on its own --
+    # each requires a delimiter immediately after. Left unrecognised, it
+    # stayed inside the header, so BOTH boxes reached the delegate,
+    # whose last-wins `10x20` then disagreed with the header's own first
+    # declaration and took the real `100x50` down with it too.
+    it "keeps the header box declared before %%PageTrailer's boundary" do
+      expect(inspect_ps("page_trailer.ps", format: :ps))
+        .to have_attributes(width: 100.0, height: 50.0, parse_status: "ok")
+    end
   end
 
   # The delegate's numbers are not evidence on their own. Its box grammar
@@ -509,6 +534,37 @@ RSpec.describe "Claricle PostScript handler" do
 
       expect(inspect_ps("duplicate_title.ps", format: :ps).meta)
         .not_to have_key("title")
+    end
+
+    # First-occurrence precedence is checked at every scalar field's own
+    # call site, not only Title's -- Creator and CreationDate go through
+    # the same `authoritative` textual branch.
+    it "refuses a repeated %%Creator rather than publishing the last" do
+      header = Postscript.parse(File.binread(fixture("duplicate_creator.ps"))).header
+      expect(header.creator).to eq("Second")
+
+      expect(inspect_ps("duplicate_creator.ps", format: :ps).meta)
+        .not_to have_key("creator")
+    end
+
+    it "refuses a repeated %%CreationDate rather than publishing the last" do
+      header = Postscript.parse(File.binread(fixture("duplicate_creation_date.ps"))).header
+      expect(header.creation_date).to eq("2026-01-02")
+
+      expect(inspect_ps("duplicate_creation_date.ps", format: :ps).meta)
+        .not_to have_key("creation_date")
+    end
+
+    # Both declarations are well-formed DSC unsigned integers here,
+    # unlike `underscored_level.ps` where the FIRST one is not -- so
+    # this is the one fixture where `Dsc.unsigned(declared) == value`
+    # is reached and has to reject on the VALUES actually differing.
+    it "refuses a LanguageLevel whose two valid declarations differ" do
+      header = Postscript.parse(File.binread(fixture("duplicate_language_level.ps"))).header
+      expect(header.language_level).to eq(3)
+
+      expect(inspect_ps("duplicate_language_level.ps", format: :ps).meta)
+        .not_to have_key("language_level")
     end
 
     # DSC gives precedence to the FIRST repeated header comment; 0.2.0
@@ -812,7 +868,8 @@ RSpec.describe "Claricle PostScript handler" do
   # An `eq` on the bytes handed to it cannot prove that alone: a fresh
   # `File.binread(image.path)` would return the same bytes and pass it
   # too. `not_to receive(:binread)` is what actually rules a re-read
-  # out, since the file was already read once building `content`.
+  # out, since `with_source` opens the path itself rather than going
+  # through `#content`.
   it "parses the image's own content without touching the path" do
     image = Claricle::Image.from_path(fixture("basic.eps"))
     content = image.content
@@ -829,10 +886,106 @@ RSpec.describe "Claricle PostScript handler" do
 
     expect(content.encoding).to eq(Encoding::BINARY)
     expect(seen.length).to eq(1)
-    # The exact header prefix, not the whole file: the handler scopes
-    # the parse to the DSC header and hands those bytes on unchanged.
+    # The exact header prefix: basic.eps declares no comment the handler
+    # filters out, so the bytes handed to the delegate match it exactly.
     expect(seen.first).to eq(content[0, content.index("%%EndComments") + 14])
     expect(content).to end_with("showpage\n")
+  end
+
+  # LF-only input cannot catch a normalisation that only fires on CR --
+  # collapsing CRLF to LF before parsing would still read the SAME box
+  # from crlf_header.ps, since the value itself does not depend on the
+  # line ending. This pins the same byte-for-byte handoff on a
+  # CRLF-terminated header, which the LF-only example above cannot.
+  it "hands the delegate the header's own CRLF bytes, unchanged" do
+    image = Claricle::Image.from_path(fixture("crlf_header.ps"))
+    content = image.content
+    seen = []
+
+    allow(Postscript).to receive(:parse).and_wrap_original do |original, arg|
+      seen << arg
+      original.call(arg)
+    end
+
+    handler.inspection(image)
+
+    expect(seen.first)
+      .to eq(content[0, content.index("%%EndComments") + "%%EndComments\r\n".bytesize])
+  end
+
+  # image.content would cost a path-born image a file-sized allocation
+  # it retains for the image's whole lifetime. Pinning that the memoizing
+  # reader is never touched is the only way to prove the handler reads
+  # no more than its own header, since a small fixture cannot show a
+  # difference in bytes read.
+  it "never reads a path-born image's content" do
+    image = Claricle::Image.from_path(fixture("basic.eps"))
+
+    expect(image).not_to receive(:content)
+    handler.inspection(image)
+  end
+
+  # 0.2.0 merges every comment it does not recognise into a growing
+  # `custom` hash and duplicates it on each merge -- quadratic in the
+  # number of such comments. Comments this handler never reads must
+  # never reach the delegate at all.
+  it "filters comments the handler does not consume before parsing" do
+    source = "%!PS-Adobe-3.0\n%%For: someone\n%%BoundingBox: 0 0 100 50\n" \
+             "%%Title: Kept\n%%EndComments\n"
+    seen = []
+    allow(Postscript).to receive(:parse).and_wrap_original do |original, arg|
+      seen << arg
+      original.call(arg)
+    end
+
+    result = handler.inspection(Claricle::Image.from_content(source, format: :ps))
+
+    expect(seen.first).not_to include("For:")
+    expect(result).to have_attributes(width: 100.0, height: 50.0, parse_status: "ok")
+    expect(result.meta).to include("title" => "Kept")
+  end
+
+  # 0.2.0 does not attach a `%%+` continuation to whichever comment
+  # preceded it -- measured, every one lands in `custom` regardless of
+  # context, the same bucket an unrecognised comment does. Keeping a
+  # continuation because the line above it was kept would reopen the
+  # quadratic cost the filter above exists to close, this time behind a
+  # single legitimate field DSC allows unboundedly many continuations
+  # on.
+  it "filters %%+ continuations even behind a kept field" do
+    # Title is genuinely continued here, so it is correctly omitted
+    # regardless -- `continued_title.ps` already pins that rule. What
+    # this pins is that the `%%+` line itself never reaches the
+    # delegate, whether or not the field it follows is kept.
+    source = "%!PS-Adobe-3.0\n%%Title: Kept\n%%+ more\n%%BoundingBox: 0 0 100 50\n%%EndComments\n"
+    seen = []
+    allow(Postscript).to receive(:parse).and_wrap_original do |original, arg|
+      seen << arg
+      original.call(arg)
+    end
+
+    result = handler.inspection(Claricle::Image.from_content(source, format: :ps))
+
+    expect(seen.first).not_to include("%%+")
+    expect(result).to have_attributes(width: 100.0, height: 50.0, parse_status: "ok")
+  end
+
+  # The probe reads a bounded window first; a header running past it
+  # must still be read in full rather than silently truncated -- DSC
+  # sets no ceiling on a header's size, and the 629 KB header measured
+  # for the quadratic-parse fix above is a real one.
+  it "reads a header that spans more than one probe window" do
+    Tempfile.create(["large_header", ".ps"]) do |file|
+      file.write("%!PS-Adobe-3.0\n")
+      2000.times { |i| file.write("%%For: person#{i}\n") }
+      file.write("%%BoundingBox: 0 0 100 50\n%%Title: Kept\n%%EndComments\nshowpage\n")
+      file.flush
+
+      result = handler.inspection(Claricle::Image.from_path(file.path))
+
+      expect(result).to have_attributes(width: 100.0, height: 50.0, parse_status: "ok")
+      expect(result.meta).to include("title" => "Kept")
+    end
   end
 
   # Nothing guarantees the tag on a String of raw bytes, and these bytes

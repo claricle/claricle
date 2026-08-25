@@ -57,8 +57,15 @@ module Claricle
       #   `End<Anything>` closes one. Most are unreachable here, since
       #   their opener stopped the scan already -- but `%%EndProlog` and
       #   `%%EndSetup` are legal on their own, for an empty prolog or
-      #   setup. `%%EndComments` never reaches this: it is the sentinel,
-      #   and `header` tests for it first.
+      #   setup. A BARE `%%EndComments` never reaches this: it is the
+      #   sentinel, and `header` tests for it first. One WITH a colon
+      #   does reach here, though -- DSC makes the colon part of the
+      #   keyword, so `%%EndComments: fake` is not that sentinel and not
+      #   any other DSC comment either, and matching it as an `End<X>`
+      #   closer ended the header there, dropping a real box and title
+      #   behind it. `Comments` is excluded from this branch for exactly
+      #   that reason; DSC never defines a `%%BeginComments` for it to
+      #   close.
       #
       #   `Include<Anything>` is a body comment -- `%%IncludeResource`,
       #   `%%IncludeFeature`, `%%IncludeDocument` -- and cannot appear in
@@ -69,15 +76,21 @@ module Claricle
       #   file opens `%%?BeginVMStatus` straight after its header
       #   comments and never writes `%%EndComments`.
       #
-      #   `Page`, `Trailer` and `EOF` open the body, open the trailer and
-      #   end the document. `Page` is not `%%Pages`, which is a genuine
-      #   header comment -- the delimiter is what tells them apart.
+      #   `Page`, `Trailer`, `PageTrailer` and `EOF` open the body, open
+      #   the trailer, open a page's own trailer and end the document.
+      #   `Page` is not `%%Pages`, which is a genuine header comment --
+      #   the delimiter is what tells them apart. `PageTrailer` has no
+      #   delimiter between the two words, so neither the `Page` nor the
+      #   `Trailer` alternative matches it -- each requires a delimiter
+      #   immediately after -- and it stayed inside the header, letting a
+      #   body box and title behind it publish as header metadata.
       #
       # `%%EndComments` hid every one of these: a file that has it stops
       # earlier for another reason. Without it, each read a body box as
       # the page size, or read one and then dropped the header box the
       # file plainly declared for disagreeing with it.
-      OTHER_PART = /\??(?:Begin|End|Include)[A-Za-z]*|Page|Trailer|EOF/
+      OTHER_PART = /\??(?:Begin|Include)[A-Za-z]*|\??End(?!Comments\b)[A-Za-z]*|
+                    PageTrailer|Page|Trailer|EOF/x
       NOT_HEADER = /\A%%(?:#{OTHER_PART})#{DELIMITED}/
 
       # Anchored DSC number syntax. `Postscript.parse` is far looser: its
@@ -166,6 +179,57 @@ module Claricle
         HEADER_LINE.match?(line) && !NOT_HEADER.match?(line)
       end
 
+      # `header`, applied incrementally to an IO already holding `chunk`
+      # as its first read: grows `chunk` by reading more only when
+      # `header` consumed the whole of it without finding a boundary
+      # strictly inside -- a boundary sitting exactly on `chunk`'s own
+      # edge cannot be trusted yet, since the next unread byte could
+      # still belong to that same line. DSC sets no ceiling on a
+      # header's size, so this grows rather than truncating, at the cost
+      # of at most one extra read past a header that happens to end
+      # exactly on a chunk boundary.
+      #
+      # Lets a path-born image's header be read without pulling the rest
+      # of the file -- often the bulk of it -- into memory for bytes
+      # nothing here reads.
+      def self.windowed_header(io, chunk)
+        scoped = header(chunk)
+        return scoped if scoped.bytesize < chunk.bytesize || io.eof?
+
+        chunk << io.read
+        header(chunk)
+      end
+
+      # `header`, but only once `raw` -- a String already in memory, or
+      # an IO to read from -- is confirmed to open with `signature`, or
+      # nil for a source that does not. Checked with `byteslice` and
+      # `==`, not `start_with?`: a UTF-16-tagged String raises
+      # `Encoding::CompatibilityError` out of `start_with?` against a
+      # binary-tagged signature, where a byte comparison just answers
+      # false -- measured across ASCII-8BIT, UTF-8, UTF-16LE, UTF-16BE
+      # and ISO-8859-1.
+      #
+      # Unifies the String and IO paths behind one call, so
+      # `Handlers::Postscript` chooses neither `header` nor
+      # `windowed_header` itself -- and reads only `probe_bytes` of an
+      # IO before it is known to be worth reading further at all.
+      def self.signed_header(raw, signature, probe_bytes)
+        if raw.respond_to?(:read)
+          chunk = raw.read(probe_bytes) || ""
+          return nil unless signed?(chunk, signature)
+
+          windowed_header(raw, chunk)
+        else
+          return nil unless signed?(raw, signature)
+
+          header(raw)
+        end
+      end
+
+      def self.signed?(bytes, signature)
+        bytes.byteslice(0, signature.bytesize) == signature
+      end
+
       # The header's own lines, on DSC's three boundaries. Every lookup
       # below goes through it, so no two of them can disagree about
       # which line is the first declaration.
@@ -213,6 +277,35 @@ module Claricle
         return nil unless UNSIGNED.match?(text)
 
         Integer(text, 10)
+      end
+
+      # `source`, keeping only the opening `%!` line, the exact
+      # `%%EndComments` sentinel, and lines whose keyword (colon included
+      # -- DSC makes the colon part of it) is in `names`.
+      #
+      # `%%+` is dropped unconditionally, never kept even right behind a
+      # comment that IS kept -- measured, 0.2.0 does not attach a
+      # continuation to whichever comment preceded it at all: every
+      # `%%+` line lands in `custom` regardless of context, the same
+      # bucket an unrecognised comment does, and `custom` is exactly
+      # what this filter exists to keep the delegate from paying
+      # quadratic cost on. A field this handler reads keeps only its
+      # first fragment either way (0.2.0 never reconstructs the
+      # continued value), so a kept field's own continuations are as
+      # unread as an unrecognised comment's.
+      #
+      # Reads irrelevant comments out of what the delegate ever sees --
+      # `Handlers::Postscript` uses this to keep 0.2.0's own quadratic
+      # cost on unrecognised comments from being paid on comments no
+      # caller of `names` reads in the first place.
+      def self.filter(source, names)
+        keyword = /\A%%(?:#{Regexp.union(names)}):/
+        lines(source).each_with_object(+"") do |line, kept|
+          next if CONTINUATION.match?(line)
+
+          relevant = line.start_with?("%!") || HEADER_END.match?(line) || keyword.match?(line)
+          kept << line if relevant
+        end
       end
 
       # The four operands of that line, each a well-formed DSC real.
@@ -274,14 +367,41 @@ module Claricle
       ISSUE_CODE = "postscript.header_unreadable"
       ISSUE_MESSAGE = "PostScript header could not be read"
 
+      # The delegate's own answer for the fields this handler reads, so
+      # the set is not restated: the two box names, plus the four scalar
+      # ones `metadata` populates.
+      #
+      # 0.2.0 merges every comment it does NOT recognise into a growing
+      # `custom` hash and duplicates the whole hash on each merge --
+      # measured, a 629 KB header of 32,000 unique `%%For:` comments (a
+      # real DSC General Header Comment, not malformed input) took over
+      # 20 seconds to parse. Nothing here ever reads `custom`, so
+      # filtering to only these six comments before the delegate ever
+      # sees the header turns that quadratic cost into linear work over
+      # the comments this handler actually consumes.
+      FIELD_COMMENTS = (BOX_COMMENTS.values + %w[Title Creator CreationDate LanguageLevel]).freeze
+
+      # The most a single probe reads before checking whether the header
+      # ended inside it. Generous for the common case -- a handful of
+      # scalar comments and a box are a few hundred bytes -- and not a
+      # ceiling: `header_source` reads past it when a real header runs
+      # longer, exactly the 629 KB case `FIELD_COMMENTS` exists for.
+      HEADER_PROBE_BYTES = 8192
+
       private_constant :SIGNATURE, :PARSE_FAILURES, :BOX_COMMENTS,
+                       :FIELD_COMMENTS, :HEADER_PROBE_BYTES,
                        :ISSUE_CODE, :ISSUE_MESSAGE
 
+      # `image.content` would cost a path-born image a file-sized
+      # allocation it retains for the image's whole lifetime, for a
+      # handler that reads only the header -- measured on a large body,
+      # +file-size RSS and the body kept alive -- so this goes through
+      # `with_source` instead, the same reader `Handlers::Svg` uses for
+      # the same reason.
       def inspection(image)
-        content = image.content
-        return unreadable(image) unless signed?(content)
+        source = image.with_source { |raw| Dsc.signed_header(raw, SIGNATURE, HEADER_PROBE_BYTES) }
+        return unreadable(image) unless source
 
-        source = Dsc.header(content)
         header = read_header(source)
         return unreadable(image) unless header
 
@@ -290,12 +410,8 @@ module Claricle
 
       private
 
-      def signed?(content)
-        content.byteslice(0, SIGNATURE.bytesize) == SIGNATURE
-      end
-
       def read_header(source)
-        ::Postscript.parse(source).header
+        ::Postscript.parse(Dsc.filter(source, FIELD_COMMENTS)).header
       rescue *PARSE_FAILURES
         nil
       end
