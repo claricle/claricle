@@ -383,7 +383,8 @@ RSpec.describe Claricle::Cli::Runner do
       expect { described_class.run(["inspect", phys]) }
         .to output(/color space: truecolor\+alpha/).to_stdout
       expect { described_class.run(["inspect", phys]) }
-        .to output(/bit_depth: 8.*compression: 0.*filter: 0.*interlace: 0/m).to_stdout
+        .to output(/meta\.bit_depth: 8.*meta\.compression: 0.*meta\.filter: 0.*meta\.interlace: 0/m)
+        .to_stdout
     end
 
     it "prints an issue's severity and message when one is reported" do
@@ -405,6 +406,83 @@ RSpec.describe Claricle::Cli::Runner do
 
       expect { expect(described_class.run(["inspect", failed])).to eq(0) }
         .to output(/parse status: failed/).to_stdout
+    end
+
+    # The plan requires an SVG example end to end, not just PNG. One
+    # example, not two: an exit code on its own says nothing about what
+    # was printed, and a separate status-only example passed with the
+    # unit conversion forced to nil.
+    it "prints SVG dimensions and the declared units, and exits 0" do
+      Tempfile.create(["logo", ".svg"]) do |file|
+        file.write(%(<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="5mm"/>))
+        file.flush
+
+        # Both axes, and enough digits that a wrong conversion cannot
+        # hide behind a truncated match.
+        expect { expect(described_class.run(["inspect", file.path])).to eq(0) }
+          .to output(/format: svg/).to_stdout
+        expect { described_class.run(["inspect", file.path]) }
+          .to output(/dimensions: 37\.79527559055118\d*x18\.89763779527559\d*/).to_stdout
+        expect { described_class.run(["inspect", file.path]) }
+          .to output(/^meta\.height: 5mm$/).to_stdout
+        expect { described_class.run(["inspect", file.path]) }
+          .to output(/^meta\.width: 10mm$/).to_stdout
+      end
+    end
+
+    # SVG is the first format whose metadata is free text out of the
+    # file, and `&#xA;` is a character reference, so XML keeps it as a
+    # real newline. Printed raw it made a line of Claricle's own shape.
+    #
+    # Four characters, because C0 is not the whole set and each forges
+    # differently: LF adds a line, CR overwrites the one already there,
+    # NEL is C1's own next-line, and U+2028 is Unicode's line separator
+    # by definition. All four measured arriving intact before this.
+    { "a newline" => ["&#xA;", '\x0A'],
+      "a carriage return" => ["&#xD;", '\x0D'],
+      "a next-line control" => ["&#x85;", '\x85'],
+      "a line separator" => ["&#x2028;", '\u{2028}'] }
+      .each do |label, (reference, escaped)|
+      it "refuses to print #{label} out of a file's metadata" do
+        Tempfile.create(["forge", ".svg"]) do |file|
+          file.write(%(<svg xmlns="http://www.w3.org/2000/svg" id="a#{reference}error: forged"/>))
+          file.flush
+
+          expect { described_class.run(["inspect", file.path]) }
+            .to output(/^meta\.id: a#{Regexp.escape(escaped)}error: forged$/).to_stdout
+        end
+      end
+    end
+
+    # Escaping the characters is not enough on its own: a root attribute
+    # can simply be NAMED like one of Claricle's own rows. Unprefixed,
+    # `error="forged"` printed a line shaped exactly like an issue and
+    # `format="png"` printed a second format line contradicting the
+    # first.
+    it "keeps a file's metadata keys out of its own row labels" do
+      Tempfile.create(["forge", ".svg"]) do |file|
+        file.write(%(<svg xmlns="http://www.w3.org/2000/svg" error="forged" format="png"/>))
+        file.flush
+
+        expect { described_class.run(["inspect", file.path]) }
+          .to output(/^meta\.error: forged$/).to_stdout
+        expect { described_class.run(["inspect", file.path]) }
+          .not_to output(/^error: forged$/).to_stdout
+        expect { described_class.run(["inspect", file.path]) }
+          .not_to output(/^format: png$/).to_stdout
+      end
+    end
+
+    # The escaping is presentation, not a change to what was read: the
+    # JSON carries the real character, escaped by JSON itself.
+    it "keeps the real character under --json" do
+      Tempfile.create(["forge", ".svg"]) do |file|
+        file.write(%(<svg xmlns="http://www.w3.org/2000/svg" id="a&#xA;b"/>))
+        file.flush
+
+        expect { described_class.run(["inspect", file.path, "--json"]) }
+          .to output(/"id":"a\\nb"/).to_stdout
+      end
     end
 
     it "exits 2 for a missing file" do
@@ -496,12 +574,15 @@ RSpec.describe Claricle::Cli::Runner do
     # pass if the command printed nothing at all.
     it "does not claim conform or convert yet" do
       expect { described_class.run(["formats"]) }
-        .to output("png\tinspect\n").to_stdout
+        .to output("png\tinspect\nsvg\tinspect\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
       expect { described_class.run(["formats", "--json"]) }
-        .to output(%([{"format":"png","inspect":true,"conform":false,"convert":false,"convert_to":[]}]\n))
+        .to output(
+          %([{"format":"png","inspect":true,"conform":false,"convert":false,"convert_to":[]},) +
+          %({"format":"svg","inspect":true,"conform":false,"convert":false,"convert_to":[]}]\n)
+        )
         .to_stdout
     end
   end

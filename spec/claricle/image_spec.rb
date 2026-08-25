@@ -343,6 +343,87 @@ RSpec.describe Claricle::Image do
     end
   end
 
+  describe "#with_source" do
+    # The point of the method. A reader that wants a prefix must not
+    # cost the whole file: measured on a 64.0 MiB SVG, going through
+    # #content was +64.5 MiB RSS and left every byte in @content.
+    #
+    # The yielded object's CLASS is what carries that, not what it reads
+    # like. `StringIO.open(File.read(path, mode: "rb"), &)` behaves
+    # identically through every read, refuses File.binread, leaves
+    # @content nil -- and slurps the file. It is the open File or the
+    # saving is imaginary.
+    it "hands a path-born image the open file, and reads nothing itself" do
+      with_file.call(png) do |path|
+        image = described_class.from_path(path)
+        expect(File).not_to receive(:binread)
+
+        # The read comes back out of the block: expectations inside one
+        # that is never called assert nothing at all.
+        prefix = image.with_source do |source|
+          expect(source).to be_a(File)
+          expect(source.path).to eq(path)
+          source.read(4)
+        end
+
+        expect(prefix).to eq(png[0, 4])
+        expect(image.instance_variable_get(:@content)).to be_nil
+      end
+    end
+
+    # Binary and at byte 0: a reader picking up a half-consumed file, or
+    # one that translated line endings, would read a different document.
+    it "yields it in binary mode from the start" do
+      with_file.call("#{png}\r\n") do |path|
+        described_class.from_path(path).with_source do |source|
+          expect(source.pos).to eq(0)
+          expect(source.read).to eq("#{png}\r\n".b)
+        end
+      end
+    end
+
+    it "closes the file afterwards" do
+      captured = nil
+      with_file.call(png) do |path|
+        described_class.from_path(path).with_source { |source| captured = source }
+      end
+      expect(captured).to be_closed
+    end
+
+    it "closes it even when the block raises" do
+      captured = nil
+      with_file.call(png) do |path|
+        expect do
+          described_class.from_path(path).with_source do |source|
+            captured = source
+            raise "boom"
+          end
+        end.to raise_error("boom")
+      end
+      expect(captured).to be_closed
+    end
+
+    # A content-born image has no file to open, so it hands over the
+    # bytes it already holds -- the same object, not a copy of them.
+    it "yields a content-born image its own content" do
+      image = described_class.from_content(png)
+
+      expect(image.with_source { |source| source }).to equal(image.content)
+    end
+
+    it "returns what the block returned, whichever source it got" do
+      with_file.call(png) do |path|
+        expect(described_class.from_path(path).with_source { :answer }).to eq(:answer)
+      end
+      expect(described_class.from_content(png).with_source { :answer }).to eq(:answer)
+    end
+
+    it "requires a block" do
+      expect { described_class.from_content(png).with_source }
+        .to raise_error(ArgumentError, /requires a block/)
+    end
+  end
+
   describe "#with_path" do
     it "yields the real path and leaves it alone" do
       with_file.call(png) do |path|

@@ -85,6 +85,16 @@ module Claricle
     # Rendering, kept together so the commands only choose a payload and
     # write it. Nothing here touches `options` or writes output.
     module Presenter
+      # C0, DEL, C1, and Unicode's own two line breaks. Not just C0:
+      # U+0085 is NEL, a next-line control, and U+009B is CSI, the
+      # introducer an escape sequence uses -- both reachable as
+      # character references, both measured arriving in the output
+      # intact. U+2028 and U+2029 are line and paragraph separators by
+      # definition. Nothing here is a character a file has a reason to
+      # put in its metadata.
+      CONTROL = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/
+      private_constant :CONTROL
+
       module_function
 
       # Capabilities are derived from the handler, so this cannot
@@ -113,8 +123,29 @@ module Claricle
 
       def inspection(inspection)
         rows(inspection)
-          .filter_map { |label, value| "#{label}: #{value}" unless value.nil? }
+          .filter_map { |label, value| "#{visible(label)}: #{visible(value)}" unless value.nil? }
           .join("\n")
+      end
+
+      # Metadata is free text out of the file, and an SVG root attribute
+      # can hold a newline: `&#xA;` is a character reference, so XML
+      # keeps it as a real newline rather than folding it to a space.
+      # Printed raw, `id="a&#xA;error: forged"` produced an "error:"
+      # line of Claricle's own shape, and `&#xD;` overwrote the line in
+      # a terminal. Control characters are shown escaped instead.
+      #
+      # Only the human rendering needs this. `--json` carries the true
+      # value and JSON escapes it on the way out, so the two disagree on
+      # presentation and agree on the bytes.
+      def visible(text)
+        text.to_s.gsub(CONTROL) { |char| escaped(char.ord) }
+      end
+
+      # `\xNN` up to a byte, `\u{NNNN}` above it. One form for both
+      # would either print `\x2028` -- which reads as `\x20` followed by
+      # "28" -- or spell a newline `\u{000A}`.
+      def escaped(code)
+        code > 0xFF ? format("\\u{%04X}", code) : format("\\x%02X", code)
       end
 
       # Label/value pairs filtered once, rather than a conditional per
@@ -125,9 +156,22 @@ module Claricle
         [
           ["format", inspection.format], *dimension_rows(inspection),
           ["dpi", inspection.dpi], ["color space", inspection.color_space],
-          *inspection.meta.to_a.sort, ["parse status", inspection.parse_status],
+          *meta_rows(inspection), ["parse status", inspection.parse_status],
           *inspection.issues.map { |issue| [issue.severity, issue.message] }
         ]
+      end
+
+      # Metadata keys come out of the file, and an SVG root may declare
+      # any attribute it likes. Unprefixed, `error="forged"` printed a
+      # line shaped exactly like an issue and `format="png"` printed a
+      # second, contradictory format line. The prefix keeps the file's
+      # own words in their own namespace.
+      #
+      # It settles a collision that was already there, too: an SVG
+      # declaring `width="10mm"` produced a `width` line for the raw
+      # declaration and another for the computed 37.79 px.
+      def meta_rows(inspection)
+        inspection.meta.to_a.sort.map { |key, value| ["meta.#{key}", value] }
       end
 
       # One line when both are known, separate lines when only one is.

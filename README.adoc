@@ -40,6 +40,12 @@ The name reflects what the library is for:
 
 * Format detection for PNG, SVG, EMF, WMF, EPS, PS and PDF
 * `inspect` for PNG -- dimensions, colour space, bit depth and DPI
+* `inspect` for SVG -- dimensions from the root, absolute units
+  converted to CSS px; a relative unit such as `%` reports no dimension.
+  It stops at the root start tag, so its parse status means "the root
+  was readable", not "the document is well-formed". A file damaged
+  after that tag still reports `ok`. Judging the whole document is
+  conformance, and no handler implements it yet
 * `formats`, listing each format and what Claricle can do with it
 * `Claricle::Image`, built from a path or from bytes
 * A unified issue and report model, serialising to and from JSON
@@ -47,8 +53,8 @@ The name reflects what the library is for:
 
 == What does not work yet
 
-* `inspect` for SVG, EMF, WMF, EPS, PS and PDF -- only PNG has a
-  handler so far, so the rest raise `Claricle::UnsupportedFormat`
+* `inspect` for EMF, WMF, EPS, PS and PDF -- only PNG and SVG have
+  handlers so far, so the rest raise `Claricle::UnsupportedFormat`
 * `conform` and `convert` for every format. No handler implements
   either yet, so both raise `Claricle::UnsupportedFormat`. `claricle
   formats` reports this per format, and it reads the handlers rather
@@ -75,6 +81,11 @@ The name reflects what the library is for:
 
 The operations are added as they are implemented, so this table never
 lists a command that does nothing.
+
+`claricle inspect` prints a file's own metadata under `meta.` keys, and
+shows control characters escaped. Both are there so a crafted file
+cannot print a line that looks like Claricle's own. `--json` is
+unaffected: it carries the real values.
 
 === Version
 
@@ -163,6 +174,19 @@ Claricle::Image.from_content(bytes, format: :png).with_path do |path|
 end
 ----
 
+Hand it a source instead when the reader only needs a prefix:
+
+[source,ruby]
+----
+Claricle::Image.from_path("logo.svg").with_source do |source|
+  # the open file here; the bytes, for a content-born image
+end
+----
+
+A path-born image is never slurped to satisfy `with_source`. That is how
+the SVG handler reads the root, so a 64 MiB file costs the 8 KiB it
+actually reads.
+
 == Architecture
 
 [source]
@@ -174,6 +198,7 @@ lib/claricle/
   registry.rb          # frozen format -> handler map
   handlers/base.rb     # what a handler subclasses
   handlers/png.rb      # PNG metadata
+  handlers/svg.rb      # SVG root metadata
   models/              # Location, Issue, Report, Inspection
   errors.rb            # Error, UnknownFormat, UnsupportedFormat, ...
   cli.rb               # Thor CLI and the exit-code Runner

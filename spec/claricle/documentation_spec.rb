@@ -74,6 +74,29 @@ RSpec.describe "the documentation" do
       expect(File.exist?(seen)).to be(false)
     end
 
+    # Both halves of the claim: the yielded source is the open file, and
+    # the file is not slurped to produce it. The class is asserted, not
+    # just the bytes -- a StringIO over the whole file reads the same
+    # and costs the whole file, which is the opposite of the claim.
+    it "yields the open file for a path-born image, reading nothing else" do
+      shows('Claricle::Image.from_path("logo.svg").with_source do |source|')
+      Tempfile.create(["logo", ".png"]) do |file|
+        file.binmode
+        file.write(png)
+        file.flush
+        expect(File).not_to receive(:binread)
+
+        # The read comes back out of the block: expectations inside one
+        # that is never called assert nothing at all.
+        prefix = Claricle::Image.from_path(file.path).with_source do |source|
+          expect(source).to be_a(File)
+          source.read(8)
+        end
+
+        expect(prefix).to eq(png[0, 8])
+      end
+    end
+
     it "distinguishes UnknownFormat from UnsupportedFormat, as documented" do
       # Anchored to the affirmative wording, not just the class name: a
       # negated sentence ("does not raise `Claricle::UnknownFormat`")
