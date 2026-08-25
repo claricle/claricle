@@ -484,6 +484,35 @@ RSpec.describe "Claricle PostScript handler" do
       expect(inspect_ps("page_trailer.ps", format: :ps))
         .to have_attributes(width: 100.0, height: 50.0, parse_status: "ok")
     end
+
+    # A DSC keyword's punctuation is PART of the keyword, and each of
+    # these four spellings is a comment DSC does not define -- which a
+    # reader must ignore, not act on. Matching a `Begin`/`End`/`Include`
+    # STEM behind a delimiter that accepted "colon, whitespace or end of
+    # line" for all of them read every one as the keyword it resembles,
+    # ended the header on it, and discarded the box and title behind.
+    #
+    # Each fixture pairs with one above that must still END the header,
+    # so the pair fails in opposite directions: `bare_page.ps` against
+    # `page_comment.ps`, `trailer_colon.ps` against `trailer_comment.ps`,
+    # `page_trailer_colon.ps` against `page_trailer.ps`, and
+    # `begin_future.ps` against `begin_data.ps`. Only exact matching
+    # satisfies both halves -- loosening the punctuation reddens these,
+    # and dropping a name reddens those.
+    {
+      "begin_future.ps" => "%%BeginFuture:, which DSC does not define",
+      "trailer_colon.ps" => "%%Trailer:, when %%Trailer takes no operands",
+      "bare_page.ps" => "a bare %%Page, when %%Page requires operands",
+      "page_trailer_colon.ps" => "%%PageTrailer:, which takes no operands"
+    }.each do |name, description|
+      it "keeps reading the header past #{description}" do
+        result = inspect_ps(name, format: :ps)
+
+        expect(result).to have_attributes(width: 100.0, height: 50.0,
+                                          parse_status: "ok")
+        expect(result.meta).to include("title" => "Kept")
+      end
+    end
   end
 
   # The delegate's numbers are not evidence on their own. Its box grammar
@@ -579,6 +608,45 @@ RSpec.describe "Claricle PostScript handler" do
 
       expect(result).to have_attributes(width: nil, height: nil, parse_status: "ok")
       expect(result.meta).not_to have_key("bounding_box")
+    end
+
+    # The two shapes where refusing a repeat is a DELIBERATE change, not
+    # a consequence of the delegate disagreeing with itself.
+    #
+    # Both used to publish. The old rule was inferred from 0.2.0 being
+    # last-wins, which only holds for repeats it RECOGNISES -- it does
+    # not recognise `(atend)`, so it kept the earlier box and agreed
+    # with itself, and `02` reads back as the same 2. So the header
+    # contradicted itself and the handler published anyway.
+    #
+    # The rule is now stated rather than inferred: every declaration of
+    # a comment must agree with the first, compared as the text the file
+    # actually wrote. That is stricter than the old accident in exactly
+    # these two shapes, and stricter here means nil rather than a value
+    # the document states twice and differently. `parse_status` stays
+    # "ok" -- a contradictory header is not an unreadable one.
+    #
+    # `%%LanguageLevel: 2` then `02` is the honest cost: those two mean
+    # the same integer, and only the spelling differs. Comparing text
+    # rather than each field's own semantics is what makes ONE rule
+    # cover all six comments; teaching this the numeric/textual split
+    # would restate `agrees?`'s knowledge in a second place.
+    {
+      "a box declared concretely and then deferred" =>
+        ["%%BoundingBox: 0 0 100 50", "%%BoundingBox: (atend)", "bounding_box"],
+      "a LanguageLevel respelled rather than changed" =>
+        ["%%LanguageLevel: 2", "%%LanguageLevel: 02", "language_level"]
+    }.each do |description, (first, second, key)|
+      it "refuses #{description}" do
+        source = "%!PS-Adobe-3.0\n#{first}\n#{second}\n%%EndComments\n"
+
+        result = handler.inspection(
+          Claricle::Image.from_content(source, format: :ps)
+        )
+
+        expect(result.parse_status).to eq("ok")
+        expect(result.meta).not_to have_key(key)
+      end
     end
   end
 
@@ -970,6 +1038,83 @@ RSpec.describe "Claricle PostScript handler" do
     expect(result).to have_attributes(width: 100.0, height: 50.0, parse_status: "ok")
   end
 
+  # Naming the six comments the handler reads bounds the delegate's
+  # input by NAME. It does not bound it by COUNT, and the count is what
+  # 0.2.0 charges for: it merges each comment it cannot read into a
+  # growing `custom` hash and duplicates that hash every time. So a
+  # repeated whitelisted comment left the whole quadratic reachable, and
+  # whether a line landed in `custom` turned on its VALUE, not its name.
+  #
+  # `%%BoundingBox: (atend)` is the shape that found it, and it is a
+  # legitimate one: DSC defines `(atend)` to defer the box to the
+  # trailer, this document supplies that trailer, every line is legal and
+  # far inside DSC's 255-character limit, and repeated header comments
+  # bind to the first. 0.2.0 simply does not recognise the form.
+  #
+  # The assertion is the PROPERTY, not the shape: what reaches the
+  # delegate is a constant number of lines, so it cannot grow with the
+  # header at all. That is what makes it cover the values nobody has
+  # tried -- this filter never looks at a value.
+  describe "what the delegate is handed" do
+    def atend_document(count)
+      lines = Array.new(count) do |i|
+        # A unique run of spaces and tabs, so every line is a distinct
+        # key in `custom` -- identical lines would collapse there and
+        # hide the cost.
+        run = Array.new(15) { |bit| i[bit] == 1 ? "\t" : " " }.join
+        "%%BoundingBox:#{run}(atend)"
+      end
+      "%!PS-Adobe-3.0 EPSF-3.0\n#{lines.join("\n")}\n%%Title: Kept\n" \
+        "%%EndComments\n%%Trailer\n%%BoundingBox: 0 0 100 50\n%%EOF\n"
+    end
+
+    def parsed_source(content)
+      seen = []
+      allow(Postscript).to receive(:parse).and_wrap_original do |original, arg|
+        seen << arg
+        original.call(arg)
+      end
+      handler.inspection(Claricle::Image.from_content(content, format: :eps))
+      seen.first
+    end
+
+    # Four times the comments must not mean four times the input. An
+    # equality, not a ceiling: a bound that still grew would satisfy
+    # "smaller than the source" while leaving the cost quadratic.
+    it "hands the delegate the same bytes whatever the repeat count" do
+      small = parsed_source(atend_document(500))
+      large = parsed_source(atend_document(2000))
+
+      expect(large).to eq(small)
+      # `%!`, the first box, the title and the sentinel -- nothing else.
+      expect(large.count("\n")).to eq(4)
+    end
+
+    # Every whitelisted name is its own channel, so pinning the box
+    # alone would leave five open. `%!` is a channel too: it is kept
+    # unconditionally as the version line, and a header may repeat it.
+    {
+      "%%BoundingBox" => ->(i) { "%%BoundingBox: #{i} 0 100 50" },
+      "%%HiResBoundingBox" => ->(i) { "%%HiResBoundingBox: not a box #{i}" },
+      "%%Title" => ->(i) { "%%Title: t#{i}" },
+      "%%Creator" => ->(i) { "%%Creator: c#{i}" },
+      "%%CreationDate" => ->(i) { "%%CreationDate: d#{i}" },
+      "%%LanguageLevel" => ->(i) { "%%LanguageLevel: n#{i}" },
+      "%!" => ->(i) { "%!PS-Adobe-3.0 v#{i}" }
+    }.each do |name, line|
+      it "keeps only the first #{name} of 2,000" do
+        repeated = Array.new(2000) { |i| line.call(i) }
+        content = "%!PS-Adobe-3.0\n#{repeated.join("\n")}\n" \
+                  "%%BoundingBox: 0 0 100 50\n%%EndComments\nshowpage\n"
+
+        handed = parsed_source(content)
+
+        expect(handed.scan(/^#{Regexp.escape(name)}/).size).to eq(1)
+        expect(handed.count("\n")).to be <= 8
+      end
+    end
+  end
+
   # The probe reads a bounded window first; a header running past it
   # must still be read in full rather than silently truncated -- DSC
   # sets no ceiling on a header's size, and the 629 KB header measured
@@ -985,6 +1130,131 @@ RSpec.describe "Claricle PostScript handler" do
 
       expect(result).to have_attributes(width: 100.0, height: 50.0, parse_status: "ok")
       expect(result.meta).to include("title" => "Kept")
+    end
+  end
+
+  # Every spec above this one measures the ANSWER, and the answer is the
+  # same however many bytes were read to reach it -- so none of them
+  # constrains the reading at all. Both of the two that were supposed to
+  # still passed with the IO path replaced by an unbounded `raw.read`.
+  # These count the bytes instead.
+  describe "how much of a file the header costs" do
+    # The reads that reach the file itself, in order. A path-born image
+    # hands the open File to the handler, so wrapping `read` on that one
+    # object records exactly what the handler asked the disk for.
+    def recording(io, reads)
+      allow(io).to receive(:read).and_wrap_original do |original, *args|
+        original.call(*args).tap { |bytes| reads << bytes.to_s.bytesize }
+      end
+      io
+    end
+
+    def reads_for(path)
+      reads = []
+      opener = File.method(:open)
+      allow(File).to receive(:open) do |name, *rest, &block|
+        next opener.call(name, *rest, &block) unless name == path
+
+        opener.call(name, *rest) { |io| block.call(recording(io, reads)) }
+      end
+      yield
+      reads
+    end
+
+    def program(header_comments, body_lines)
+      padding = "%%For: #{"x" * 60}\n" * header_comments
+      body = "0 0 moveto showpage\n" * body_lines
+      "%!PS-Adobe-3.0\n%%Title: Kept\n%%BoundingBox: 0 0 100 50\n" \
+        "#{padding}%%EndComments\n#{body}"
+    end
+
+    # The probe already bounded THIS case, and the spec is kept so the
+    # pair reads as one rule: a short header costs one probe.
+    it "reads one probe of a large file whose header ends inside it" do
+      Tempfile.create(["short_header", ".ps"]) do |file|
+        file.binmode
+        file.write(program(0, 40_000))
+        file.flush
+        # Built before the counting starts: detection opens the file too,
+        # and its reads are not the handler's.
+        image = Claricle::Image.from_path(file.path)
+
+        reads = reads_for(file.path) do
+          expect(handler.inspection(image))
+            .to have_attributes(width: 100.0, parse_status: "ok")
+        end
+
+        expect(reads.sum).to eq(8192)
+      end
+    end
+
+    # And this is the case the probe did NOT bound. One byte of header
+    # past the first window and the unbounded `read` behind it
+    # materialised the whole remainder -- instrumented on a 16 MB
+    # program with a 10 KB header, the reads were 8,192 and then
+    # 16,779,169. The cost has to follow the HEADER, not the file.
+    it "reads no more than the header when the file dwarfs it" do
+      Tempfile.create(["long_header", ".ps"]) do |file|
+        file.binmode
+        content = program(160, 40_000)
+        file.write(content)
+        file.flush
+        header_bytes = content.index("%%EndComments") + "%%EndComments\n".bytesize
+        image = Claricle::Image.from_path(file.path)
+
+        reads = reads_for(file.path) do
+          expect(handler.inspection(image))
+            .to have_attributes(width: 100.0, parse_status: "ok")
+        end
+
+        # The case really is the long-header path, and the file really
+        # does dwarf the header.
+        expect(header_bytes).to be > 8192
+        expect(content.bytesize).to be > header_bytes * 50
+        # Header plus at most the one probe that straddles the boundary.
+        expect(reads.sum).to be <= header_bytes + 8192
+        expect(reads.sum).to be < content.bytesize / 10
+      end
+    end
+
+    # Reading a probe at a time means a probe boundary can land ANYWHERE
+    # in a line, and one landing exactly one byte in leaves a lone `%` as
+    # the chunk's last line. A lone `%` is a DSC terminator, not a header
+    # comment, so the scan reports the header ending one byte short of
+    # the chunk -- which reads as a boundary safely inside it.
+    #
+    # The arithmetic is exact, not lucky: the 55-byte preamble plus
+    # 68-byte comments puts probe six (49,152) one byte into a line, so
+    # this fixture reproduces it every run. Measured before the fix: a
+    # 2,720,069-byte header published as 49,151 bytes, with the title and
+    # the sentinel behind it simply gone.
+    #
+    # Trusting the bytes up to the last line TERMINATOR instead of the
+    # whole chunk is what closes it -- a truncated tail can never decide
+    # where the header ends.
+    it "does not end the header on a line a probe boundary split" do
+      # 15 + 14 + 26 = a 55-byte preamble, then 68-byte comments, which
+      # puts probe six exactly one byte into a line.
+      preamble = "%!PS-Adobe-3.0\n%%Title: Kept\n%%For: #{"a" * 18}\n"
+      content = "#{preamble}#{"%%For: #{"x" * 60}\n" * 2000}" \
+                "%%BoundingBox: 0 0 100 50\n%%EndComments\nshowpage\n"
+      expect(preamble.bytesize).to eq(55)
+      expect(content.byteslice(49_151, 1)).to eq("%")
+
+      Tempfile.create(["split_boundary", ".ps"]) do |file|
+        file.binmode
+        file.write(content)
+        file.flush
+
+        result = handler.inspection(Claricle::Image.from_path(file.path))
+
+        # The box sits BEHIND the split boundary on purpose. A header cut
+        # short there keeps the title and loses the box, so the box is
+        # the only thing that proves the whole header was read.
+        expect(result).to have_attributes(width: 100.0, height: 50.0,
+                                          parse_status: "ok")
+        expect(result.meta).to include("title" => "Kept")
+      end
     end
   end
 
