@@ -555,4 +555,65 @@ RSpec.describe Claricle::Image do
       end
     end
   end
+
+  # An image is bytes. The encoding tag on a String handed to
+  # from_content is an artifact of how the caller built it, and Detector
+  # already discards it at its own entry -- so this is the same decision
+  # applied to the bytes a handler actually reads.
+  #
+  # It lives here rather than in each handler because this is the one
+  # place raw bytes come from, and left to a handler it gets missed:
+  # String#[]= indexes by CHARACTER, so the EMF handler normalising
+  # nSize raised Encoding::CompatibilityError on a UTF-16LE-tagged
+  # string holding a perfectly good file. What does NOT come through
+  # here is a PATH-born image handed to a delegate that wants a path:
+  # with_path yields path straight back and the bytes are never read. A
+  # content-born one still lands here, because with_path writes content
+  # into the temporary file.
+  describe "#content encoding" do
+    let(:bytes) { File.binread(File.join(__dir__, "..", "fixtures", "inspect", "valid.emf")) }
+
+    %w[UTF-8 UTF-16LE UTF-16BE ISO-8859-1].each do |encoding|
+      it "returns BINARY for content tagged #{encoding}" do
+        tagged = bytes.dup.force_encoding(encoding)
+        image = described_class.from_content(tagged, format: :emf)
+
+        expect(image.content.encoding).to eq(Encoding::BINARY)
+        expect(image.content.bytes).to eq(bytes.bytes)
+      end
+
+      it "leaves the caller's own string tagged #{encoding}" do
+        tagged = bytes.dup.force_encoding(encoding)
+        described_class.from_content(tagged, format: :emf).content
+
+        expect(tagged.encoding).to eq(Encoding.find(encoding))
+      end
+    end
+
+    it "returns BINARY from a path" do
+      path = File.join(__dir__, "..", "fixtures", "inspect", "valid.emf")
+
+      expect(described_class.from_path(path).content.encoding).to eq(Encoding::BINARY)
+    end
+
+    # Normalising must not re-copy on every read, or a handler holding
+    # the result across two calls would be holding two objects.
+    it "is the same object across repeated calls" do
+      image = described_class.from_content(bytes.dup.force_encoding("UTF-8"), format: :emf)
+
+      expect(image.content).to be(image.content)
+    end
+
+    # Passed through, not copied -- but only when it is already FROZEN as
+    # well as binary. Frozen is what makes sharing safe: without it a
+    # caller could still mutate the bytes an image is reading. An earlier
+    # version asserted identity for ANY binary string, which would have
+    # required handing out an unfrozen shared buffer.
+    it "hands back the caller's own object when already frozen and BINARY" do
+      frozen = bytes.b.freeze
+      image = described_class.from_content(frozen, format: :emf)
+
+      expect(image.content).to be(frozen)
+    end
+  end
 end

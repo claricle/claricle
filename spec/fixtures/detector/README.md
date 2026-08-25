@@ -15,11 +15,19 @@ each case sits next to the assertion that explains it.
 
 `valid.png` is a genuinely valid file — nothing to qualify.
 
-`valid.emf` is very nearly one. Its `nSize` of 88 and `nRecords` of 17
-are both **correct**: `nSize` measures the header record, not the file,
-and `nRecords` counts the header plus the 16 records `Emf.parse` returns.
-The single real defect is `nBytes`, which reports 0 rather than the file
-length.
+`valid.emf` is very nearly one. Measured 2026-08-20, it has **two**
+defects:
+
+- `nBytes` reports 0 rather than the file length of 364.
+- `nHandles` reports 1, but object indexes 1-4 are used, and MS-EMF
+  sizes the object table as `Handles + 1` because index zero is
+  reserved — so the correct value is 4.
+
+Its `nSize` of 88 and `nRecords` of 17 are both **correct**. `nSize`
+measures the header record, not the file. `nRecords` counts 17 because
+a raw walk finds 17 records ending exactly at byte 364;
+`metafile.records` returns 16 only because `Emf.parse` stores the header
+separately and excludes it.
 
 The two WMF files are headers with no valid record data behind them.
 

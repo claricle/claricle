@@ -21,11 +21,12 @@ RSpec.describe "Claricle::Registry" do
       handlers = Claricle.const_get(:Handlers)
 
       expect(registry.const_get(:HANDLER_CLASSES))
-        .to eq([handlers.const_get(:Png), handlers.const_get(:Svg)])
+        .to eq([handlers.const_get(:Metafile), handlers.const_get(:Png),
+                handlers.const_get(:Svg)])
     end
 
     it "exposes exactly the formats those handlers declare" do
-      expect(registry.formats).to eq(%i[png svg])
+      expect(registry.formats).to eq(%i[emf png svg])
     end
 
     # Ownership, not membership: a format list alone would pass a handler
@@ -33,12 +34,14 @@ RSpec.describe "Claricle::Registry" do
     it "maps each format to its owning handler" do
       handlers = Claricle.const_get(:Handlers)
 
+      expect(registry.handler_for(:emf)).to be(handlers.const_get(:Metafile))
       expect(registry.handler_for(:png)).to be(handlers.const_get(:Png))
       expect(registry.handler_for(:svg)).to be(handlers.const_get(:Svg))
     end
 
     # Derived, so it cannot advertise an operation still on Base.
     it "reports only the capabilities each handler has implemented" do
+      expect(registry.capabilities_for(:emf)).to eq([:inspect])
       expect(registry.capabilities_for(:png)).to eq([:inspect])
       expect(registry.capabilities_for(:svg)).to eq([:inspect])
     end
@@ -162,7 +165,7 @@ RSpec.describe "Claricle::Registry" do
       ok, output = run.call('require "claricle/registry"; ' \
                             "print Claricle.const_get(:Registry).formats.inspect")
       expect(ok).to be(true), "subprocess failed: #{output}"
-      expect(output).to eq("[:png, :svg]")
+      expect(output).to eq("[:emf, :png, :svg]")
     end
 
     it "loads handlers/base.rb without the entry point" do
