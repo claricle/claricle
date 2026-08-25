@@ -4,6 +4,7 @@ require "English"
 require "emf"
 require "json"
 require "tempfile"
+require "timeout"
 
 RSpec.describe "Claricle metafile handler" do
   let(:handler) { Claricle.const_get(:Handlers).const_get(:Metafile).new }
