@@ -430,8 +430,10 @@ RSpec.describe Claricle::Models do
         expect(Marshal.load(Marshal.dump(inspection)).meta).to eq({ "box" => {} })
       end
 
-      # lutaml omits explicitly-empty values from `to_hash`, so a payload
-      # built from it lost the difference between "absent" and "empty".
+      # `meta` carries `render_empty: true`, so `to_hash` itself no longer
+      # drops an explicitly empty one -- the case that would still fail on
+      # a `to_hash`-built payload is a present-but-empty nested MODEL,
+      # covered next. This one pins the marshalled round trip regardless.
       it "keeps an explicitly empty hash rather than reloading it as nil" do
         inspection = models::Inspection.new(format: "png", parse_status: "ok", meta: {})
 
@@ -639,7 +641,28 @@ RSpec.describe Claricle::Models do
         .to raise_error(FrozenError)
 
       expect(retained.instance_variable_get(:@claricle_sealed)).to be_falsey
-      expect { retained.seal }.to raise_error(FrozenError)
+      expect { retained.send(:seal) }.to raise_error(FrozenError)
+    end
+
+    # `seal` freezes without revalidating -- that is what recursion needs
+    # it to do, since a child's own `finalize` already validated it. Public,
+    # a caller holding a model retained from a failed construction could
+    # mutate it into any shape and freeze it straight past validation:
+    # measured, a retained Issue set to `severity: "bogus"` sealed cleanly
+    # and serialized. Protected closes that without touching recursion,
+    # which calls `seal` on a sibling instance from inside `seal` itself.
+    it "refuses to freeze a poisoned, retained model through the public surface" do
+      retained = nil
+      expect { models::Report.new(issues: [externally_frozen]) { |r| retained = r } }
+        .to raise_error(FrozenError)
+
+      # Fix up what made construction fail, then poison a real attribute --
+      # a caller doing this and calling the old public `seal` used to freeze
+      # the object with no revalidation in between.
+      retained.issues = []
+      retained.instance_variable_set(:@source_path, 42)
+      expect { retained.seal }.to raise_error(NoMethodError, /protected method/)
+      expect(retained).not_to be_frozen
     end
 
     it "is idempotent, so an aggregate can seal members twice" do
@@ -797,7 +820,7 @@ RSpec.describe Claricle::Models do
     end
   end
 
-  # lutaml-model 0.8.19's `:hash` type is shaped for XML and treats three
+  # lutaml-model 0.8.19's `:hash` type is shaped for XML and treats two
   # key names as structure rather than data. `meta` is whatever a handler
   # read out of a file, and an SVG root legitimately carries `elements`
   # or `text` as an attribute name -- inspecting one crashed the CLI.
