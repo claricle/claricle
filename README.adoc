@@ -164,19 +164,18 @@ lib/claricle/
   image.rb             # the object every operation takes
   registry.rb          # frozen format -> handler map, empty today
   handlers/base.rb     # what a handler subclasses
-  models/              # Location, Issue, Report, Inspection, FreeFormHash
+  models/              # Location, Issue, Report, Inspection
   errors.rb            # Error, UnknownFormat, UnsupportedFormat, ...
   cli.rb               # Thor CLI and the exit-code Runner
 ----
 
-`Detector`, `Registry`, `Handlers::Base` and `Models::Base` are private
-constants. The public surface is `Claricle.detect`, `Claricle::Image`,
+`Detector`, `Registry`, `Handlers::Base`, `Models::Base`,
+`Models::FreeFormHash` and `Models::Validation` are private constants.
+The public surface is `Claricle.detect`, `Claricle::Image`,
 `Claricle::Cli` (including `Cli::Runner` and `Runner::Status`),
 `Claricle::VERSION`, the error classes, and the model classes
-`Models::FreeFormHash`, `Models::Inspection`, `Models::Issue`,
-`Models::Location` and `Models::Report`. `Models::Marshalling` and
-`Models::Validation` are reachable too, but they are mixins
-`Inspection`, `Issue`, `Location` and `Report` use rather than API.
+`Models::Inspection`, `Models::Issue`, `Models::Location` and
+`Models::Report`.
 
 === Adding a format
 
