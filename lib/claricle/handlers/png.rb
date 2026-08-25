@@ -26,9 +26,9 @@ module Claricle
       METRES_PER_INCH = 0.0254
 
       # An allowlist, not "everything except IDAT". These two chunks are
-      # the only ones anything below reads, and skipping IDAT alone still
-      # kept whatever else the file carried -- measured: a PNG with a
-      # 4 MB tEXt held all 4 MB to reach 13 bytes of IHDR.
+      # the only ones `gather` ever reads the payload of -- everything
+      # else is skipped over unread, so a PNG carrying a huge ancillary
+      # chunk never costs more than its own 8-byte header (D-bounded-read).
       WANTED_CHUNKS = %w[IHDR pHYs].freeze
 
       # png_conform's own vocabulary, verified against ImageInfo#color_type
@@ -43,9 +43,135 @@ module Claricle
         6 => "truecolor+alpha"
       }.freeze
 
+      # Headroom over IHDR_BYTES (13) and PHYS_BYTES (9): neither
+      # `readable` nor `dpi` ever needs more of a wanted chunk than
+      # that, so nothing here trusts a declared length past this cap --
+      # not even for IHDR or pHYs themselves (D-bounded-read).
+      MAX_CHUNK_READ = 32
+
+      # What `ChunkReader#gather` collects. png_conform's own chunk
+      # object is gone from this handler entirely now that its bytes
+      # come from a hand read rather than `StreamingReader#each_chunk`;
+      # only `.type` and `.data` were ever read off it, so this replaces
+      # it exactly.
+      Chunk = Data.define(:type, :data)
+
+      # Drives a chunk stream's raw IO directly, deciding purely from an
+      # 8-byte header whether to read a chunk's payload or skip it --
+      # kept apart from PNG metadata interpretation (IHDR/pHYs decoding,
+      # dpi, colour spaces) so the two concerns stay easy to read apart.
+      #
+      # png_conform 0.1.4 has no public API that exposes a chunk's
+      # length+type without first reading its data (measured against
+      # every method on `StreamingReader`), so bounding the read means
+      # reading the header by hand and deciding before the payload is
+      # ever touched.
+      class ChunkReader
+        def initialize(io)
+          @io = io
+        end
+
+        # `into` doubles as the "already captured" record -- no separate
+        # tracking is needed since `WANTED_CHUNKS` only has two entries
+        # -- so a second chunk of a type already in `into` is skipped
+        # exactly like an unwanted one, keeping only the first.
+        def gather(into:)
+          loop do
+            length, type = read_header
+            break unless type && type != "IEND"
+
+            if wanted?(type, into)
+              break unless capture!(type, length, into: into)
+            else
+              skip(length + 4) # payload plus the CRC neither side reads
+            end
+          end
+        end
+
+        private
+
+        attr_reader :io
+
+        # A wanted type not already in `into` -- the second of two
+        # chunks sharing a type is treated exactly like an unwanted one.
+        def wanted?(type, into)
+          WANTED_CHUNKS.include?(type) && into.none? { |chunk| chunk.type == type }
+        end
+
+        # `nil` on a short payload or a short CRC -- either means this
+        # chunk didn't fully arrive, so `gather` stops rather than
+        # keeping a partial read.
+        def capture!(type, length, into:)
+          data = read_chunk_data(length)
+          return nil unless data && read_crc
+
+          into << Chunk.new(type: type, data: data)
+          data
+        end
+
+        # `nil` on a short or absent header -- the same "stop, keep what
+        # `into` already holds" outcome a truncated read used to reach
+        # by raising and being rescued.
+        def read_header
+          header = io.read(8)
+          return [nil, nil] unless header && header.bytesize == 8
+
+          header.unpack("Na4")
+        end
+
+        # Reads at most MAX_CHUNK_READ bytes of a wanted chunk's
+        # payload, and accounts for the rest of `length` by skipping it
+        # -- so a chunk declaring more than the cap (an
+        # attacker-labelled "IHDR", or simply a real IHDR with trailing
+        # bytes) never leaves the stream misaligned for whatever chunk
+        # comes next. `nil` on a short read: a wanted chunk that didn't
+        # fully arrive is truncation, not something to keep.
+        def read_chunk_data(length)
+          wanted = [length, MAX_CHUNK_READ].min
+          data = io.read(wanted)
+          return nil unless data && data.bytesize == wanted
+
+          skip(length - wanted) if length > wanted
+          data
+        end
+
+        # Read, not skipped: a wanted chunk is only appended to `into`
+        # once its CRC is confirmed present, matching png_conform's own
+        # atomic chunk read, which never hands `gather` a chunk whose
+        # CRC didn't fully arrive either.
+        def read_crc
+          crc = io.read(4)
+          crc && crc.bytesize == 4
+        end
+
+        # `seek`, unless the IO can't. `Errno::ESPIPE` is what a pipe or
+        # `/dev/fd/<n>` raises -- input `Image.from_path` accepts today,
+        # and which `Detector`'s own specs already treat as a supported
+        # shape rather than an accident. Falling back to reading and
+        # discarding in bounded increments keeps memory capped even
+        # though the byte count read off a pipe is not.
+        def skip(length)
+          io.seek(length, IO::SEEK_CUR)
+        rescue Errno::ESPIPE
+          drain(length)
+        end
+
+        def drain(length)
+          remaining = length
+          while remaining.positive?
+            requested = [remaining, MAX_CHUNK_READ].min
+            chunk = io.read(requested)
+            break unless chunk
+
+            remaining -= chunk.bytesize
+            break if chunk.bytesize < requested
+          end
+        end
+      end
+
       private_constant :IHDR_LAYOUT, :IHDR_BYTES, :PHYS_LAYOUT, :PHYS_BYTES,
                        :METRE_UNIT, :METRES_PER_INCH, :WANTED_CHUNKS,
-                       :COLOR_SPACES
+                       :COLOR_SPACES, :MAX_CHUNK_READ, :Chunk, :ChunkReader
 
       def inspection(image)
         chunks = read_chunks(image)
@@ -85,27 +211,27 @@ module Claricle
       # raised the truncation error and reported "PNG header (IHDR) could
       # not be read" for a header this had just read.
       #
-      # Measured against StreamingReader, both malformed tails take the
-      # SAME route -- `IOError: data truncated` -- so the loss was
-      # uniform, not an arbitrary cliff between two exception classes. An
-      # earlier version of this comment claimed a data-short chunk raises
-      # a swallowed EOFError; that is not what this reader does.
+      # A truncated chunk no longer raises to get that behaviour --
+      # `ChunkReader#gather` reads its own header, payload and CRC by
+      # hand and stops the loop on any short read, so "keep what's
+      # already collected" is just where the loop ends, not something
+      # caught here.
       def read_chunks(image)
         require "png_conform"
 
         chunks = []
         image.with_path do |path|
-          PngConform::Readers::StreamingReader.open(path) { |reader| gather(reader, into: chunks) }
+          PngConform::Readers::StreamingReader.open(path) { |reader| ChunkReader.new(reader.io).gather(into: chunks) }
         end
         chunks
-      # The allowlist, measured against png_conform 0.1.4 rather than
-      # assumed. Each entry is a way the reader fails on *input*, which is
-      # a "failed" inspection, not a defect. IOError is the reader's own
-      # bare "data truncated", raised when a chunk header promises more
-      # bytes than the file holds. EINVAL is what a chunk declaring
-      # 0x8000000d bytes produces, when the reader asks the OS for that
-      # many. Anything else is a defect and propagates to exit 4 rather
-      # than being absorbed.
+      # `gather` no longer hands a declared length to `#read` unbounded,
+      # so `Errno::EINVAL` (what a chunk declaring 0x8000000d bytes used
+      # to produce asking the OS for that many) and the reader's own
+      # `IOError: data truncated` cannot happen from THIS path any more
+      # -- measured against png_conform 0.1.4 rather than assumed. This
+      # is scoped to malformed input, not "impossible in general": an
+      # `IOError` from an IO that closes unexpectedly mid-inspection
+      # would still be a real defect and still propagate to exit 4.
       #
       # ENOENT is deliberately absent. A file that vanished is not
       # malformed input, and absorbing it reported "PNG header (IHDR)
@@ -113,27 +239,13 @@ module Claricle
       # propagates, and the runner already maps it to exit 2 -- the code
       # the README gives for a missing file.
       #
-      # A short or absent signature raises nothing at all under this
-      # reader -- it yields zero chunks, and the IHDR gate below is what
-      # fails the file. EOFError likewise never escapes: `read_chunk`
-      # rescues it internally.
-      #
       # PngConform::Error stays named although no code path in 0.1.4
       # raises it: it is the delegate's declared parse failure, the
       # gemspec allows any 0.1.x, and a patch release that starts raising
       # it would otherwise turn a bad file into exit 4. ParseError
       # descends from it, so naming both is redundant.
-      rescue PngConform::Error, Errno::EINVAL, IOError
+      rescue PngConform::Error
         chunks
-      end
-
-      # Appends into the caller's array rather than returning one, so a
-      # chunk that fails part-way through does not take the chunks read
-      # before it down with it.
-      def gather(reader, into:)
-        reader.each_chunk do |chunk|
-          into << chunk if WANTED_CHUNKS.include?(chunk.type.to_s)
-        end
       end
 
       # A signature-only file yields zero chunks and raises nothing, and a

@@ -4,6 +4,30 @@ require "png_conform"
 require "stringio"
 require "zlib"
 
+# A StringIO that logs every #read and #seek call (method, argument,
+# position before the call), so a spec can assert not just "no request
+# was ever large" but "this exact byte range was never touched". Built
+# from bytes starting at what `gather` actually receives as `reader.io`
+# -- already positioned past the signature -- rather than a whole file.
+class RecordingIO < StringIO
+  attr_reader :calls
+
+  def initialize(bytes)
+    super
+    @calls = []
+  end
+
+  def read(length = nil)
+    @calls << [:read, length, pos]
+    super
+  end
+
+  def seek(length, whence = IO::SEEK_SET)
+    @calls << [:seek, length, pos]
+    super
+  end
+end
+
 RSpec.describe "Claricle PNG handler" do
   let(:handler) { Claricle.const_get(:Handlers).const_get(:Png).new }
 
@@ -33,6 +57,24 @@ RSpec.describe "Claricle PNG handler" do
 
   def chunk(type, data)
     [data.bytesize].pack("N") + type + data + [Zlib.crc32(type + data)].pack("N")
+  end
+
+  # Like `chunk`, but truncates the CRC to `crc_bytes` instead of the
+  # full 4 -- for pinning that a wanted chunk whose CRC didn't fully
+  # arrive is truncation, not something to keep.
+  def chunk_with_short_crc(type, data, crc_bytes)
+    crc = [Zlib.crc32(type + data)].pack("N")
+    [data.bytesize].pack("N") + type + data + crc[0, crc_bytes]
+  end
+
+  # `ChunkReader` is a private nested constant on the handler class --
+  # reached with `const_get`, the same way `handler` above reaches the
+  # handler itself, since `private_constant` doesn't block that.
+  def chunk_reader_for(bytes)
+    io = RecordingIO.new(bytes)
+    chunk_reader_class = Claricle.const_get(:Handlers).const_get(:Png).const_get(:ChunkReader)
+
+    [chunk_reader_class.new(io), io]
   end
 
   # `validate` returns the FileAnalysis itself, not a result wrapping one.
@@ -162,6 +204,19 @@ RSpec.describe "Claricle PNG handler" do
       expect(inspect_file("short_ihdr.png").parse_status).to eq("failed")
     end
 
+    # The fixture above only pins one length (9). 10, 11 and 12 are the
+    # rest of "fewer than 13" -- a regression that rejected only 9 bytes
+    # but accepted 10-12 would still pass without these.
+    (10..12).each do |length|
+      it "fails a well-formed IHDR carrying exactly #{length} bytes" do
+        signature = [137, 80, 78, 71, 13, 10, 26, 10].pack("C*")
+        bytes = signature + chunk("IHDR", "\x01" * length)
+
+        expect(handler.inspection(Claricle::Image.from_content(bytes, format: :png)).parse_status)
+          .to eq("failed")
+      end
+    end
+
     it "reports one error-severity issue when the header is unreadable" do
       issues = inspect_file("signature_only.png").issues
 
@@ -176,17 +231,15 @@ RSpec.describe "Claricle PNG handler" do
     end
 
     # The example above only reaches clean EOF. Cut a file two bytes into
-    # the NEXT chunk and the reader raises instead, which used to throw
-    # away the IHDR it had already read and report "PNG header (IHDR)
-    # could not be read" about a header this had just parsed.
+    # the NEXT chunk and `gather` stops the loop instead, which used to
+    # throw away the IHDR it had already read and report "PNG header
+    # (IHDR) could not be read" about a header this had just parsed.
     #
-    # Both tails, though measurement says they take the SAME route:
-    # each raises `IOError: data truncated`. They are kept as two cases
-    # because they are differently shaped inputs, not because they prove
-    # two exception paths -- an earlier comment claimed they did, and a
-    # probe disproved it. Ending immediately after a chunk TYPE raises
-    # nothing at all (the reader yields one chunk), so no fixture here
-    # reaches EOFError.
+    # Both tails take the same route: a short/absent header (or, for the
+    # second, a header for an unwanted type whose declared length reaches
+    # past EOF) ends the loop with whatever was already in `into`. They
+    # are kept as two cases because they are differently shaped inputs,
+    # not because they exercise two different mechanisms.
     {
       "a chunk header cut in half" => "\x00\x00",
       "a chunk promising data the file lacks" => "\x00\x00\x00\x40IDAT\x01\x02"
@@ -196,6 +249,46 @@ RSpec.describe "Claricle PNG handler" do
         inspection = handler.inspection(Claricle::Image.from_content(bytes, format: :png))
 
         expect(inspection).to have_attributes(parse_status: "ok", width: 4.0, height: 3.0)
+      end
+    end
+
+    # A wanted chunk longer than MAX_CHUNK_READ still has to leave the
+    # stream aligned for whatever comes after it -- the unread remainder
+    # of its declared length must be skipped, not left for the next
+    # header read to misinterpret.
+    it "still finds IHDR after an oversized wanted chunk ahead of it" do
+      signature = [137, 80, 78, 71, 13, 10, 26, 10].pack("C*")
+      header = [4, 3, 8, 6, 0, 0, 0].pack("NNC5")
+      oversized_phys = chunk("pHYs", "x" * 40) # declared and actual length both exceed 32
+      bytes = signature + oversized_phys + chunk("IHDR", header) + chunk("IEND", "")
+
+      inspection = handler.inspection(Claricle::Image.from_content(bytes, format: :png))
+
+      expect(inspection).to have_attributes(parse_status: "ok", width: 4.0, height: 3.0)
+    end
+
+    # A wanted chunk is only kept once its CRC is confirmed present --
+    # png_conform's own atomic chunk read never hands `gather` a chunk
+    # whose CRC didn't fully arrive either, and the new hand-rolled read
+    # has to keep that guarantee now that it reads the CRC itself.
+    describe "a truncated CRC on a wanted chunk" do
+      (0...4).each do |crc_bytes|
+        it "does not keep an IHDR whose CRC carries only #{crc_bytes} bytes" do
+          signature = [137, 80, 78, 71, 13, 10, 26, 10].pack("C*")
+          header = [4, 3, 8, 6, 0, 0, 0].pack("NNC5")
+          bytes = signature + chunk_with_short_crc("IHDR", header, crc_bytes)
+
+          expect(handler.inspection(Claricle::Image.from_content(bytes, format: :png)).parse_status)
+            .to eq("failed")
+        end
+      end
+
+      it "does not let a pHYs with a truncated CRC report a dpi" do
+        payload = [2835, 2835, 1].pack("NNC")
+        bytes = png_with_trailing(chunk_with_short_crc("pHYs", payload, 2))
+        inspection = handler.inspection(Claricle::Image.from_content(bytes, format: :png))
+
+        expect(inspection).to have_attributes(parse_status: "ok", dpi: nil)
       end
     end
   end
@@ -253,8 +346,10 @@ RSpec.describe "Claricle PNG handler" do
       end
     end
 
-    # A chunk declaring 0x8000000d bytes makes the reader ask the OS for
-    # that many, which is EINVAL, not a PngConform error.
+    # A chunk declaring 0x8000000d bytes now only ever gets read up to
+    # MAX_CHUNK_READ -- with 17 real bytes left in this fixture, that
+    # request comes back short, which is truncation, not an EINVAL from
+    # asking the OS for the whole declared length.
     it "reports an absurd chunk length as failed" do
       header = [4, 3, 8, 6, 0, 0, 0].pack("NNC5")
       signature = [137, 80, 78, 71, 13, 10, 26, 10].pack("C*")
@@ -270,9 +365,14 @@ RSpec.describe "Claricle PNG handler" do
     # raises this. It is the delegate's declared parse failure and the
     # gemspec admits any 0.1.x, so this pins what happens the day a patch
     # release starts raising it -- "failed", not exit 4.
+    #
+    # Raises the BASE `PngConform::Error`, not `ParseError`: `ParseError`
+    # is a subclass, so a regression that narrowed the rescue clause to
+    # `ParseError` only would still pass a spec that raised `ParseError`.
+    # Raising the base is what a narrowed rescue clause would miss.
     it "absorbs the delegate's own error class" do
       allow(PngConform::Readers::StreamingReader).to receive(:open)
-        .and_raise(PngConform::ParseError, "bad chunk")
+        .and_raise(PngConform::Error, "bad chunk")
 
       expect(inspect_file("valid.png").parse_status).to eq("failed")
     end
@@ -315,12 +415,10 @@ RSpec.describe "Claricle PNG handler" do
     end
   end
 
-  # An allowlist, so IDAT and IEND both stay out. Skipping IDAT alone left
-  # every other chunk in memory: measured, a 4 MB tEXt was held whole to
-  # reach the 13 bytes of IHDR anything here actually reads.
+  # An allowlist, so IDAT and IEND both stay out. `gather` skips both
+  # over rather than reading them, so a PNG carrying a huge ancillary
+  # chunk never costs more than that chunk's own 8-byte header.
   describe "what it keeps" do
-    # "retains", not "reads": StreamingReader materialises IHDR, pHYs,
-    # IDAT and IEND, and `gather` keeps only the wanted ones.
     it "retains only the wanted chunks" do
       chunks = handler.send(:read_chunks,
                             Claricle::Image.from_path(fixture("phys.png")))
@@ -328,14 +426,53 @@ RSpec.describe "Claricle PNG handler" do
       expect(chunks.map { |chunk| chunk.type.to_s }).to eq(%w[IHDR pHYs])
     end
 
-    # "never RETAINS", not "never reads": StreamingReader materialises
-    # every chunk and `gather` filters afterwards, so this measures what
-    # survives collection, not what was pulled off disk.
+    # "never retains", not "never reads": this is the collection-only
+    # half of the claim. The bounded-reads examples below are the other
+    # half -- that the chunk's bytes were never pulled off disk either.
     it "drops a large ancillary chunk it never retains" do
       bytes = png_with_trailing(chunk("tEXt", "k\x00#{"x" * 100_000}") + chunk("IEND", ""))
       chunks = handler.send(:read_chunks, Claricle::Image.from_content(bytes, format: :png))
 
       expect(chunks.sum { |chunk| chunk.data.bytesize }).to eq(13)
+    end
+  end
+
+  # `read_chunks` collects a large unwanted chunk's own bytes today by
+  # driving `gather` end to end -- these instead drive `gather` directly
+  # against a recording double, so the assertion is on what the IO was
+  # actually asked to read, not only on what `into` ends up holding.
+  describe "bounded reads" do
+    it "never asks the IO to read anywhere near a huge declared length" do
+      header = [4, 3, 8, 6, 0, 0, 0].pack("NNC5")
+      # A declared length of 500,000,000 backed by only 4 real trailing
+      # bytes -- the point is what gets REQUESTED, not what exists.
+      huge = "#{[500_000_000].pack("N")}tEXtxxxx"
+      chunk_reader, io = chunk_reader_for(chunk("IHDR", header) + huge)
+      into = []
+
+      chunk_reader.gather(into: into)
+
+      expect(into.map(&:type)).to eq(["IHDR"])
+      reads = io.calls.select { |method, _n, _pos| method == :read }
+      expect(reads.map { |_method, n, _pos| n }.max).to be <= 32
+      # The unwanted chunk's declared length is what moved the IO past
+      # it -- a seek, not a read, is where the huge number appears.
+      expect(io.calls).to include([:seek, 500_000_004, 33])
+    end
+
+    it "keeps only the first of two chunks sharing a wanted type" do
+      kept = [4, 3, 8, 6, 0, 0, 0].pack("NNC5")
+      dropped = [8, 6, 8, 6, 0, 0, 0].pack("NNC5")
+      chunk_reader, io = chunk_reader_for(chunk("IHDR", kept) + chunk("IHDR", dropped))
+      into = []
+
+      chunk_reader.gather(into: into)
+
+      expect(into.map(&:data)).to eq([kept])
+      # The second IHDR's 13-byte payload is skipped, not read: only one
+      # 13-byte read exists in the log, for the first chunk.
+      payload_reads = io.calls.count { |method, n, _pos| method == :read && n == 13 }
+      expect(payload_reads).to eq(1)
     end
   end
 
@@ -365,5 +502,28 @@ RSpec.describe "Claricle PNG handler" do
     expect(image.inspection).to have_attributes(
       parse_status: "ok", width: 4.0, height: 3.0
     )
+    # `Image#checked_path` owns what it stores: a frozen String, not the
+    # Pathname itself. Storing the Pathname directly would still pass
+    # every assertion above -- `StreamingReader.open` accepts one just
+    # as happily as a String -- so this is what would actually catch it.
+    expect(image.path).to be_a(String).and be_frozen
+  end
+
+  # `Image.from_path` accepts any path, including one that cannot be
+  # sought -- `Detector`'s own specs already treat a pipe as a supported
+  # input shape. `skip`'s seek falls back to a bounded drain on
+  # `Errno::ESPIPE`, so this keeps working rather than raising.
+  it "inspects a PNG read through a non-seekable pipe" do
+    reader, writer = IO.pipe
+    Thread.new do
+      writer.write(File.binread(fixture("valid.png")))
+      writer.close
+    end
+
+    inspection = handler.inspection(Claricle::Image.new(format: :png, path: "/dev/fd/#{reader.fileno}"))
+
+    expect(inspection).to have_attributes(parse_status: "ok", width: 4.0, height: 3.0)
+  ensure
+    reader.close
   end
 end
