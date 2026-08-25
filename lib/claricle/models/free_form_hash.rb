@@ -7,7 +7,7 @@ module Claricle
     # A Hash attribute that stores exactly what it was given.
     #
     # lutaml-model's own `:hash` type is shaped for XML, and it treats
-    # three key names as structure rather than data. Measured on 0.8.19:
+    # two key names as structure rather than data. Measured on 0.8.19:
     #
     #   {"node" => {"text" => "hi", "lang" => "en"}}  ->  {"node" => {"lang" => "en"}}
     #   {"elements" => {"width" => 1}}                ->  {"width" => 1}

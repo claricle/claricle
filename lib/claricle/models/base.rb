@@ -206,10 +206,15 @@ module Claricle
         nested_models.each(&:validate_deeply)
       end
 
+      protected
+
       # Idempotent on our own bookkeeping rather than on `frozen?`, so a
       # model frozen by other code is not mistaken for a sealed one. An
-      # empty one never reaches here -- validation rejects it first -- and
-      # a populated one dies partway through, which is the point.
+      # empty model with a required attribute never reaches here --
+      # validation rejects it first; Report and Location have none, so an
+      # empty instance of either is valid and does reach this point. A
+      # populated one that dies does so partway through, which is the
+      # externally-frozen case tested below.
       #
       # The marker goes on last, beside the freeze it stands for. Set
       # first, a child that refused to seal left the parent marked sealed
@@ -218,10 +223,22 @@ module Claricle
       # itself sealed, took another issue, and changed its own verdict.
       # There is no cycle for an early marker to break: nesting runs
       # Report -> Issue -> Location and stops.
+      #
+      # Protected, not public: it freezes without revalidating, so a
+      # caller holding a model that failed to finalize (the block form of
+      # `new` hands one over before the exception) could mutate it into
+      # any shape and freeze it straight past `validate_deeply` -- measured,
+      # a poisoned Issue sealed with `severity: "bogus"` and serialized.
+      # `finalize` is the only public door, and it always validates first.
+      # Explicit block form for the recursive call below: `Symbol#to_proc`
+      # calls `public_send`, which a protected method refuses.
       def seal
         return self if @claricle_sealed
 
-        nested_models.each(&:seal)
+        # rubocop:disable Style/SymbolProc -- &:seal calls public_send,
+        # which a protected method refuses; the block calls it directly.
+        nested_models.each { |model| model.seal }
+        # rubocop:enable Style/SymbolProc
         freeze_attributes
         # Lutaml tracks which attributes still hold defaults in a mutable
         # hash, and `using_default_for` is public. Flipping an entry on a
