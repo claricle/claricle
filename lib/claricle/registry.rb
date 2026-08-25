@@ -20,9 +20,9 @@ module Claricle
         HANDLERS.keys.sort
       end
 
-      # One row per format, for the `formats` command. Capabilities are
-      # derived from the handler, so a row cannot advertise an operation
-      # the handler has not implemented.
+      # What one format's handler can actually do -- the `formats`
+      # command builds its row from this. Derived from the handler, so a
+      # row cannot advertise an operation it has not implemented.
       def capabilities_for(format)
         handler_for(format).capabilities
       end

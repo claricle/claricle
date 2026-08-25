@@ -132,7 +132,12 @@ RSpec.describe Claricle::Cli::Runner do
     end
 
     {
-      ["--"] => /\ACommands:\n\s+\S+ help \[COMMAND\].*\n\s+\S+ version.*\n\n\z/,
+      # The command inventory is pinned by its own example. This one is
+      # about `--` reaching general help at all, so it asserts the SHAPE
+      # -- a well-formed Commands block -- and lets the inventory grow as
+      # handlers land. Pinning both here made adding a command look like
+      # a terminator regression.
+      ["--"] => /\ACommands:\n(?:\s+\S+ .+\n)+\n\z/,
       %w[-- version] => /\AUsage:\n\s+\S+ version\n\nDisplay Claricle version\n\z/,
       %w[-- --help] => /\AUsage:\n\s+\S+ help \[COMMAND\]\n\nDescribe available commands or one specific command\n\z/
     }.each do |arguments, expected_output|
@@ -259,7 +264,7 @@ RSpec.describe Claricle::Cli::Runner do
     # the one spelling the examples above prove the CLI rejects. Thor
     # builds the prefix from $0, which is `rspec` here, so the assertion
     # is on the command name rather than the whole line.
-    it "names the documented command when the file is missing" do
+    it "names the documented command when no file is given" do
       stream = StringIO.new
       expect(described_class.run(["inspect"], output: stream)).to eq(2)
 

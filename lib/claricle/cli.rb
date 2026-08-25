@@ -274,7 +274,12 @@ module Claricle
         # path and a typo is an ordinary user error rather than a defect.
         def error_message(error)
           message = utf8_message(error.message)
-          return "claricle: #{message}" if error.is_a?(Error) || error.is_a?(Thor::Error)
+          # Errno::ENOENT joins the bare-message set now that a command
+          # takes a path. It was already exit code 2, but its message was
+          # unreachable while nothing opened a file, so naming the class
+          # went unnoticed. A missing file is an ordinary user mistake and
+          # reads as one.
+          return "claricle: #{message}" if MAPPED.any? { |kind| error.is_a?(kind) }
 
           "claricle: #{error.class}: #{message}"
         end

@@ -149,7 +149,7 @@ so no commit declares a capability the CLI can't yet deliver.
    cases, and `conformance_batch` collecting every outcome without
    short-circuiting.
 3. One handler per commit: `conformance_report` TDD against valid and
-   invalid fixtures, `capabilities :conform`, and the `formats`
+   invalid fixtures, the derived `conform` capability, and the `formats`
    expected-output update, together. Exit codes 0 and 1 get their
    end-to-end specs with the first handler.
 4. Per-delegate malformed-input allowlist, per operation and stage, so
