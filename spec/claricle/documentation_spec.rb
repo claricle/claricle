@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "stringio"
+require "timeout"
 
 RSpec.describe "the documentation" do
   root = File.expand_path("../..", __dir__)
@@ -26,6 +27,15 @@ RSpec.describe "the documentation" do
     expect(lines).to include(snippet), "README no longer shows the line: #{snippet}"
   end
 
+  # `shows` is for a code line, which the README never wraps. Prose is
+  # hard wrapped, so a sentence is matched with its wrap points left
+  # free. Each word is escaped, so backticks and punctuation inside the
+  # claim stay literal.
+  def claims(sentence)
+    pattern = /#{sentence.split.map { |word| Regexp.escape(word) }.join('\s+')}/
+    expect(readme).to match(pattern), "README no longer claims: #{sentence}"
+  end
+
   describe "the examples in Usage" do
     it "detects from bytes and from an IO" do
       shows('Claricle.detect(File.binread("logo.png"))   # => :png')
@@ -37,21 +47,6 @@ RSpec.describe "the documentation" do
         file.flush
         File.open(file.path, "rb") { |io| expect(Claricle.detect(io)).to eq(:png) }
       end
-    end
-
-    # Pins the bound, not just the verdict: a short fixture like `png`
-    # detects conclusively long before any bound matters, so a spec that
-    # only checked the returned format would pass whether `detect`
-    # drained the IO to EOF or stopped early. This asserts what is left
-    # on the IO afterward.
-    it "leaves the IO short of EOF once the probe bound is hit, as documented" do
-      shows("with unread bytes still on it, and `eof?` is false. A caller who needs")
-      bound = Claricle.const_get(:Detector)::MAX_PROBE_BYTES
-      garbage = ("\x00" * (bound + 1_000)).b
-      io = StringIO.new(garbage)
-      expect { Claricle.detect(io) }.to raise_error(Claricle::UnknownFormat)
-      expect(io.pos).to eq(bound)
-      expect(io.eof?).to be(false)
     end
 
     it "builds an Image from a path and reads its format and content" do
@@ -91,6 +86,50 @@ RSpec.describe "the documentation" do
   end
 
   describe "what the README claims" do
+    # The verdict alone pins nothing here. A 70-byte PNG settles after
+    # its 8-byte signature, so a spec that only checked the returned
+    # format would stay green whether detection drained the IO, stopped
+    # on the byte that settled it, or stopped on the allowance. Where
+    # the IO is left afterward is the part the README makes a claim
+    # about, so that is what these assert.
+    describe "how far detection reads an IO" do
+      let(:bound) { Claricle.const_get(:Detector)::MAX_PROBE_BYTES }
+
+      it "reads to the allowance even once the format has settled" do
+        claims("A file or a `StringIO` hands over the whole allowance at once")
+        io = StringIO.new(png + ("x" * (bound + 1_000)).b)
+        expect(Claricle.detect(io)).to eq(:png)
+        expect(io.pos).to eq(bound)
+        expect(io.eof?).to be(false)
+      end
+
+      it "stops on the allowance when nothing ever settles it" do
+        claims("the IO sits mid-stream and `eof?` is false")
+        io = StringIO.new(("\x00" * (bound + 1_000)).b)
+        expect { Claricle.detect(io) }.to raise_error(Claricle::UnknownFormat)
+        expect(io.pos).to eq(bound)
+        expect(io.eof?).to be(false)
+      end
+
+      # A real pipe rather than a StringIO with `readpartial` stubbed:
+      # the claim is about an IO that hands over only what has arrived,
+      # and a stub would restate the assumption instead of testing it.
+      # The writer stays open, so a read that waited for the full
+      # allowance would block forever -- Timeout turns that regression
+      # into a failure rather than a hung suite.
+      it "settles a short complete image without waiting for a pipe to close" do
+        claims("A pipe or a socket hands over what has arrived")
+        reader, writer = IO.pipe
+        reader.binmode
+        writer.binmode
+        writer.write(png)
+        expect(Timeout.timeout(5) { Claricle.detect(reader) }).to eq(:png)
+      ensure
+        writer&.close
+        reader&.close
+      end
+    end
+
     # Exact, not inclusion-only: an inclusion check misses a command the
     # CLI has that the README doesn't -- Thor 1.5 adds `tree` to every
     # subclass, and that slipped past an inclusion-only version of this
@@ -149,6 +188,20 @@ RSpec.describe "the documentation" do
         .to eq(%i[Cli ConversionError Error Image InvocationError Models
                   UnknownFormat UnsupportedFormat VERSION])
       expect(Claricle.methods(false)).to eq([:detect])
+    end
+
+    # The list above stops at `Models` and says nothing about what is
+    # inside it, which is how `FreeFormHash` reached the public surface
+    # without the README ever naming it. Assert the nested list too, and
+    # that the README accounts for every constant on it.
+    it "accounts for every constant Models exposes" do
+      expect(Claricle::Models.constants.sort)
+        .to eq(%i[FreeFormHash Inspection Issue Location Marshalling
+                  Report Validation])
+      %w[FreeFormHash Inspection Issue Location Report].each do |name|
+        expect(readme).to include("Models::#{name}")
+      end
+      claims("`Models::Marshalling` and `Models::Validation` are reachable too")
     end
   end
 

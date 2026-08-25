@@ -143,9 +143,12 @@ dependency where marked ⚙):
   `run` / `exit_code` / `error_message` to stay under
   `Metrics/MethodLength`. `Runner.run` **returns** an integer and never
   calls `exit`; only `exe/claricle` exits, via
-  `exit Claricle::Cli::Runner.run(ARGV)`. There is no `SystemExit`
-  passthrough — 03's nonconformant exit 1 is a returned integer like
-  every other code, not an exception thrown through the runner.
+  `exit Claricle::Cli::Runner.run(ARGV)`. `run` does rescue `SystemExit`
+  and return its status, bounded to 0-255 with anything outside becoming
+  4 — that replaced the original prescription's "no `SystemExit`
+  passthrough". Nothing is thrown through the runner either way, and
+  03's nonconformant exit 1 stays a returned integer like every other
+  code.
 - **Tooling**: gemspec floor `>= 3.2.0`, add `emf` + `lutaml-model`
   (only what 01 uses; 02 adds the rest) with three-segment constraints
   on the reviewed line — `~> 0.7` is not a pin, it admits every 0.x
@@ -153,25 +156,29 @@ dependency where marked ⚙):
   `TargetRubyVersion: 3.2` + `Metrics/BlockLength` exclude `spec/**/*`
   (rubocop-rspec isn't wired in); CI matrix `['3.2', '3.3']`, extended
   to the newest stable Ruby the gemspec actually admits.
-- **Honesty baseline**: README.adoc, the gemspec description and
-  `sig/claricle.rbs` all describe reality as of 01 — the current README
+- **Honesty baseline**: README.adoc and the gemspec description
+  describe reality as of 01 — the current README
   advertises validation, conversion, compression and a fictional
   `Claricle::Validator` API, and the gemspec advertises compression.
   Later items extend this baseline; 04 does the final rewrite. Merged
   source should never claim capabilities it lacks, release or no
   release.
-- **Require order is no longer load-bearing.** Every file requires what
-  it references, so each loads standalone — verified for `detector`,
-  `image`, `registry`, `errors`, `handlers/base` and the models. That
-  deliberately replaced the original prescription (thor, emf,
-  lutaml/model, version, errors, models, detector, handlers/base,
-  registry, image, cli), which existed only because files relied on the
-  entry point to have loaded their constants first. `registry.rb`
-  requires `handlers/base` itself, next to the `HANDLER_CLASSES` entries
-  that name those classes; `detector.rb` requires `emf` and `rexml`;
-  `models/base.rb` requires `lutaml/model`. `lib/claricle.rb` still
-  requires in a sensible reading order, but nothing breaks if it does
-  not.
+- **Require order is load-bearing for one pair only.** Every file under
+  `lib/` loads standalone except `lib/claricle/cli.rb`, which names
+  `Thor` at class-definition time and raises `uninitialized constant
+  Claricle::Thor` unless `thor` was required first — so `lib/claricle.rb`
+  requiring `thor` ahead of `cli` is a real dependency, not reading
+  order. `detector`, `image`, `registry`, `errors`, `handlers/base` and
+  the models each load on their own, and `lib/claricle.rb` may require
+  them in any order. `detector` is standalone only as far as loading
+  goes: it does not require `errors`, so raising `UnknownFormat` needs
+  `errors` already loaded. That replaced the original prescription
+  (thor, emf, lutaml/model, version, errors, models, detector,
+  handlers/base, registry, image, cli), which existed because every file
+  relied on the entry point to have loaded its constants first.
+  `registry.rb` requires `handlers/base` itself, next to the
+  `HANDLER_CLASSES` entries that name those classes; `detector.rb`
+  requires `emf` and `rexml`; `models/base.rb` requires `lutaml/model`.
 
 ## Do
 
@@ -204,8 +211,10 @@ subjects in quotes):
 7. CLI rebuild + Runner + spec (version → 0, unknown command → 2,
    `LoadError` → 4, `InvocationError` → 2, all three stubs gone).
    "feat: rebuild cli with exit-code runner"
-7b. Honesty baseline: README.adoc, gemspec description and `sig/`
-   describe only what exists. "docs: describe only shipped behaviour"
+7b. Honesty baseline: README.adoc and the gemspec description
+   describe only what exists; `sig/` is deleted rather than kept
+   honest, because RBS is not maintained here.
+   "docs: describe only shipped behaviour"
 8. Final wiring; full `bundle exec rake`; execution-diff against main —
    `bundle exec exe/claricle version`, `bundle exec exe/claricle help`,
    `bundle exec exe/claricle validate x.png; echo $?`, on BOTH revisions
@@ -246,5 +255,5 @@ subjects in quotes):
 `lib/claricle/detector.rb`,
 `lib/claricle/registry.rb`, `lib/claricle/handlers/base.rb`,
 `lib/claricle/image.rb`, `lib/claricle/cli.rb`, `exe/claricle`,
-`README.adoc`, `sig/claricle.rbs`, `spec/claricle/*_spec.rb`,
+`README.adoc`, `spec/claricle/*_spec.rb`,
 `spec/fixtures/detector/`.
