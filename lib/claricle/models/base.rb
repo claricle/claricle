@@ -135,6 +135,120 @@ module Claricle
       end
     end
 
+    # The per-attribute checks `validate_deeply` runs beyond what lutaml
+    # validates on its own. Its own module for the same reason Marshalling
+    # is: one concern, and Base crossed the class-length limit once this
+    # much of it lived there directly.
+    module Validation
+      private
+
+      # One sentence for every one of these checks, and one place that
+      # knows lutaml's ValidationError carries exceptions rather than
+      # Strings -- handed bare Strings, its own `error_messages` blows
+      # up. Subclasses raise through here too.
+      def refuse(name, expectation, got)
+        raise Lutaml::Model::ValidationError,
+              [TypeError.new("#{name} expects #{expectation}, got #{got}")]
+      end
+
+      # A declared model attribute is only cast when it arrives as a hash
+      # from a document. Handed a wrong-typed object directly, lutaml stores
+      # it as-is and the failure surfaces much later as a NoMethodError.
+      def validate_types
+        self.class.attributes.each do |name, attribute|
+          validate_cardinality(name, attribute)
+          validate_finite(name)
+          validate_default_bookkeeping(name, attribute)
+
+          type = attribute.type
+          next unless type.is_a?(Class) && type < Base
+
+          validate_attribute(name, attribute, type)
+        end
+      end
+
+      # `using_default_for` is public on lutaml, for its own deserializer
+      # to mark an attribute absent from the document. A caller can reach
+      # it too -- through the block form of `new`, before this runs -- and
+      # flip a required attribute to "using its default" while it still
+      # holds the value it was actually given. Rendering skips whatever is
+      # marked default, so the value survives every reader and vanishes
+      # from the document -- measured: `to_json` rendered `{"message":"m"}`
+      # for an Issue whose `severity` read back "info", and reloading that
+      # JSON raised `ValidationError: Missing required attribute: severity`.
+      # Required only: a required attribute genuinely using its default
+      # has no value and `validate!` already refused it before this runs,
+      # so seeing one here is always the bookkeeping lying about a value
+      # that IS present, never a legitimate default.
+      def validate_default_bookkeeping(name, attribute)
+        return unless attribute.options[:required]
+        return unless using_default?(name)
+
+        refuse(name, "recorded as explicitly set", "flagged as using its default")
+      end
+
+      # JSON has neither Infinity nor NaN. lutaml coerces both without
+      # complaint -- measured: `{"width":1e400}` deserialized to
+      # Float::INFINITY, the lifecycle froze the model around it, and the
+      # `to_json` that followed raised `JSON::GeneratorError`, so a
+      # document that parsed could not be written back out. Refused here,
+      # where the attribute name is still in hand.
+      def validate_finite(name)
+        value = public_send(name)
+        return unless value.is_a?(Numeric) && !value.finite?
+
+        refuse(name, "a finite number", value)
+      end
+
+      # An enum that is not a collection must be given one value, never
+      # two. lutaml 0.8.19 accepts a list, stores it whole, and its getter
+      # returns only the first element -- so
+      # `Issue.new(severity: ["info", "error"])` validates, reports
+      # `"info"`, and drops `"error"` on the way to JSON. Nothing about
+      # that is visible to a caller.
+      #
+      # Cardinality only, and deliberately so: `severity: ["error"]`
+      # is accepted, because lutaml has already normalised a bare
+      # `"error"` to the same `["error"]` by the time this runs and the
+      # two are no longer distinguishable. Nothing is lost either way.
+      # Deserialization is stricter -- lutaml's own
+      # `CollectionTrueMissingError` rejects any list from a document
+      # before this runs.
+      #
+      # The raw ivar, because the getter is the thing that hides it.
+      def validate_cardinality(name, attribute)
+        return if attribute.collection?
+        return unless attribute.enum?
+
+        # lutaml stores EVERY enum value as an array, so a valid
+        # `severity: "error"` is `["error"]` here and the shape alone
+        # proves nothing. Only a second element is evidence that a list
+        # was passed, and only that loses data.
+        raw = instance_variable_get(:"@#{name}")
+        return unless raw.is_a?(Array) && raw.length > 1
+
+        refuse(name, "a single value", raw.inspect)
+      end
+
+      def validate_attribute(name, attribute, type)
+        value = public_send(name)
+        return validate_type(name, type, value, nullable: true) unless attribute.collection?
+
+        refuse(name, "a collection", value.class) unless value.is_a?(Array)
+
+        value.each { |element| validate_type(name, type, element, nullable: false) }
+      end
+
+      # A singular model attribute may be absent; a collection member may
+      # not -- a nil there reaches recursion and dies as a NoMethodError.
+      def validate_type(name, type, element, nullable:)
+        return if nullable && element.nil?
+        return if element.is_a?(type)
+
+        refuse(name, type, element.class)
+      end
+    end
+
     # lutaml-model 0.8.19 validates nothing on its own: a bogus enum
     # constructs and serializes, a missing attribute becomes nil, and
     # `validate!` does not reach nested models. Every model therefore runs
@@ -142,6 +256,7 @@ module Claricle
     class Base < Lutaml::Model::Serializable
       include Marshalling
       extend Marshalling::ClassMethods
+      include Validation
 
       DESERIALIZING = :claricle_models_deserializing
       # Lutaml builds every model -- parent and nested alike -- by calling
@@ -287,91 +402,6 @@ module Claricle
       end
 
       def normalize; end
-
-      # A declared model attribute is only cast when it arrives as a hash
-      # from a document. Handed a wrong-typed object directly, lutaml stores
-      # it as-is and the failure surfaces much later as a NoMethodError.
-      def validate_types
-        self.class.attributes.each do |name, attribute|
-          validate_cardinality(name, attribute)
-          validate_finite(name)
-
-          type = attribute.type
-          next unless type.is_a?(Class) && type < Base
-
-          validate_attribute(name, attribute, type)
-        end
-      end
-
-      # JSON has neither Infinity nor NaN. lutaml coerces both without
-      # complaint -- measured: `{"width":1e400}` deserialized to
-      # Float::INFINITY, the lifecycle froze the model around it, and the
-      # `to_json` that followed raised `JSON::GeneratorError`, so a
-      # document that parsed could not be written back out. Refused here,
-      # where the attribute name is still in hand.
-      def validate_finite(name)
-        value = public_send(name)
-        return unless value.is_a?(Numeric) && !value.finite?
-
-        refuse(name, "a finite number", value)
-      end
-
-      # One sentence for every one of these checks, and one place that
-      # knows lutaml's ValidationError carries exceptions rather than
-      # Strings -- handed bare Strings, its own `error_messages` blows
-      # up. Subclasses raise through here too.
-      def refuse(name, expectation, got)
-        raise Lutaml::Model::ValidationError,
-              [TypeError.new("#{name} expects #{expectation}, got #{got}")]
-      end
-
-      # An enum that is not a collection must be given one value, never
-      # two. lutaml 0.8.19 accepts a list, stores it whole, and its getter
-      # returns only the first element -- so
-      # `Issue.new(severity: ["info", "error"])` validates, reports
-      # `"info"`, and drops `"error"` on the way to JSON. Nothing about
-      # that is visible to a caller.
-      #
-      # Cardinality only, and deliberately so: `severity: ["error"]`
-      # is accepted, because lutaml has already normalised a bare
-      # `"error"` to the same `["error"]` by the time this runs and the
-      # two are no longer distinguishable. Nothing is lost either way.
-      # Deserialization is stricter -- lutaml's own
-      # `CollectionTrueMissingError` rejects any list from a document
-      # before this runs.
-      #
-      # The raw ivar, because the getter is the thing that hides it.
-      def validate_cardinality(name, attribute)
-        return if attribute.collection?
-        return unless attribute.enum?
-
-        # lutaml stores EVERY enum value as an array, so a valid
-        # `severity: "error"` is `["error"]` here and the shape alone
-        # proves nothing. Only a second element is evidence that a list
-        # was passed, and only that loses data.
-        raw = instance_variable_get(:"@#{name}")
-        return unless raw.is_a?(Array) && raw.length > 1
-
-        refuse(name, "a single value", raw.inspect)
-      end
-
-      def validate_attribute(name, attribute, type)
-        value = public_send(name)
-        return validate_type(name, type, value, nullable: true) unless attribute.collection?
-
-        refuse(name, "a collection", value.class) unless value.is_a?(Array)
-
-        value.each { |element| validate_type(name, type, element, nullable: false) }
-      end
-
-      # A singular model attribute may be absent; a collection member may
-      # not -- a nil there reaches recursion and dies as a NoMethodError.
-      def validate_type(name, type, element, nullable:)
-        return if nullable && element.nil?
-        return if element.is_a?(type)
-
-        refuse(name, type, element.class)
-      end
 
       def nested_models
         []
