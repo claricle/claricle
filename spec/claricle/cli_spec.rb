@@ -370,6 +370,16 @@ RSpec.describe Claricle::Cli::Runner do
         .to output(/format: png.*dimensions: 4\.0x3\.0.*parse status: ok/m).to_stdout
     end
 
+    # End to end through detection, since an EPS is detected rather than
+    # declared here -- the handler specs all pass the format explicitly.
+    it "inspects an EPS through the real detector" do
+      eps = File.join(__dir__, "..", "fixtures", "inspect", "basic.eps")
+
+      expect { expect(described_class.run(["inspect", eps])).to eq(0) }
+        .to output(/format: eps.*dimensions: 100\.0x50\.0.*parse status: ok/m)
+        .to_stdout
+    end
+
     # The fields a PNG inspection can fill, or dropping one from the
     # renderer leaves the assertions above green. The single-axis rows
     # are the presenter's other branch and no PNG reaches them, so both
@@ -577,11 +587,12 @@ RSpec.describe Claricle::Cli::Runner do
     # pass if the command printed nothing at all.
     it "does not claim conform or convert yet" do
       expect { described_class.run(["formats"]) }
-        .to output("emf\tinspect\npng\tinspect\nsvg\tinspect\n").to_stdout
+        .to output("emf\tinspect\neps\tinspect\npng\tinspect\n" \
+                   "ps\tinspect\nsvg\tinspect\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
-      rows = %w[emf png svg].map do |format|
+      rows = %w[emf eps png ps svg].map do |format|
         %({"format":"#{format}","inspect":true,"conform":false,"convert":false,"convert_to":[]})
       end
       expected = "[#{rows.join(",")}]\n"
