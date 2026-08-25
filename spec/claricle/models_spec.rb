@@ -262,204 +262,65 @@ RSpec.describe Claricle::Models do
       expect(report.issues).to be_frozen
     end
 
-    # lutaml threads cyclic parent/root back-references through every
-    # nested model. Dumping them made marshal_load finalize against a
-    # half-restored graph, so an Issue lifted out of a deserialized Report
-    # raised ValidationError -- while a directly-built Issue round-tripped
-    # fine, which is why the example below never caught it.
-    describe "a model nested inside a deserialized parent" do
-      let(:parent) do
-        models::Report.from_json(
-          {
-            format: "png", valid: false,
-            issues: [{ severity: "error", message: "m",
-                       location: { chunk: "IDAT", byte_offset: 33 } }]
-          }.to_json
-        )
-      end
+    # Ruby's default Marshal writes the ivars into a fresh object and runs
+    # neither the constructor nor the lifecycle -- measured: the copy came
+    # back unfrozen, took `severity = "bogus"` past the enum, and rendered
+    # it. Nothing in this gem crosses a process boundary, so the dump is
+    # refused rather than reimplemented.
+    describe "marshalling" do
+      # One valid instance of each model, so the loop below asserts the
+      # refusal rather than a constructor that never ran.
+      built = {
+        Issue: -> { issue.call("info") },
+        Report: -> { models::Report.new(format: "png") },
+        Location: -> { models::Location.new },
+        Inspection: -> { models::Inspection.new(format: "png", parse_status: "ok") }
+      }.freeze
 
-      it "round-trips once lifted out of its parent" do
-        # Not named `issue`: that is a lambda local at describe scope, and
-        # assigning it here would rebind it for every later example.
-        nested = parent.issues.first
-        restored = Marshal.load(Marshal.dump(nested))
-
-        expect(restored.to_json).to eq(nested.to_json)
-        expect(restored).to be_frozen
-      end
-
-      it "round-trips at the second level of nesting" do
-        location = parent.issues.first.location
-        restored = Marshal.load(Marshal.dump(location))
-
-        expect(restored.to_json).to eq(location.to_json)
-      end
-
-      it "still round-trips the parent itself" do
-        expect(Marshal.load(Marshal.dump(parent)).to_json).to eq(parent.to_json)
-      end
-
-      # The hierarchy is asserted positively, both links on both levels.
-      # An earlier fix dropped lutaml's back-references from the dump: the
-      # lifted case worked and every copied graph came back detached, and
-      # the spec that replaced this one asserted only the lost parents --
-      # an honest record of the wrong behaviour is still the wrong
-      # behaviour. `_dump`/`_load` keep both.
-      it "keeps every parent and root link through a whole-graph copy" do
-        copy = Marshal.load(Marshal.dump(parent))
-        nested = copy.issues.first
-
-        expect(nested.lutaml_parent).to be(copy)
-        expect(nested.lutaml_root).to be(copy)
-        expect(nested.location.lutaml_parent).to be(nested)
-        expect(nested.location.lutaml_root).to be(copy)
-      end
-
-      it "makes a lifted model the root of its own copy" do
-        lifted = Marshal.load(Marshal.dump(parent.issues.first))
-
-        expect(lifted.location.lutaml_parent).to be(lifted)
-        expect(lifted.location.lutaml_root).to be(lifted)
-      end
-
-      # meta is free-form, so the payload nests Marshal rather than JSON.
-      it "preserves Ruby values inside meta that JSON would flatten" do
-        inspection = models::Inspection.new(
-          format: "png", parse_status: "ok",
-          meta: { "sym" => :a_symbol, "range" => (1..5) }
-        )
-        restored = Marshal.load(Marshal.dump(inspection))
-
-        expect(restored.meta["sym"]).to eq(:a_symbol)
-        expect(restored.meta["range"]).to eq(1..5)
-      end
-
-      # Public, `_load` was itself an unguarded `Marshal.load` sitting on
-      # the model: a payload it went on to reject had already run the
-      # callbacks inside it. Marshal reaches it privately just the same.
-      it "keeps _load off the model's public surface" do
-        expect { models::Report._load("anything") }
-          .to raise_error(NoMethodError, /private method/)
-        expect(Marshal.load(Marshal.dump(parent)).to_json).to eq(parent.to_json)
-      end
-
-      # `1.0` and `Rational(1,1)` are both `== 1`, and a longer envelope
-      # would be a different format wearing the right version number, so
-      # the guard checks exact type and exact shape. Through `send`,
-      # because the hook is private.
-      [99, 1.0, Rational(1, 1)].each do |version|
-        it "refuses a payload versioned #{version.inspect}" do
-          payload = Marshal.dump([version, parent.to_hash])
-
-          expect { models::Report.send(:_load, payload) }
-            .to raise_error(TypeError, /unsupported Claricle marshal payload/)
+      # Every class, not just the one Base is written on: the refusal is
+      # inherited, and a subclass that quietly regained a dump would be
+      # the whole hole back.
+      %i[Issue Report Location Inspection].each do |name|
+        it "refuses to dump #{name}" do
+          expect { Marshal.dump(built.fetch(name).call) }
+            .to raise_error(TypeError, /cannot marshal Claricle::Models::#{name}/)
         end
       end
 
-      it "refuses an envelope carrying extra fields" do
-        payload = Marshal.dump([1, parent.to_hash, "extra"])
-
-        expect { models::Report.send(:_load, payload) }
-          .to raise_error(TypeError, /unsupported Claricle marshal payload/)
+      # A model reached indirectly is written by Ruby rather than by any
+      # code of ours, so the refusal has to be on the hook Ruby itself
+      # calls. Measured: it is.
+      it "refuses a model nested inside a plain container" do
+        expect { Marshal.dump({ "a" => [issue.call("info")] }) }
+          .to raise_error(TypeError, /Claricle models are not marshalable/)
       end
 
-      # `marshal_attributes` always writes a Hash, so anything else in
-      # that slot is a different format wearing the right version. An
-      # Array there passed the version guard and `from_hash` handed back
-      # an Array where a Report had been asked for.
-      [[], "attributes", nil].each do |slot|
-        it "refuses an envelope holding #{slot.class} where the attributes go" do
-          payload = Marshal.dump([1, slot])
+      # The one place a model can reach Marshal without a caller naming
+      # it: `meta` holds whatever a handler attached.
+      it "refuses an Inspection whose meta holds a model" do
+        held = models::Inspection.new(format: "svg", parse_status: "ok",
+                                      meta: { "held" => issue.call("info") })
 
-          expect { models::Report.send(:_load, payload) }
-            .to raise_error(TypeError, /unsupported Claricle marshal payload/)
+        expect { Marshal.dump(held) }
+          .to raise_error(TypeError, /Claricle models are not marshalable/)
+      end
+
+      # Ruby prefers `marshal_dump` over `_dump` where both exist, so a
+      # `marshal_dump` added later would silently displace the refusal.
+      # Neither hook may exist, public or private.
+      it "defines neither marshal hook that would displace the refusal" do
+        %i[marshal_dump marshal_load].each do |hook|
+          expect(models::Issue.method_defined?(hook)).to be(false)
+          expect(models::Issue.private_method_defined?(hook)).to be(false)
         end
       end
 
-      # The payload carries attributes, not classes, so a subclass would
-      # come back as its parent with its own attributes gone. Refused at
-      # dump time rather than silently erased -- validation accepts
-      # subclasses, so nothing else catches this.
-      it "refuses to marshal a nested subclass rather than erasing it" do
-        subclass = Class.new(models::Issue) { attribute :vendor_code, :string }
-        nested = subclass.new(severity: "error", message: "m", vendor_code: "X1")
-        report = models::Report.new(format: "png", issues: [nested])
-
-        expect { Marshal.dump(report) }
-          .to raise_error(TypeError, /was declared/)
+      # `_dump` is Ruby's hook, not the model's API. Marshal reaches it
+      # privately -- measured -- so publishing it buys nothing.
+      it "keeps _dump off the public surface" do
+        expect(original).not_to respond_to(:_dump)
+        expect(models::Issue.private_method_defined?(:_dump)).to be(true)
       end
-
-      # `meta` copies only its top level, so a container the caller keeps
-      # can be pointed back at the model afterwards. A model reached that
-      # way is written by Ruby, not by `plain`, and opens a stream of its
-      # own that Ruby's cycle table cannot see into -- the dump recursed
-      # until SystemStackError. It says so now.
-      it "refuses a meta that leads back to its own model" do
-        box = {}
-        inspection = models::Inspection.new(format: "svg", parse_status: "ok",
-                                            meta: { "box" => box })
-        box["self"] = inspection
-
-        expect { Marshal.dump(inspection) }
-          .to raise_error(TypeError, /leads back to it/)
-      end
-
-      # The guard covers re-entry, not repetition: a model that merely
-      # appears twice in one meta still round-trips.
-      it "still marshals a model that meta holds twice" do
-        held = models::Issue.new(severity: "info", message: "m")
-        inspection = models::Inspection.new(format: "svg", parse_status: "ok",
-                                            meta: { "a" => held, "b" => held })
-        restored = Marshal.load(Marshal.dump(inspection))
-
-        expect([restored.meta["a"].severity, restored.meta["b"].severity])
-          .to eq(%w[info info])
-      end
-
-      # A refused dump must not leave the guard armed, or the next one
-      # reports a cycle that is not there.
-      it "clears the guard after refusing" do
-        box = {}
-        inspection = models::Inspection.new(format: "svg", parse_status: "ok",
-                                            meta: { "box" => box })
-        box["self"] = inspection
-        expect { Marshal.dump(inspection) }.to raise_error(TypeError)
-
-        expect(Thread.current[:claricle_models_dumping]).to be_nil
-        box.delete("self")
-        expect(Marshal.load(Marshal.dump(inspection)).meta).to eq({ "box" => {} })
-      end
-
-      # `meta` carries `render_empty: true`, so `to_hash` itself no longer
-      # drops an explicitly empty one -- the case that would still fail on
-      # a `to_hash`-built payload is a present-but-empty nested MODEL,
-      # covered next. This one pins the marshalled round trip regardless.
-      it "keeps an explicitly empty hash rather than reloading it as nil" do
-        inspection = models::Inspection.new(format: "png", parse_status: "ok", meta: {})
-
-        expect(Marshal.load(Marshal.dump(inspection)).meta).to eq({})
-      end
-
-      it "keeps a present but empty nested model" do
-        # Not named `issue`: that is a lambda local at describe scope and
-        # assigning it here rebinds it for every later example. This file
-        # has now caught me twice, which is the argument for `let`.
-        with_location = models::Issue.new(severity: "info", message: "m",
-                                          location: models::Location.new)
-
-        expect(Marshal.load(Marshal.dump(with_location)).location).not_to be_nil
-      end
-    end
-
-    # The payload carries declared attributes and nothing else, so
-    # @claricle_sealed is not in it -- a restored model is sealed because
-    # `_load` rebuilds it through `from_hash` and finalizes, not because
-    # the marker travelled.
-    it "re-runs the lifecycle on an unmarshalled model" do
-      restored = Marshal.load(Marshal.dump(original))
-      expect(restored).to be_frozen
-      expect { restored.severity = "bogus" }.to raise_error(FrozenError)
-      expect(restored.severity).to eq(original.severity)
     end
 
     it "re-freezes a dup" do
@@ -1117,6 +978,41 @@ RSpec.describe Claricle::Models do
       expect(wrapped.severity).to eq("error")
       expect { described_class.const_get(:Issue).from_json(%({"severity":["error"],"message":"m"})) }
         .to raise_error(Lutaml::Model::CollectionTrueMissingError)
+    end
+  end
+
+  describe "public surface" do
+    # Written out rather than looped, because `const_get` walks straight
+    # past private_constant and only a literal reference raises.
+    it "keeps Base private" do
+      expect { Claricle::Models::Base }.to raise_error(NameError, /private constant/)
+    end
+
+    # A workaround for one measured lutaml behaviour, not a type a caller
+    # ever names: `meta` is declared with it, and what comes back out of a
+    # model is a plain Hash either way.
+    it "keeps FreeFormHash private" do
+      expect { Claricle::Models::FreeFormHash }.to raise_error(NameError, /private constant/)
+    end
+
+    # A mixin only Base uses, and Base is private, so it has no caller.
+    it "keeps Validation private" do
+      expect { Claricle::Models::Validation }.to raise_error(NameError, /private constant/)
+    end
+
+    it "lists none of them among its constants" do
+      expect(described_class.constants).to contain_exactly(:Location, :Issue, :Report, :Inspection)
+    end
+
+    # `meta` still hands back a plain Hash, so hiding the type takes
+    # nothing away from a caller.
+    it "still gives a caller a plain Hash for meta" do
+      inspection = described_class.const_get(:Inspection)
+                                  .new(format: "svg", parse_status: "ok", meta: { "a" => 1 })
+
+      expect(inspection.meta).to be_an_instance_of(Hash)
+      expect(described_class.const_get(:Inspection)
+                            .from_json(inspection.to_json).meta).to be_an_instance_of(Hash)
     end
   end
 end

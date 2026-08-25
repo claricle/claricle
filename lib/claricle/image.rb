@@ -140,39 +140,23 @@ module Claricle
       Registry.handler_for(format).new
     end
 
-    # Ruby's default Marshal writes the ivars and reads them straight back
-    # into a fresh object, running neither `initialize` nor any of its
-    # guards -- measured: `Marshal.load(Marshal.dump(image))` came back
-    # with mutable content, and replacing those bytes with an EMF file
-    # left the copy reporting :png over EMF. So the boundary goes through
-    # the constructor, and every check and freeze runs again.
+    # Refused, rather than supported. Ruby's default Marshal writes the
+    # ivars into a fresh object and runs neither the constructor nor any
+    # of its guards -- and it does not carry a String's freeze, so the
+    # copy is writable through its own readers. Measured:
+    # `copy.content.replace("NOT A PNG AT ALL")` left the copy reporting
+    # :png over sixteen bytes of text, and `copy.path.replace("/etc/passwd")`
+    # pointed a path-born image at another file while it still reported
+    # the format detected from the first.
     #
-    # The bytes travel even for a path-born image that never read them,
-    # so the copy has them without going back to the file, and it loads
-    # under `Marshal.load(..., freeze: true)` where a lazy read cannot --
-    # measured, `#content` raised FrozenError trying to memoize into the
-    # already-frozen copy. `#with_path` still uses the path it was given,
-    # on the copy exactly as on the original: a path-born image is a
-    # reference to a file, and Marshal does not change that.
-    #
-    # Private, because Marshal reaches them anyway (measured) and a public
-    # `marshal_load` is a second constructor that skips the exactly-one
-    # check -- measured: handing one image another's state left it
-    # reporting :emf over PNG bytes.
-    def marshal_dump
-      # `@content`, not `#content`: reading through the memoizing reader
-      # writes into the image being dumped, so dumping a frozen one
-      # raised FrozenError before it produced anything, and dumping an
-      # unfrozen one left the whole file cached on it either way.
-      [format, path, @content || File.binread(path).freeze]
-    end
-
-    def marshal_load(state)
-      format, path, content = state
-      initialize(format: format, path: path, content: path.nil? ? content : nil)
-      # `initialize` takes one source or the other; a path-born image
-      # carries both, so its bytes are settled here instead.
-      @content = self.class.send(:binary, content) if path
+    # Nothing in this gem forks, caches or crosses a process boundary, so
+    # an image is not dumped at all rather than dumped through hooks of
+    # its own. The dump side only: `Marshal.load` of bytes from elsewhere
+    # is as unsafe here as it is anywhere. Private, because Marshal
+    # reaches a private `_dump` -- measured -- and `_dump` rather than
+    # `marshal_dump` because Ruby prefers `marshal_dump` where both exist.
+    def _dump(_depth)
+      raise TypeError, "cannot marshal #{self.class}: a Claricle image is not marshalable"
     end
   end
 end

@@ -56,5 +56,12 @@ module Claricle
         value.to_h
       end
     end
+
+    # A workaround for one measured lutaml-model behaviour, not a type a
+    # caller ever names: `meta` is declared with it here, and what comes
+    # back out of a model is a plain Hash either way. Private where it is
+    # defined, so the guarantee survives this file being required on its
+    # own.
+    private_constant :FreeFormHash
   end
 end

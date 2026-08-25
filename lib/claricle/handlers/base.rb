@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require_relative "../errors"
+require_relative "../models/inspection"
+require_relative "../models/issue"
 
 module Claricle
   module Handlers
@@ -58,6 +60,27 @@ module Claricle
 
       def convert(image, to:)
         raise UnsupportedFormat.new(image.format, :convert, target: to)
+      end
+
+      private
+
+      # The one shape every handler needs and none of them differ on: a
+      # parse that did not get far enough to report anything, carrying the
+      # single error that says why. Severity is not a parameter because
+      # there is only one answer -- an inspection that failed to parse has
+      # nothing to warn about.
+      #
+      # The image's own format, for the same reason `inspection` names it:
+      # a handler owning :svg and :svgz must not report :svg for both.
+      #
+      # `parse_status: "failed"` makes no validity claim; that belongs to
+      # conform alone (D17).
+      def failed_inspection(image, code:, message:)
+        Models::Inspection.new(
+          format: image.format.to_s,
+          parse_status: "failed",
+          issues: [Models::Issue.new(severity: "error", code: code, message: message)]
+        )
       end
     end
 
