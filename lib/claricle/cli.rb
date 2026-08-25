@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "json"
+
 module Claricle
   # Command-line interface for Claricle
   class Cli < Thor
@@ -25,6 +27,123 @@ module Claricle
     def help(command = nil, subcommand = false) # rubocop:disable Style/OptionalBooleanParameter
       tolerate_closed_output { super(command, subcommand) }
     end
+
+    desc "inspect FILE", "Report a file's format and metadata"
+    option :json, type: :boolean, default: false, desc: "Emit JSON"
+    # Named `inspect_file`, because a Thor command is an instance method
+    # and `def inspect(file)` would override `Object#inspect` on every
+    # Cli instance -- `p cli` then raises ArgumentError. This is D2's
+    # rule (`Image#inspect` became `#inspection`) applied one layer up.
+    # The command users type is still `inspect`; the re-key and the
+    # override below are what keep the method name from leaking out.
+    def inspect_file(file)
+      inspection = Image.from_path(file).inspection
+      puts(options[:json] ? inspection.to_json : Presenter.inspection(inspection))
+    end
+    # Thor registers a command under its METHOD name, so this shipped as
+    # the command `inspect_file` -- and `normalize_command_name`
+    # translates dashes to underscores, so `inspect-file` reached it too.
+    # `map "inspect" => :inspect_file` added a third spelling on top
+    # rather than replacing the first two.
+    #
+    # Re-keying the registry entry leaves exactly `inspect`. The Command
+    # object keeps its `inspect_file` name, so dispatch still reaches the
+    # method above and `Object#inspect` is never shadowed.
+    #
+    # The `map` alias is dropped rather than kept, because with the entry
+    # re-keyed `normalize_command_name("inspect")` would follow the alias
+    # back to the name that no longer exists.
+    commands["inspect"] = commands.delete("inspect_file")
+
+    # Thor prints a command's METHOD name in an arity error, and the
+    # method behind `inspect` is `inspect_file` -- so `claricle inspect`
+    # with no file answered `ERROR: "claricle inspect_file" was called
+    # with no arguments`, naming the one spelling this CLI rejects.
+    # Measured.
+    #
+    # The registry key is Thor's CANONICAL name for the command, which
+    # is not always what the user typed -- Thor resolves abbreviations
+    # first, so `claricle ins` arrives here with key `inspect`. That is
+    # the name worth printing either way. The message is built from a
+    # copy carrying it; a copy, because the original's name is what Thor
+    # dispatches on. A command whose key already matches is passed
+    # through untouched.
+    def self.handle_argument_error(command, error, args, arity)
+      key = commands.key(command)
+      command = command.dup.tap { |copy| copy.name = key } if key && key != command.name
+
+      super
+    end
+
+    desc "formats", "List the formats Claricle handles and what it can do with each"
+    option :json, type: :boolean, default: false, desc: "Emit JSON"
+    def formats
+      rows = Registry.formats.map { |format| Presenter.format_row(format) }
+      puts(options[:json] ? JSON.generate(rows) : Presenter.format_table(rows))
+    end
+
+    # Rendering, kept together so the commands above stay one line each.
+    # Nothing here touches `options` or writes output; the commands do
+    # both.
+    module Presenter
+      module_function
+
+      # Capabilities are derived from the handler, so this cannot
+      # advertise an operation that is still a raising stub. `convert_to`
+      # stays empty until item 04 gives handlers a target list.
+      def format_row(format)
+        capabilities = Registry.capabilities_for(format)
+
+        {
+          "format" => format.to_s,
+          "inspect" => capabilities.include?(:inspect),
+          "conform" => capabilities.include?(:conform),
+          "convert" => capabilities.include?(:convert),
+          # The list of targets is item 04's; the boolean above already
+          # tells the truth about whether convert works at all.
+          "convert_to" => []
+        }
+      end
+
+      def format_table(rows)
+        rows.map do |row|
+          operations = %w[inspect conform convert].select { |name| row[name] }
+          "#{row["format"]}\t#{operations.join(", ")}"
+        end.join("\n")
+      end
+
+      def inspection(inspection)
+        rows(inspection)
+          .filter_map { |label, value| "#{label}: #{value}" unless value.nil? }
+          .join("\n")
+      end
+
+      # Label/value pairs filtered once, rather than a conditional per
+      # field: a nil field is simply absent, and adding a field later does
+      # not add a branch. Pairs rather than a Hash, because two issues can
+      # share a severity and a Hash would silently drop one.
+      def rows(inspection)
+        [
+          ["format", inspection.format], *dimension_rows(inspection),
+          ["dpi", inspection.dpi], ["color space", inspection.color_space],
+          *inspection.meta.to_a.sort, ["parse status", inspection.parse_status],
+          *inspection.issues.map { |issue| [issue.severity, issue.message] }
+        ]
+      end
+
+      # One line when both are known, separate lines when only one is.
+      # SVG can carry a width and no height, and "7.0x" is not a
+      # dimension -- but dropping the line would lose the width entirely.
+      def dimension_rows(inspection)
+        width = inspection.width
+        height = inspection.height
+        return [["dimensions", "#{width}x#{height}"]] if width && height
+
+        [["width", width], ["height", height]]
+      end
+    end
+
+    private_constant :Presenter
 
     # Turns an exception into a process status. `run` returns an Integer
     # for everything it maps, and never exits -- only exe/claricle exits,
@@ -55,6 +174,11 @@ module Claricle
           code.is_a?(Integer) && RANGE.cover?(code)
         end
       end
+
+      # Errors Claricle recognises, whose own message already reads as a
+      # sentence. Everything else gets its class named.
+      MAPPED = [Error, Thor::Error, Errno::ENOENT].freeze
+      private_constant :MAPPED
 
       class << self
         def run(argv, output: $stderr)
@@ -145,8 +269,9 @@ module Claricle
         end
 
         # An unexpected failure names its class: "claricle: missing gem" is
-        # not much help when the class was LoadError. A mapped Claricle
-        # error already reads as a sentence, so it does not need one.
+        # not much help when the class was LoadError. A recognised error
+        # does not need one -- ENOENT included, now that `inspect` takes a
+        # path and a typo is an ordinary user error rather than a defect.
         def error_message(error)
           message = utf8_message(error.message)
           return "claricle: #{message}" if error.is_a?(Error) || error.is_a?(Thor::Error)

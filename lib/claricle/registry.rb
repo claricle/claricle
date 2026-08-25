@@ -4,11 +4,12 @@
 # no load order for the entry point to get wrong.
 require_relative "errors"
 require_relative "handlers/base"
+require_relative "handlers/png"
 
 module Claricle
   module Registry
     # One list. A new format adds its handler file above and its class here.
-    HANDLER_CLASSES = [].freeze
+    HANDLER_CLASSES = [Handlers::Png].freeze
 
     class << self
       def handler_for(format)
@@ -17,6 +18,13 @@ module Claricle
 
       def formats
         HANDLERS.keys.sort
+      end
+
+      # One row per format, for the `formats` command. Capabilities are
+      # derived from the handler, so a row cannot advertise an operation
+      # the handler has not implemented.
+      def capabilities_for(format)
+        handler_for(format).capabilities
       end
 
       private

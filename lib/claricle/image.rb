@@ -87,9 +87,28 @@ module Claricle
       # exactly-one check in `initialize` and then read as "no path" in
       # `with_path`, so the image took the temporary-file branch and died
       # on `File.binread(false)`.
+      # A Pathname is converted, not refused. The PNG reader takes one and
+      # callers pass one, so refusing it made PNG the odd handler out --
+      # it surfaced as NoMethodError on `rewind`, which is off the
+      # allowlist and so exited 4, the defect code. Converting keeps every
+      # guarantee above: what is stored is still a frozen String the image
+      # owns, and `false` still has no `to_path` and is still refused.
       def checked_path(path)
+        # A Pathname is converted, not refused. The PNG reader takes one
+        # and callers pass one, so refusing it made PNG the odd handler
+        # out -- it surfaced as NoMethodError on `rewind`, which is off
+        # the allowlist and so exited 4, the defect code. `false` still
+        # has no `to_path` and is still refused.
+        #
+        # `KIND_OF.bind_call`, not `is_a?`: a subclass that overrides
+        # `is_a?` must not talk its way past this.
         unless KIND_OF.bind_call(path, ::String)
-          raise ArgumentError, "path must be a String, got #{CLASS_OF.bind_call(path)}"
+          path = path.to_path if path.respond_to?(:to_path)
+        end
+
+        unless KIND_OF.bind_call(path, ::String)
+          raise ArgumentError,
+                "path must be a String or Pathname, got #{CLASS_OF.bind_call(path)}"
         end
 
         ::String.new(path).freeze

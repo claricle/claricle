@@ -12,15 +12,28 @@ RSpec.describe "Claricle::Registry" do
     Class.new(base) { formats(*formats) }
   end
 
-  describe "this phase ships empty" do
-    it "lists no handler classes" do
-      expect(registry.const_get(:HANDLER_CLASSES)).to be_empty
+  # Item 01 asserted the registry shipped empty. Item 02 fills it, so the
+  # replacement pins the exact set and its owning classes -- "every listed
+  # class appears" would pass for any incomplete list, which is the one
+  # failure mode requiring from registry.rb cannot catch.
+  describe "what ships registered" do
+    it "lists exactly the handler classes it names" do
+      expect(registry.const_get(:HANDLER_CLASSES))
+        .to eq([Claricle.const_get(:Handlers).const_get(:Png)])
     end
 
-    # Asserting only `formats` would pass for a listed class that happens
-    # to declare none.
-    it "exposes no formats" do
-      expect(registry.formats).to be_empty
+    it "exposes exactly the formats those handlers declare" do
+      expect(registry.formats).to eq([:png])
+    end
+
+    it "maps png to the PNG handler" do
+      expect(registry.handler_for(:png))
+        .to be(Claricle.const_get(:Handlers).const_get(:Png))
+    end
+
+    # Derived, so it cannot advertise an operation still on Base.
+    it "reports only the capabilities png has implemented" do
+      expect(registry.capabilities_for(:png)).to eq([:inspect])
     end
   end
 
@@ -84,12 +97,12 @@ RSpec.describe "Claricle::Registry" do
 
   describe "handler_for" do
     it "raises UnsupportedFormat naming the format" do
-      expect { registry.handler_for(:png) }
-        .to raise_error(Claricle::UnsupportedFormat, /format :png is not supported/)
+      expect { registry.handler_for(:wmf) }
+        .to raise_error(Claricle::UnsupportedFormat, /format :wmf is not supported/)
     end
 
     it "raises something callers can rescue as Claricle::Error" do
-      expect { registry.handler_for(:png) }.to raise_error(Claricle::Error)
+      expect { registry.handler_for(:wmf) }.to raise_error(Claricle::Error)
     end
   end
 
@@ -142,7 +155,7 @@ RSpec.describe "Claricle::Registry" do
       ok, output = run.call('require "claricle/registry"; ' \
                             "print Claricle.const_get(:Registry).formats.inspect")
       expect(ok).to be(true), "subprocess failed: #{output}"
-      expect(output).to eq("[]")
+      expect(output).to eq("[:png]")
     end
 
     it "loads handlers/base.rb without the entry point" do

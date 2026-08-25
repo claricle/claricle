@@ -221,6 +221,215 @@ RSpec.describe Claricle::Cli::Runner do
     end
   end
 
+  # Thor registers a command under its METHOD name, and `map` only adds
+  # an alias -- so `inspect_file` stayed callable, and Thor translates
+  # dashes to underscores, so `inspect-file` did too. Three spellings for
+  # one documented command.
+  describe "the inspect command's spelling" do
+    it "answers to the documented name" do
+      expect { described_class.run(["inspect", File.join(__dir__, "..", "fixtures", "inspect", "valid.png")]) }
+        .to output(/format: png/).to_stdout
+    end
+
+    %w[inspect_file inspect-file].each do |spelling|
+      it "does not answer to #{spelling}" do
+        expect { expect(described_class.run([spelling, "x.png"])).to eq(2) }
+          .to output(/Could not find command/).to_stderr
+      end
+    end
+
+    # described_class here is the Runner, not the Thor class.
+    it "lists only the documented command" do
+      names = Claricle.const_get(:Cli).all_commands.keys
+
+      expect(names).to include("inspect")
+      expect(names).not_to include("inspect_file")
+    end
+
+    # The reason the method is not simply `def inspect(file)`. Every
+    # example above would pass a CLI that shadowed Object#inspect; only
+    # this one would go red, and it goes red loudly -- `p cli` raises
+    # ArgumentError.
+    it "leaves Object#inspect alone" do
+      expect(Claricle.const_get(:Cli).new.inspect).to start_with("#<Claricle::Cli")
+    end
+
+    # Thor names a command by its METHOD name in an arity error, so this
+    # answered `"claricle inspect_file" was called with no arguments` --
+    # the one spelling the examples above prove the CLI rejects. Thor
+    # builds the prefix from $0, which is `rspec` here, so the assertion
+    # is on the command name rather than the whole line.
+    it "names the documented command when the file is missing" do
+      stream = StringIO.new
+      expect(described_class.run(["inspect"], output: stream)).to eq(2)
+
+      expect(stream.string).to match(/ inspect" was called with no arguments/)
+      expect(stream.string).not_to include("inspect_file")
+    end
+
+    # The rename is keyed off Claricle's own command registry, so Thor's
+    # built-ins have to fall through it untouched. `help` is the one that
+    # would notice, since it is the only built-in taking an argument.
+    it "leaves a Thor built-in's arity error alone" do
+      stream = StringIO.new
+      described_class.run(%w[help a b c], output: stream)
+
+      expect(stream.string).to match(/ help" was called with arguments/)
+    end
+
+    # The copy is what gets renamed. Renaming the registered command
+    # instead would break dispatch on the very next call.
+    it "does not rename the registered command" do
+      described_class.run(["inspect"], output: StringIO.new)
+
+      expect(Claricle.const_get(:Cli).all_commands["inspect"].name).to eq("inspect_file")
+    end
+  end
+
+  describe "inspect" do
+    let(:png) { File.join(__dir__, "..", "fixtures", "inspect", "valid.png") }
+
+    it "prints the metadata and returns 0" do
+      expect { expect(described_class.run(["inspect", png])).to eq(0) }
+        .to output(/format: png.*dimensions: 4\.0x3\.0.*parse status: ok/m).to_stdout
+    end
+
+    # The fields a PNG inspection can fill, or dropping one from the
+    # renderer leaves the assertions above green. The single-axis rows
+    # are the presenter's other branch and no PNG reaches them, so both
+    # of them -- width-only AND height-only -- are covered against the
+    # presenter directly, further down.
+    it "prints dpi, colour space and the meta fields" do
+      phys = File.join(__dir__, "..", "fixtures", "inspect", "phys.png")
+
+      expect { described_class.run(["inspect", phys]) }
+        .to output(/dpi: 72\.009/).to_stdout
+      expect { described_class.run(["inspect", phys]) }
+        .to output(/color space: truecolor\+alpha/).to_stdout
+      expect { described_class.run(["inspect", phys]) }
+        .to output(/bit_depth: 8.*compression: 0.*filter: 0.*interlace: 0/m).to_stdout
+    end
+
+    it "prints an issue's severity and message when one is reported" do
+      failed = File.join(__dir__, "..", "fixtures", "inspect", "signature_only.png")
+
+      expect { described_class.run(["inspect", failed]) }
+        .to output(/error: PNG header \(IHDR\) could not be read/).to_stdout
+    end
+
+    # Empty collections have to survive serialization, or a consumer
+    # cannot tell "no issues" from "field absent".
+    it "keeps an empty issues array under --json" do
+      expect { described_class.run(["inspect", png, "--json"]) }
+        .to output(/"issues":\[\]/).to_stdout
+    end
+
+    it "reports a file that does not parse, and still exits 0" do
+      failed = File.join(__dir__, "..", "fixtures", "inspect", "signature_only.png")
+
+      expect { expect(described_class.run(["inspect", failed])).to eq(0) }
+        .to output(/parse status: failed/).to_stdout
+    end
+
+    it "exits 2 for a missing file" do
+      expect(described_class.run(["inspect", "no/such.png"], output: StringIO.new)).to eq(2)
+    end
+
+    # A typo is an ordinary user error, so it reads as a sentence rather
+    # than naming Errno::ENOENT at someone who mistyped a filename. Both
+    # halves are asserted: `start_with` alone would still pass if the
+    # class name were appended rather than prefixed.
+    it "does not name the error class for a missing file" do
+      stream = StringIO.new
+      described_class.run(["inspect", "no/such.png"], output: stream)
+
+      expect(stream.string).to start_with("claricle: No such file or directory")
+      expect(stream.string).not_to include("Errno")
+    end
+
+    it "exits 3 for bytes it cannot identify" do
+      Tempfile.create(["junk", ".bin"]) do |file|
+        file.write("not an image at all")
+        file.flush
+
+        expect(described_class.run(["inspect", file.path], output: StringIO.new)).to eq(3)
+      end
+    end
+
+    # Detected but unhandled is a different answer from unrecognised, and
+    # both are exit 3 -- so assert the message, not just the code.
+    it "exits 3 for a detected format with no handler" do
+      stream = StringIO.new
+      wmf = File.join(__dir__, "..", "fixtures", "detector", "std.wmf")
+
+      expect(described_class.run(["inspect", wmf], output: stream)).to eq(3)
+      expect(stream.string).to match(/not supported/)
+    end
+  end
+
+  # PNG fills both dimensions or neither, so the presenter's one-axis
+  # branch is unreachable through any command today. It is written for
+  # SVG, which can declare a width and no height, and it is asserted
+  # here rather than left to item 03 -- otherwise "7.0x" would be the
+  # first anyone hears of it.
+  describe "the presenter's dimension rows" do
+    let(:presenter) { Claricle.const_get(:Cli).const_get(:Presenter) }
+
+    it "puts both on one line when both are known" do
+      inspection = Claricle::Models::Inspection.new(
+        format: "svg", width: 7.0, height: 3.0, parse_status: "ok"
+      )
+
+      expect(presenter.inspection(inspection)).to include("dimensions: 7.0x3.0")
+    end
+
+    it "names the axis it has when only width is known" do
+      inspection = Claricle::Models::Inspection.new(
+        format: "svg", width: 7.0, parse_status: "ok"
+      )
+      rendered = presenter.inspection(inspection)
+
+      expect(rendered).to include("width: 7.0")
+      expect(rendered).not_to include("height")
+      expect(rendered).not_to include("7.0x")
+    end
+
+    # The mirror case. Without it, a renderer that drops a known height
+    # whenever width is nil stays green, and the comment further up
+    # claimed this row was covered when it was not.
+    it "names the axis it has when only height is known" do
+      inspection = Claricle::Models::Inspection.new(
+        format: "svg", height: 3.0, parse_status: "ok"
+      )
+      rendered = presenter.inspection(inspection)
+
+      expect(rendered).to include("height: 3.0")
+      expect(rendered).not_to include("width")
+      expect(rendered).not_to include("x3.0")
+    end
+  end
+
+  describe "formats" do
+    it "prints what png can actually do" do
+      expect { expect(described_class.run(["formats"])).to eq(0) }
+        .to output(/png\tinspect/).to_stdout
+    end
+
+    # The command must not advertise an operation that is still a stub.
+    # Asserting the whole line, because "prints no conform" would also
+    # pass if the command printed nothing at all.
+    it "does not claim conform or convert yet" do
+      expect { described_class.run(["formats"]) }
+        .to output("png\tinspect\n").to_stdout
+    end
+
+    it "emits a fixed row shape under --json" do
+      expect { described_class.run(["formats", "--json"]) }
+        .to output(%([{"format":"png","inspect":true,"conform":false,"convert":false,"convert_to":[]}]\n))
+        .to_stdout
+    end
+  end
+
   # The executable is the only place `exit` is called, and nothing above
   # would notice if it stopped passing the runner's result through.
   describe "exe/claricle" do

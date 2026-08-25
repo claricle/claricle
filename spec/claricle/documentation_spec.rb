@@ -14,6 +14,7 @@ RSpec.describe "the documentation" do
   # in the example that names it.
   let(:readme) { File.read(File.join(root, "README.adoc")) }
   let(:png) { File.binread(File.join(root, "spec/fixtures/detector/valid.png")) }
+  let(:wmf) { File.binread(File.join(root, "spec/fixtures/detector/std.wmf")) }
 
   # Each example asserts the expression it runs is still IN the README.
   # Without that these are replicas: renaming image.format to image.formatt
@@ -80,7 +81,9 @@ RSpec.describe "the documentation" do
       expect(readme).to match(/no known signature raise `Claricle::UnknownFormat`/)
       expect(readme).to match(/recognised but unhandled raises\s+`Claricle::UnsupportedFormat`/)
       expect { Claricle.detect("not an image") }.to raise_error(Claricle::UnknownFormat)
-      expect { Claricle::Image.from_content(png).inspection }
+      # A format with no handler -- png has one now, so it would prove
+      # the opposite.
+      expect { Claricle::Image.from_content(wmf).inspection }
         .to raise_error(Claricle::UnsupportedFormat)
     end
   end
@@ -139,14 +142,36 @@ RSpec.describe "the documentation" do
         .to raise_error(Claricle::UnknownFormat)
     end
 
-    # Exact, not inclusion-only: an inclusion check misses a command the
-    # CLI has that the README doesn't -- Thor 1.5 adds `tree` to every
-    # subclass, and that slipped past an inclusion-only version of this
-    # check.
-    it "lists exactly the commands the CLI has, no more and no fewer" do
-      documented = readme.scan(/^\s+claricle (\w+)/).flatten.uniq
+    # A mapped command is documented under the name users type, not the
+    # method behind it. Flag aliases (-h, --tree) are Thor's, not commands.
+    # The registry keys ARE the command names now. This used to invert
+    # `Cli.map` to translate `inspect_file` back to `inspect`; the
+    # command is re-keyed at the source, so there is no alias left to
+    # resolve and that branch would be dead code.
+    #
+    # `[\w-]+`, not `\w+`: a dash ends `\w`, so documenting the rejected
+    # `claricle inspect-file` would have been captured as `inspect` and
+    # passed both checks below.
+    def self.cli_command_names
+      Claricle::Cli.all_commands.keys
+    end
+
+    it "lists no command the CLI does not have" do
+      documented = readme.scan(/`claricle ([\w-]+)/).flatten.uniq
       expect(documented).not_to be_empty
-      expect(Claricle::Cli.all_commands.keys.sort).to eq(documented.sort)
+      expect(self.class.cli_command_names).to include(*documented)
+    end
+
+    # The other direction, which the check above cannot make: a command we
+    # ship and never documented. Thor's own built-ins are excluded because
+    # they are Thor's to name -- the README used to reproduce `help`
+    # verbatim, and that block silently went stale when Thor 1.5 added
+    # `tree` to output we do not control.
+    it "documents every command Claricle itself defines" do
+      ours = self.class.cli_command_names - Thor.all_commands.keys
+      documented = readme.scan(/`claricle ([\w-]+)/).flatten.uniq
+
+      expect(ours - documented).to be_empty
     end
 
     # Assert what the note SAYS before exempting it: stripping it first
@@ -341,7 +366,7 @@ RSpec.describe "the documentation" do
     # going unnoticed by a fixed alternation.
     it "names every format detection supports, and no others" do
       allowed = %w[EMF EPS PDF PNG PS SVG WMF]
-      tokens = prose.scan(/\b[A-Z]{2,5}\b/).uniq - %w[XMP]
+      tokens = prose.scan(/\b[A-Z]{2,5}\b/).uniq
       expect(tokens.sort).to eq(allowed.sort)
     end
   end

@@ -10,6 +10,16 @@ module Claricle
     # it supports. Anything it does not implement raises, naming what was
     # asked for, so an unfinished handler says so rather than returning nil.
     class Base
+      # Each operation, mapped to the method a handler overrides to
+      # support it. The names are the vocabulary of the public API; the
+      # CLI happens to print them, but does not own them.
+      OPERATIONS = {
+        inspect: :inspection,
+        conform: :conformance_report,
+        convert: :convert
+      }.freeze
+      private_constant :OPERATIONS
+
       class << self
         # One declaration per handler, refused on a second call. The
         # registry derives a frozen map at load, so a later redeclaration
@@ -42,6 +52,16 @@ module Claricle
 
         def supported_formats
           @formats || [].freeze
+        end
+
+        # Derived, never declared. A declaration is a second place to say
+        # what the code already says, and it can advertise an operation
+        # that is still Base's raising stub -- exactly the lie `formats`
+        # exists to avoid. Overriding the method is the only way to claim
+        # the capability. Item 04's conversion targets stay declared,
+        # because a list of targets is data rather than a boolean.
+        def capabilities
+          OPERATIONS.reject { |_, method| instance_method(method).owner == Base }.keys
         end
       end
 

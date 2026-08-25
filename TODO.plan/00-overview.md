@@ -416,14 +416,22 @@ EPS/PS conform (D22, no conformance basis exists).
 All twelve conversion edges ship, because all twelve were measured
 working. The earlier subset was caution, not evidence.
 
-**`capabilities` tracks what has shipped, never what is planned.** A
-handler declares an operation in the same commit that implements it, so
-`claricle formats` is truthful at every commit — including the commits
-inside an item, not just at item boundaries. 02 declares `inspect`
-only; 03 adds `conform` handler by handler; 04 adds `convert` plus each
-handler's target list. The `formats` output spec moves with the
-declarations, since the command's expected output changes when
-capabilities do.
+**`capabilities` tracks what has shipped, never what is planned —
+because it is derived, not declared.** A handler's capabilities are
+read off the operations it overrides on `Handlers::Base`, so
+`claricle formats` is truthful at every commit, including the commits
+inside an item. Amended 2026-08-18: an earlier draft used a
+`capabilities` class macro. A declaration is a second place to state
+what the code already says, and it can advertise an operation that is
+still `Base`'s raising stub — the exact lie the macro existed to
+prevent. Deriving makes that unrepresentable.
+
+So 02 gets `inspect` by implementing `inspection`; 03 gets `conform`
+the same way, handler by handler; 04 gets `convert`. Item 04's
+per-handler **target list stays a real declaration**, because a list of
+targets is data rather than a boolean. The `formats` output spec still
+moves with the handlers, since the command's expected output changes as
+operations land.
 
 ## Acceptance criteria → items
 

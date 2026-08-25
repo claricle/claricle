@@ -15,7 +15,7 @@ delegates are path- or content-oriented as noted):
 
 | Handler (formats) | Delegate call | Metadata source |
 |---|---|---|
-| `Handlers::Png` (`:png`) | A chunk **reader**, not the validator — `PngConform::Readers::FullLoadReader` was measured exposing `each_chunk`, `signature`, `png`, `file_size`. It accepts signature-only or signature-plus-junk input and simply yields zero chunks, so "no exception" cannot mean `parse_status: "ok"` — require a readable `IHDR` before declaring success. Routing inspection through `ValidationService` would make `inspect` mean conformance for PNG and metadata for everything else | header chunk: width/height/bit depth/colour type |
+| `Handlers::Png` (`:png`) | A chunk **reader**, not the validator — `PngConform::Readers::StreamingReader` is the entry point actually used -- `FullLoadReader` was measured first but is `read_until: :eof`, so it reads past `IEND`, owns and leaks the file it opens, and rejects a Pathname. The streaming reader exposes `each_chunk`, stops at `IEND`, and closes its own file. It accepts signature-only, short-signature, and signature-plus-a-complete-but-meaningless-length input and simply yields zero chunks -- though signature plus a PARTIAL length field (1 to 3 bytes) raises `IOError: data truncated` instead, so "junk after the signature" is not one behaviour but two, split on whether the 4-byte length field is complete, so "no exception" cannot mean `parse_status: "ok"` — require a readable `IHDR` before declaring success. Routing inspection through `ValidationService` would make `inspect` mean conformance for PNG and metadata for everything else | header chunk: width/height/bit depth/colour type |
 | `Handlers::Svg` (`:svg`) | `Vectory::Svg.from_content(image.content)`. **`Vectory::NotImplementedError` means "no dimensions", not "parse failed"** — measured: a *valid* SVG with no width/height/viewBox raises it, while a *malformed* SVG carrying `width="7"` returns 7. So dimensions are nullable, that error maps to nil dimensions, and `parse_status` must come from Claricle's own structural check (D23), never from whether the dimension read raised | width/height (nullable); root attributes into `meta` |
 | `Handlers::Metafile` (`:emf` only) | `::Emf.parse(image.content)` | header bounds/device dims. `metafile.emf_plus` was nil on our fixture, and when present it is packed binary — putting it straight into `meta` risks `JSON::GeneratorError`, so expose presence, byte size and optionally Base64, never the raw bytes ⚙ confirm against a real EMF+ file before writing the spec |
 | `Handlers::Postscript` (`:eps, :ps`) | `Vectory::Eps`/`Ps` for dims — measured `100.0x50.0`, **floats not integers**. `::Postscript.parse` for DSC structure only; it is not a validity signal (D22), so a successful parse says nothing about conformance | dims; DSC header fields into `meta` |
@@ -35,10 +35,11 @@ turned out false.
 - Handlers must reference delegates with `::` — `Claricle::Handlers::X`
   shadows top-level constants (`Emf`, `Postscript`).
 - Heavy delegates are `require`d lazily inside each handler (D5).
-- `capabilities` class macro declares the per-op support the `formats`
-  command prints. **02 declares `inspect` only** — nothing else works
-  yet, and `formats` must not advertise it. 03 and 04 extend the
-  declarations as they ship (see 00's capabilities rule).
+- `capabilities` is **derived** from the operations a handler overrides
+  on `Handlers::Base`, not declared by a macro. **02 yields `inspect`
+  only** — nothing else is implemented, so `formats` cannot advertise
+  it. 03 and 04 extend it by implementing the operations (see 00's
+  capabilities rule).
 - `Inspection#parse_status` is `"ok"` or `"failed"` — "did the metadata
   parse", never a validity claim (01's inspection contract). An
   **allowlisted** parse error becomes `"failed"` plus one
@@ -89,13 +90,15 @@ Plumbing first, then one handler per commit. The order matters: the
 it, and after that every handler arrives as a complete slice.
 
 1. Add deps; verify resolution.
-2. `capabilities` macro on `Handlers::Base` + `formats` command + spec
-   against the still-empty registry (prints no formats).
+2. `capabilities` derivation on `Handlers::Base` + `formats` command +
+   spec against the still-empty registry (prints no formats).
 3. `inspect` command + `--json` + missing-file exit-2 spec, still
    against the empty registry.
 4. One handler per commit, each commit carrying the whole slice: the
-   handler class, its `capabilities :inspect` declaration, its
-   `require` in `registry.rb`, its `HANDLER_CLASSES` entry, its
+   handler class (its capabilities are derived from the operations it
+   overrides, not declared — a declaration can advertise an operation
+   that is still `Base`'s raising stub), its `require` in
+   `registry.rb`, its `HANDLER_CLASSES` entry, its
    spec against a real fixture, and the `formats` expected-output
    update. No commit ever advertises an operation it didn't ship.
 5. Replace 01's "no handler registered" spec example.
