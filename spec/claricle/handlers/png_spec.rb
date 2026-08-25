@@ -28,6 +28,30 @@ class RecordingIO < StringIO
   end
 end
 
+# The same log, but wrapped around a REAL pipe reader rather than a
+# StringIO. The `Errno::ESPIPE` that sends `skip` down its drain comes
+# out of the kernel here -- a double told to raise it would prove only
+# that the rescue clause is spelled correctly. No `pos`: a pipe has no
+# position to record, which is the whole point of it.
+class RecordingPipe
+  attr_reader :calls
+
+  def initialize(io)
+    @io = io
+    @calls = []
+  end
+
+  def read(length = nil)
+    @calls << [:read, length]
+    @io.read(length)
+  end
+
+  def seek(length, whence = IO::SEEK_SET)
+    @calls << [:seek, length]
+    @io.seek(length, whence)
+  end
+end
+
 RSpec.describe "Claricle PNG handler" do
   let(:handler) { Claricle.const_get(:Handlers).const_get(:Png).new }
 
@@ -72,9 +96,73 @@ RSpec.describe "Claricle PNG handler" do
   # handler itself, since `private_constant` doesn't block that.
   def chunk_reader_for(bytes)
     io = RecordingIO.new(bytes)
-    chunk_reader_class = Claricle.const_get(:Handlers).const_get(:Png).const_get(:ChunkReader)
 
     [chunk_reader_class.new(io), io]
+  end
+
+  def chunk_reader_class
+    Claricle.const_get(:Handlers).const_get(:Png).const_get(:ChunkReader)
+  end
+
+  # A real pipe, torn down in an ensure -- a spec that stops reading
+  # early would otherwise leave the feeder blocked on a full buffer.
+  def with_fed_pipe(bytes)
+    reader, writer = IO.pipe
+    feeder = feed(writer, bytes)
+
+    yield(reader)
+  ensure
+    feeder&.kill
+    reader&.close
+  end
+
+  # From a thread, so bytes past the pipe buffer do not deadlock.
+  def feed(writer, bytes)
+    Thread.new do
+      writer.write(bytes)
+    rescue Errno::EPIPE
+      nil # the reader went away first; there is nothing left to feed
+    ensure
+      writer.close
+    end
+  end
+
+  # `gather` driven straight off a pipe, with its calls recorded.
+  def with_piped_chunk_reader(bytes)
+    with_fed_pipe(bytes) do |reader|
+      # Binary, like the reader library opens its own file: without it a
+      # trailing `read` with no length comes back tagged UTF-8 and stops
+      # comparing equal to the packed bytes it actually holds.
+      reader.binmode
+      io = RecordingPipe.new(reader)
+
+      yield(chunk_reader_class.new(io), io)
+    end
+  end
+
+  # A PNG carrying a large unwanted chunk before its pHYs, so anything
+  # reading it off a pipe has to drain that chunk and land exactly on
+  # the next header.
+  def png_with_fat_text_before_phys
+    png_with_trailing(fat_text + chunk("pHYs", square_phys) + chunk("IEND", ""))
+  end
+
+  # 2835 pixels per metre on both axes -- 72.01 dpi, the same value the
+  # phys.png fixture carries.
+  def square_phys
+    [2835, 2835, 1].pack("NNC")
+  end
+
+  # 100,002 bytes of payload: far past any read this handler is allowed
+  # to make, and past the pipe buffer too, so draining it is real work.
+  def fat_text
+    chunk("tEXt", "k\x00#{"x" * 100_000}")
+  end
+
+  # Served over a real pipe through `/dev/fd/<n>`, which is the only
+  # shape that reaches `skip`'s ESPIPE fallback end to end.
+  def with_piped_path(bytes)
+    with_fed_pipe(bytes) { |reader| yield("/dev/fd/#{reader.fileno}") }
   end
 
   # `validate` returns the FileAnalysis itself, not a result wrapping one.
@@ -474,6 +562,32 @@ RSpec.describe "Claricle PNG handler" do
       payload_reads = io.calls.count { |method, n, _pos| method == :read && n == 13 }
       expect(payload_reads).to eq(1)
     end
+
+    # The two above bound an UNWANTED chunk, where the allowlist would
+    # stop the read even if the cap did not. This one is a wanted type
+    # on its first occurrence, fully backed by real bytes: the cap is
+    # the only thing between it and a 100 KB read, so it is the only
+    # example that goes red if `read_chunk_data` starts trusting a
+    # declared length.
+    it "caps a wanted chunk's own payload and steps over the rest" do
+      header = [4, 3, 8, 6, 0, 0, 0].pack("NNC5")
+      fat_phys = chunk("pHYs", "p" * 100_000)
+      chunk_reader, io = chunk_reader_for(chunk("IHDR", header) + fat_phys + chunk("IEND", ""))
+      into = []
+
+      chunk_reader.gather(into: into)
+
+      # 13 bytes of IHDR kept whole, 32 of pHYs kept out of 100,000.
+      expect(into.map { |kept| kept.data.bytesize }).to eq([13, 32])
+      reads = io.calls.select { |method, _n, _pos| method == :read }
+      expect(reads.map { |_method, n, _pos| n }.max).to eq(32)
+      # The remaining 99,968 bytes are seeked, not read, from just past
+      # the capped payload at offset 65.
+      expect(io.calls).to include([:seek, 99_968, 65])
+      # And the stream is still aligned afterwards: all that is left is
+      # the CRC of the IEND whose header ended the loop.
+      expect(io.read).to eq([Zlib.crc32("IEND")].pack("N"))
+    end
   end
 
   # The full reader owned the file it opened and closed it only on an
@@ -509,21 +623,68 @@ RSpec.describe "Claricle PNG handler" do
     expect(image.path).to be_a(String).and be_frozen
   end
 
-  # `Image.from_path` accepts any path, including one that cannot be
-  # sought -- `Detector`'s own specs already treat a pipe as a supported
-  # input shape. `skip`'s seek falls back to a bounded drain on
-  # `Errno::ESPIPE`, so this keeps working rather than raising.
-  it "inspects a PNG read through a non-seekable pipe" do
-    reader, writer = IO.pipe
-    Thread.new do
-      writer.write(File.binread(fixture("valid.png")))
-      writer.close
+  # A path that cannot be sought, which is what `skip`'s `Errno::ESPIPE`
+  # rescue exists for. The supported shape is narrow and these pin both
+  # sides of it.
+  describe "a non-seekable path" do
+    # The public entry point, not `handler.inspection`: what a caller
+    # holds is an Image. The format has to be given, because detection
+    # reads the path and a pipe hands its bytes out exactly once.
+    #
+    # A fat tEXt sits BEFORE the pHYs on purpose. Reaching the dpi at
+    # all means the drain consumed 100,006 bytes and stopped on the
+    # next header, so the assertion below is about alignment, not just
+    # about not raising.
+    it "inspects a PNG whose format it is given" do
+      with_piped_path(png_with_fat_text_before_phys) do |path|
+        inspection = Claricle::Image.new(format: :png, path: path).inspection
+
+        expect(inspection).to have_attributes(parse_status: "ok", width: 4.0, height: 3.0)
+        expect(inspection.dpi).to be_within(0.01).of(72.01)
+      end
     end
 
-    inspection = handler.inspection(Claricle::Image.new(format: :png, path: "/dev/fd/#{reader.fileno}"))
+    # The other side of the same boundary, and the reason the paragraph
+    # on `skip` says "not `Image.from_path`". Detection opens the path
+    # and consumes the signature, so inspection reopens `/dev/fd/<n>`
+    # onto a stream that has already moved. If the detector ever stops
+    # doing that, this goes red -- which is the signal to widen the
+    # claim rather than a reason to loosen the example.
+    it "reports an unreadable header when the format is detected instead" do
+      with_piped_path(png_with_fat_text_before_phys) do |path|
+        image = Claricle::Image.from_path(path)
 
-    expect(inspection).to have_attributes(parse_status: "ok", width: 4.0, height: 3.0)
-  ensure
-    reader.close
+        expect(image.format).to eq(:png)
+        expect(image.inspection).to have_attributes(
+          parse_status: "failed",
+          issues: [have_attributes(code: "png.ihdr_unreadable")]
+        )
+      end
+    end
+
+    # Driven against a real pipe reader rather than the whole handler,
+    # so the drain's own reads are visible. Both of the mutations that
+    # the earlier version of this example survived now fail it: one
+    # unbounded read blows the size assertion, and a drain that does
+    # nothing loses the pHYs and the tail.
+    it "drains what it cannot seek in bounded reads" do
+      tail = "#{chunk("IEND", "")}TAIL"
+      into = []
+
+      with_piped_chunk_reader(fat_text + chunk("pHYs", square_phys) + tail) do |chunk_reader, io|
+        chunk_reader.gather(into: into)
+
+        reads = io.calls.filter_map { |method, n| n if method == :read }
+        # 100,006 bytes of payload and CRC over a 16 KiB buffer: six
+        # full reads and a remainder, never one big one and never none.
+        expect(reads.max).to eq(16_384)
+        expect(reads.count(16_384)).to eq(6)
+        # Alignment, twice over: the pHYs behind the drained chunk came
+        # back whole, and what is left on the pipe is exactly the CRC of
+        # the IEND that ended the loop plus the sentinel after it.
+        expect(into.map { |kept| [kept.type, kept.data] }).to eq([["pHYs", square_phys]])
+        expect(io.read).to eq("#{[Zlib.crc32("IEND")].pack("N")}TAIL")
+      end
+    end
   end
 end
