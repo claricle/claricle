@@ -130,6 +130,15 @@ RSpec.describe "the documentation" do
       end
     end
 
+    # detector_spec already pins the behaviour, so the `claims` line is
+    # what makes this more than a replica of it: deleting the README
+    # sentence has to go red, not just changing the detector.
+    it "admits that an SVG is only detected with its namespace" do
+      claims("An SVG is recognised only when its root carries the SVG namespace")
+      expect { Claricle.detect(%(<svg width="10" height="10"/>)) }
+        .to raise_error(Claricle::UnknownFormat)
+    end
+
     # Exact, not inclusion-only: an inclusion check misses a command the
     # CLI has that the README doesn't -- Thor 1.5 adds `tree` to every
     # subclass, and that slipped past an inclusion-only version of this
