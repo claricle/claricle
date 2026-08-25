@@ -32,7 +32,7 @@ RSpec.describe "Claricle format detection" do
       it "detects #{name} as #{format} from content and from a path" do
         expect(Claricle.detect(fixture.call(name))).to eq(format)
         with_file.call(fixture.call(name)) do |path|
-          expect(Claricle.detect_path(path)).to eq(format)
+          expect(Claricle::Image.from_path(path).format).to eq(format)
         end
       end
     end
@@ -46,7 +46,7 @@ RSpec.describe "Claricle format detection" do
       it "detects #{format} from content and from a path" do
         expect(Claricle.detect(content)).to eq(format)
         with_file.call(content) do |path|
-          expect(Claricle.detect_path(path)).to eq(format)
+          expect(Claricle::Image.from_path(path).format).to eq(format)
         end
       end
     end
@@ -73,14 +73,14 @@ RSpec.describe "Claricle format detection" do
       it "finds EPSF starting at byte #{padding + 4}, from content and from a path" do
         content = "%!PS#{" " * padding}EPSF\n"
         expect(Claricle.detect(content)).to eq(:eps)
-        with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:eps) }
+        with_file.call(content) { |path| expect(Claricle::Image.from_path(path).format).to eq(:eps) }
       end
     end
 
     it "stops at the line end rather than running on to a later EPSF" do
       content = "%!PS-Adobe-3.0\n#{" " * 8000}EPSF\n"
       expect(Claricle.detect(content)).to eq(:ps)
-      with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:ps) }
+      with_file.call(content) { |path| expect(Claricle::Image.from_path(path).format).to eq(:ps) }
     end
 
     # PostScript ends a line with CR, LF or CRLF. Scanning only for LF runs
@@ -92,20 +92,20 @@ RSpec.describe "Claricle format detection" do
     }.each do |terminator, content|
       it "treats EPSF on the second line of a #{terminator}-terminated file as :ps" do
         expect(Claricle.detect(content)).to eq(:ps)
-        with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:ps) }
+        with_file.call(content) { |path| expect(Claricle::Image.from_path(path).format).to eq(:ps) }
       end
     end
 
     it "finds EPSF on a first line that never ends" do
       content = "%!PS#{" " * 508}EPSF"
       expect(Claricle.detect(content)).to eq(:eps)
-      with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:eps) }
+      with_file.call(content) { |path| expect(Claricle.const_get(:Detector).detect_path(path)).to eq(:eps) }
     end
 
     it "finds EPSF comfortably inside the scan ceiling" do
       content = "%!PS#{" " * 12_000}EPSF\n"
       expect(Claricle.detect(content)).to eq(:eps)
-      with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:eps) }
+      with_file.call(content) { |path| expect(Claricle::Image.from_path(path).format).to eq(:eps) }
     end
 
     # The literal case this ceiling exists for: an unterminated first line
@@ -114,7 +114,7 @@ RSpec.describe "Claricle format detection" do
     it "gives up on a first line that never ends past the scan ceiling" do
       content = "%!PS#{" " * 99_996}EPSF"
       expect(Claricle.detect(content)).to eq(:ps)
-      with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:ps) }
+      with_file.call(content) { |path| expect(Claricle.const_get(:Detector).detect_path(path)).to eq(:ps) }
     end
 
     # A file that ends inside the third window, past HEADER_BYTES and
@@ -127,7 +127,7 @@ RSpec.describe "Claricle format detection" do
         content = "%!PS#{" " * (size - 8)}EPSF"
         expect(content.bytesize).to eq(size)
         expect(Claricle.detect(content)).to eq(:eps)
-        with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:eps) }
+        with_file.call(content) { |path| expect(Claricle.const_get(:Detector).detect_path(path)).to eq(:eps) }
       end
     end
 
@@ -141,7 +141,7 @@ RSpec.describe "Claricle format detection" do
     it "does not trust a token landing exactly on the ceiling's edge" do
       content = "%!PS#{" " * 12_280}EPSFX\n"
       expect(Claricle.detect(content)).to eq(:ps)
-      with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:ps) }
+      with_file.call(content) { |path| expect(Claricle.const_get(:Detector).detect_path(path)).to eq(:ps) }
     end
 
     # EPSF is a whitespace-delimited field in the header, so a substring
@@ -250,7 +250,7 @@ RSpec.describe "Claricle format detection" do
     it "detects a root sitting behind a 5000-byte comment" do
       content = "<!--#{"x" * 5000}--><svg xmlns=\"#{svg_ns}\"/>"
       expect(Claricle.detect(content)).to eq(:svg)
-      with_file.call(content) { |path| expect(Claricle.detect_path(path)).to eq(:svg) }
+      with_file.call(content) { |path| expect(Claricle::Image.from_path(path).format).to eq(:svg) }
     end
   end
 
@@ -279,7 +279,7 @@ RSpec.describe "Claricle format detection" do
     it "refuses empty content and an empty file" do
       expect { Claricle.detect("") }.to raise_error(Claricle::UnknownFormat)
       with_file.call("") do |path|
-        expect { Claricle.detect_path(path) }.to raise_error(Claricle::UnknownFormat)
+        expect { Claricle::Image.from_path(path) }.to raise_error(Claricle::UnknownFormat)
       end
     end
 

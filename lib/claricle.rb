@@ -28,15 +28,11 @@ module Claricle
   # reached; content beyond the bound is left unread on the IO rather
   # than buffered. It should be in binary mode; newline translation
   # would corrupt the signatures this matches on. Pass a path to
-  # `detect_path` to stream from a file instead of buffering.
+  # `Image.from_path` to stream from a file instead of buffering.
   def self.detect(source)
     return Detector.detect(source) unless source.respond_to?(:read)
 
     Detector.detect(accumulate(source))
-  end
-
-  def self.detect_path(path)
-    Detector.detect_path(path)
   end
 
   # Grows `buffer` by reading from `source` a chunk at a time, stopping
