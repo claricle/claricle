@@ -15,7 +15,7 @@ RSpec.describe "Claricle::Registry" do
   # Item 01 asserted the registry shipped empty. Item 02 fills it, so the
   # replacement pins the exact set and its owning classes -- "every listed
   # class appears" would pass for any incomplete list, which is the one
-  # failure mode requiring from registry.rb cannot catch.
+  # failure mode that requiring from registry.rb cannot catch.
   describe "what ships registered" do
     it "lists exactly the handler classes it names" do
       expect(registry.const_get(:HANDLER_CLASSES))

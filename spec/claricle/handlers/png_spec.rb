@@ -255,9 +255,10 @@ RSpec.describe "Claricle PNG handler" do
     # Every length below 9 is covered, not a sample: unpack skips a
     # directive it lacks bytes for but keeps reading the rest from where
     # it started, so the lengths behave in three groups rather than one.
-    # 1..3 gave [nil, nil, 1] -- unit passed, then nil was multiplied --
-    # and 5..7 gave [value, nil, 1], a dpi the chunk never carried. Both
-    # sat between the lengths an obvious sample would have picked.
+    # 1..3 gave [nil, nil, 1] -- unit passed, then nil was multiplied,
+    # which is the crash this gate stops. 5..7 gave [value, nil, 1],
+    # which the axis check rejects on its own. Both sat between the
+    # lengths an obvious sample would have picked.
     (0...9).each do |length|
       it "is nil when pHYs carries only #{length} bytes" do
         bytes = png_with_phys("\x01" * length)
@@ -449,8 +450,8 @@ RSpec.describe "Claricle PNG handler" do
 
     # Stubbed, and deliberately so: no code path in png_conform 0.1.4
     # raises this. It is the delegate's declared parse failure and the
-    # gemspec admits any 0.1.x, so this pins what happens the day a patch
-    # release starts raising it -- "failed", not exit 4.
+    # gemspec admits every later 0.1.x, so this pins what happens the day
+    # a patch release starts raising it -- "failed", not exit 4.
     #
     # Raises the BASE `PngConform::Error`, not `ParseError`: `ParseError`
     # is a subclass, so a regression that narrowed the rescue clause to
@@ -501,9 +502,11 @@ RSpec.describe "Claricle PNG handler" do
     end
   end
 
-  # An allowlist, so IDAT and IEND both stay out. `gather` skips both
-  # over rather than reading them, so a PNG carrying a huge ancillary
-  # chunk never costs more than that chunk's own 8-byte header.
+  # An allowlist, so IDAT and IEND both stay out. `gather` steps over
+  # both rather than reading them, so on a seekable IO a PNG carrying a
+  # huge ancillary chunk never costs more than that chunk's own 8-byte
+  # header. The pipe examples at the end of this file are the other
+  # case, where those bytes are read and thrown away.
   describe "what it keeps" do
     it "retains only the wanted chunks" do
       chunks = handler.send(:read_chunks,

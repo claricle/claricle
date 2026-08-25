@@ -102,9 +102,7 @@ module Claricle
         #
         # `KIND_OF.bind_call`, not `is_a?`: a subclass that overrides
         # `is_a?` must not talk its way past this.
-        unless KIND_OF.bind_call(path, ::String)
-          path = path.to_path if path.respond_to?(:to_path)
-        end
+        path = path.to_path if !KIND_OF.bind_call(path, ::String) && path.respond_to?(:to_path)
 
         unless KIND_OF.bind_call(path, ::String)
           raise ArgumentError,

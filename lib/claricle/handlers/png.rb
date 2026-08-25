@@ -27,8 +27,11 @@ module Claricle
 
       # An allowlist, not "everything except IDAT". These two chunks are
       # the only ones `gather` ever reads the payload of -- everything
-      # else is skipped over unread, so a PNG carrying a huge ancillary
-      # chunk never costs more than its own 8-byte header (D-bounded-read).
+      # else is stepped over, so a PNG carrying a huge ancillary chunk
+      # never costs more than its own 8-byte header where the IO can
+      # seek. Where it cannot, `drain` reads those bytes and throws them
+      # away, so what stays bounded there is memory, not bytes read
+      # (D-bounded-read).
       WANTED_CHUNKS = %w[IHDR pHYs].freeze
 
       # png_conform's own vocabulary, verified against ImageInfo#color_type
@@ -92,7 +95,7 @@ module Claricle
             if wanted?(type, into)
               break unless capture!(type, length, into: into)
             else
-              skip(length + 4) # payload plus the CRC neither side reads
+              skip(length + 4) # payload plus the CRC, neither read here
             end
           end
         end
@@ -196,7 +199,7 @@ module Claricle
 
       def inspection(image)
         chunks = read_chunks(image)
-        ihdr = chunks.find { |chunk| chunk.type.to_s == "IHDR" }
+        ihdr = chunks.find { |chunk| chunk.type == "IHDR" }
 
         return unreadable(image) unless usable_ihdr?(ihdr)
 
@@ -262,8 +265,8 @@ module Claricle
       #
       # PngConform::Error stays named although no code path in 0.1.4
       # raises it: it is the delegate's declared parse failure, the
-      # gemspec allows any 0.1.x, and a patch release that starts raising
-      # it would otherwise turn a bad file into exit 4. ParseError
+      # gemspec admits every later 0.1.x, and a patch release that starts
+      # raising it would otherwise turn a bad file into exit 4. ParseError
       # descends from it, so naming both is redundant.
       rescue PngConform::Error
         chunks
@@ -308,7 +311,7 @@ module Claricle
 
       # One message for every way the header can be unreadable: absent,
       # the wrong length, or never reached because the read itself failed.
-      # Naming only the length case would misdescribe the other three.
+      # Naming only the length case would misdescribe the other two.
       def unreadable_issue
         Models::Issue.new(
           severity: "error",
@@ -321,12 +324,14 @@ module Claricle
       # rather than a physical unit. Both are ordinary files, not errors.
       #
       # The length is checked before unpacking, because unpack skips a
-      # directive it has too few bytes for but keeps reading the rest from
-      # where it started: a 1-byte pHYs gives [nil, nil, 1], which passes
-      # the unit check and then multiplies nil, and a 5-byte one gives
-      # [value, nil, 1], which yields a dpi the chunk never carried.
+      # directive it has too few bytes for but keeps reading the rest
+      # from where it started. Measured across every length below 9:
+      # 1 to 3 give [nil, nil, 1], which passes the unit check and then
+      # multiplies nil. 5 to 7 give [value, nil, 1], which the axis check
+      # below rejects on its own. So this gate stops a crash, not a wrong
+      # number.
       def dpi(chunks)
-        phys = chunks.find { |chunk| chunk.type.to_s == "pHYs" }
+        phys = chunks.find { |chunk| chunk.type == "pHYs" }
         return nil unless phys && phys.data.bytesize >= PHYS_BYTES
 
         # dpi is a single number, so a PNG with non-square pixels has no

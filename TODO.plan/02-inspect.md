@@ -15,7 +15,7 @@ delegates are path- or content-oriented as noted):
 
 | Handler (formats) | Delegate call | Metadata source |
 |---|---|---|
-| `Handlers::Png` (`:png`) | A chunk **reader**, not the validator — `PngConform::Readers::StreamingReader` is the entry point actually used -- `FullLoadReader` was measured first but is `read_until: :eof`, so it reads past `IEND`, owns and leaks the file it opens, and rejects a Pathname. The streaming reader exposes `each_chunk`, stops at `IEND`, and closes its own file. It accepts signature-only, short-signature, and signature-plus-a-complete-but-meaningless-length input and simply yields zero chunks -- though signature plus a PARTIAL length field (1 to 3 bytes) raises `IOError: data truncated` instead, so "junk after the signature" is not one behaviour but two, split on whether the 4-byte length field is complete, so "no exception" cannot mean `parse_status: "ok"` — require a readable `IHDR` before declaring success. Routing inspection through `ValidationService` would make `inspect` mean conformance for PNG and metadata for everything else | header chunk: width/height/bit depth/colour type |
+| `Handlers::Png` (`:png`) | A chunk **reader**, not the validator — `PngConform::Readers::StreamingReader` is the entry point actually used -- `FullLoadReader` was measured first but is `read_until: :eof`, so it reads past `IEND`, owns and leaks the file it opens, and rejects a Pathname. The streaming reader stops at `IEND` and closes its own file. The handler does not call `each_chunk`: it drives `reader.io` by hand, so it can read an 8-byte header and decide before touching a payload, which is what bounds the read. Measured — `open` raises nothing on a signature followed by 0 to 4 junk bytes, it just leaves the IO at byte 8, so "no exception" cannot mean `parse_status: "ok"` — require a readable `IHDR` before declaring success. Routing inspection through `ValidationService` would make `inspect` mean conformance for PNG and metadata for everything else | `IHDR`: width/height/bit depth/colour type; `pHYs`: dpi |
 | `Handlers::Svg` (`:svg`) | `Vectory::Svg.from_content(image.content)`. **`Vectory::NotImplementedError` means "no dimensions", not "parse failed"** — measured: a *valid* SVG with no width/height/viewBox raises it, while a *malformed* SVG carrying `width="7"` returns 7. So dimensions are nullable, that error maps to nil dimensions, and `parse_status` must come from Claricle's own structural check (D23), never from whether the dimension read raised | width/height (nullable); root attributes into `meta` |
 | `Handlers::Metafile` (`:emf` only) | `::Emf.parse(image.content)` | header bounds/device dims. `metafile.emf_plus` was nil on our fixture, and when present it is packed binary — putting it straight into `meta` risks `JSON::GeneratorError`, so expose presence, byte size and optionally Base64, never the raw bytes ⚙ confirm against a real EMF+ file before writing the spec |
 | `Handlers::Postscript` (`:eps, :ps`) | `Vectory::Eps`/`Ps` for dims — measured `100.0x50.0`, **floats not integers**. `::Postscript.parse` for DSC structure only; it is not a validity signal (D22), so a successful parse says nothing about conformance | dims; DSC header fields into `meta` |
@@ -77,9 +77,14 @@ turned out false.
   schema. Missing file → exit 2 (runner spec example deferred from 01
   lands here).
 - Registry: `HANDLER_CLASSES` gains the five classes. Each handler file
-  is required in `registry.rb` itself, next to the list that names it —
-  the frozen map derives at load time and there is no autoloading, so a
-  missing require is a `NameError` at boot, not a lazy failure. Replace
+  is required **at the top of `registry.rb`**, above the list that
+  names it — item 01 deliberately replaced the original "require from
+  `lib/claricle.rb` before registry" rule, because that made the entry
+  point's ordering load-bearing. The frozen map still derives at load
+  and there is still no autoloading, so a class named but not required
+  is a `NameError` at boot; a handler required but omitted from the list
+  is the silent case, and item 02 catches it by asserting the exact
+  expected format set rather than a self-consistency check. Replace
   01's "no handler registered" spec example with
   `from_content("x", format: :unregistered)`.
 
