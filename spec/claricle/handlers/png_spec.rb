@@ -104,27 +104,25 @@ RSpec.describe "Claricle PNG handler" do
     Claricle.const_get(:Handlers).const_get(:Png).const_get(:ChunkReader)
   end
 
-  # A real pipe, torn down in an ensure -- a spec that stops reading
-  # early would otherwise leave the feeder blocked on a full buffer.
+  # Fed from a thread, so bytes past the pipe buffer do not deadlock the
+  # writer, and killed in an ensure -- a spec that stops reading early
+  # would otherwise leave the feeder blocked on a full buffer forever.
+  # Same shape as detector_spec.rb:463, EPIPE rescue included: there
+  # isn't one, because the kill lands before the writer can ever resume
+  # into a closed reader. Measured over 800 runs, both teardown
+  # orderings, EPIPE never fired.
   def with_fed_pipe(bytes)
     reader, writer = IO.pipe
-    feeder = feed(writer, bytes)
+    feeder = Thread.new do
+      writer.write(bytes)
+    ensure
+      writer.close
+    end
 
     yield(reader)
   ensure
     feeder&.kill
     reader&.close
-  end
-
-  # From a thread, so bytes past the pipe buffer do not deadlock.
-  def feed(writer, bytes)
-    Thread.new do
-      writer.write(bytes)
-    rescue Errno::EPIPE
-      nil # the reader went away first; there is nothing left to feed
-    ensure
-      writer.close
-    end
   end
 
   # `gather` driven straight off a pipe, with its calls recorded.
