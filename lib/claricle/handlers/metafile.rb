@@ -46,41 +46,48 @@ module Claricle
       # end of stream, which retires the guard that catches it.
       END_OF_STREAM = :end_of_stream
 
-      # Bounds the walk's RECORD count, not merely its bytes. The byte
-      # limit alone still admits a stream built entirely of minimum-size
-      # records: measured, 200 MiB of them is 26,214,400 records and
-      # costs upward of 20 CPU seconds to cross -- a real cost, paid on
-      # every inspection up to the byte boundary, that the byte limit
-      # alone does not bound. This budget stops the count well short of
-      # that: measured, 500,000 EMR_COMMENT records -- the costliest
-      # shape a record can take, allocating two strings apiece -- walk
-      # in under a second.
-      RECORD_LIMIT = 500_000
-
-      # Bytes of EMF+ payload, or **nil when the walk did not run to
-      # completion**.
+      # Bytes of EMF+ payload, or **nil when the stream was over the byte
+      # limit and nothing was examined at all**.
       #
-      # Those are different answers from zero and an earlier version
+      # That is a different answer from zero and an earlier version
       # conflated them. Zero means the walk ran to completion and found
       # none -- including when framing broke partway, since what it read
-      # before the break is still established. Nil means either the
-      # stream was over the byte limit and nothing was examined at all,
-      # or the record budget ran out before the walk could finish -- in
-      # both cases the walk cannot say what the rest of the stream
-      # holds, so it must not report absence on the strength of bytes it
-      # never reached. A stream one byte over the byte limit can carry
-      # `EMF+` in its very first record; answering zero there would be
-      # exactly that mistake.
+      # before the break is still established. Nil means the walk never
+      # ran, so it cannot say what the stream holds and must not report
+      # absence on the strength of bytes nobody read. A stream one byte
+      # over the limit can carry `EMF+` in its very first record;
+      # answering zero there would be exactly that mistake.
       #
       # The byte limit matches the delegate's own:
       # `Emf::Emr::Parser::MAX_INPUT_BYTES` is the same 200 MiB and
       # refuses on the same `>`. What it buys is that the cost stops
-      # growing past it. The record budget is what actually keeps the
-      # cost inside that boundary small.
+      # growing past it.
+      #
+      # The iteration budget handed to `walk` is derived, not chosen. It
+      # exists only so a defect in `record_at` cannot spin the walk on
+      # one offset forever: `record_at` refuses a record declaring fewer
+      # than RECORD_HEADER_BYTES, so every step advances at least that
+      # far, and the content is at most `limit` bytes -- so
+      # `limit / RECORD_HEADER_BYTES` steps always outlast the bytes and
+      # the budget can never bind first.
+      #
+      # It used to be a flat 500,000 and that WAS a ceiling a real file
+      # could hit. EMR_SETMETARGN is a valid parameterless 8-byte record
+      # and EMR_HEADER's record count is an unsigned 32-bit field, so an
+      # internally consistent stream of 500,000 of them is ordinary EMF
+      # and only 4.0 MiB long. Measured: it reported no EMF+ verdict at
+      # all, and 499,999 of them reported `emf_plus_present: false`.
+      #
+      # The byte limit is therefore the only thing bounding CPU, and what
+      # that costs is worth writing down. Measured on a stream of
+      # minimum-size records: 3.8 MiB walks in 0.58s and 20.0 MiB in
+      # 3.57s, so the 200 MiB boundary is around 36 seconds. The flat
+      # budget held that near 0.6s -- and refused ordinary files to do
+      # it. Answering a 4 MiB file correctly is worth the worst case.
       def self.size(content, declared, limit)
         return nil if content.bytesize > limit
 
-        walk(content, declared)
+        walk(content, declared, limit / RECORD_HEADER_BYTES)
       end
 
       # Broken framing stops the walk and keeps what came before it.
@@ -91,14 +98,19 @@ module Claricle
       # had its own framing checked before it was counted, so a later
       # break says nothing about the ones already read.
       #
-      # Running out of budget is not the same as broken framing, so it
-      # does not keep the running total the way a framing break does --
-      # nil, not the partial count, because the unexamined remainder
-      # might still carry EMF+ and a partial total would be silent about
-      # that.
-      def self.walk(content, offset)
+      # The line after the loop is the budget running out. With the budget
+      # derived from the byte limit it cannot be reached at all: offset
+      # starts at `declared`, every step adds at least
+      # RECORD_HEADER_BYTES, and `budget` is the byte limit divided by
+      # that, so the end of the content always arrives first. It stays
+      # written for a budget that CAN bind, which is why it still asks
+      # where the offset landed -- a last budgeted step that finished the
+      # stream walked it completely and keeps its total, while one that
+      # stopped short answers nil, because the remainder it never reached
+      # might carry EMF+ and a partial total would be silent about that.
+      def self.walk(content, offset, budget)
         total = 0
-        RECORD_LIMIT.times do
+        budget.times do
           return total if offset >= content.bytesize
 
           advance = step_forward(content, offset, total)
@@ -227,9 +239,11 @@ module Claricle
       PARSE_FAILURES = [::Emf::Error].freeze
 
       # The delegate refuses whole streams above this, so the walk does
-      # not go further than the parser it replaces would have.
+      # not go further than the parser it replaces would have. It bounds
+      # the READ as well: nothing beyond one byte past it is ever
+      # materialised, whatever the stat said the file was.
       #
-      # It bounds the WALK only. Applying it to the header turned a
+      # It does not bound the HEADER. Applying it there turned a
       # fully framed 209 MB EMF with a perfectly readable 100x50 header
       # into `failed`, breaking the header-first contract this handler
       # exists to keep -- the delegate itself parses that header and
@@ -246,18 +260,21 @@ module Claricle
       # walking the record framing here. The delegate is not asked for the
       # second answer because it cannot give it -- see `EmfPlus.size`.
       #
-      # The size decision comes first, from `image.bytesize`, and nothing
-      # below it may read the whole stream before that decision is made.
-      # A stream over `SCAN_LIMIT` never has its content materialised at
-      # all -- only `header_prefix`'s bounded read runs -- because
-      # `image.content` on a path-born image is an unbounded
-      # `File.binread`, and reaching it before the limit is consulted
-      # defeats the limit for exactly the files it exists to bound.
+      # `image.bytesize` is a `File.size` stat, and it decides ONE thing:
+      # whether to bother reading past the fixed header. Every other
+      # decision is made from the bytes `header_prefix` actually returned,
+      # because the stat and the read are separate filesystem calls and
+      # the file is free to change between them. A stat reading high only
+      # makes this under-report, which is the safe direction. A stat
+      # reading low used to send the whole stream through `image.content`
+      # -- an unbounded `File.binread` -- so a file that grew after the
+      # stat was materialised whole, defeating the limit for exactly the
+      # streams it exists to bound.
       def inspection(image)
         bytesize = image.bytesize
         oversized = bytesize > SCAN_LIMIT
         prefix = header_prefix(image, oversized)
-        declared = declared_size(prefix, bytesize)
+        declared = declared_size(prefix, oversized ? bytesize : prefix.bytesize)
         return unreadable(image) unless declared
 
         header = read_header(prefix)
@@ -268,34 +285,48 @@ module Claricle
 
       private
 
-      # The fixed header only, when the stream is over the scan limit --
-      # a path-born image gets a bounded read through `with_source`
-      # rather than `image.content`, so the walk this handler is about to
-      # skip never pays for materialising what it will not examine. At or
-      # under the limit this is the same full content the walk needs
-      # anyway, so nothing is saved by bounding it there.
+      # Every byte the rest of the inspection is allowed to rest on, and
+      # never more than SCAN_LIMIT + 1 of them.
+      #
+      # Over the stat's limit that is the fixed header alone: the walk is
+      # skipped anyway, so nothing past the header is worth reading.
+      # Under it, one byte more than the walk can handle. Getting that
+      # many back proves the stream is over the limit whatever the stat
+      # said; getting fewer proves these bytes ARE the whole stream. So
+      # both answers come from the read rather than from a stat taken
+      # before it, and memory is bounded either way.
       def header_prefix(image, oversized)
-        return image.with_source { |source| bounded_read(source, MINIMUM_HEADER) } if oversized
-
-        image.content
+        length = oversized ? MINIMUM_HEADER : SCAN_LIMIT + 1
+        image.with_source { |source| bounded_read(source, length) }
       end
 
       # Takes an IO or a String, because `with_source` hands over
       # whichever the image is made of: an open file for a path-born
       # image, the bytes already in hand for a content-born one.
+      #
+      # Bounding a String costs nothing when there is nothing to cut.
+      # Measured on 20 MB: a `byteslice` covering the whole string SHARES
+      # it -- 40 bytes of object, no copy -- and only a partial one
+      # copies, which here is the 88-byte header alone. So the String arm
+      # needs no shortcut for the content-born image that is already
+      # inside the bound.
+      #
+      # `IO#read` answers nil at end of stream for a non-zero length --
+      # measured on an empty file -- and an empty stream still has to
+      # reach `declared_size` as a String.
       def bounded_read(source, length)
-        source.respond_to?(:read) ? source.read(length) : source.byteslice(0, length)
+        return source.read(length) || "".b if source.respond_to?(:read)
+
+        source.byteslice(0, length)
       end
 
-      # Over the scan limit `prefix` is only the fixed header, so the
-      # walk cannot run on it -- and `EmfPlus.size` has nothing to add:
-      # its own bytesize check would refuse the same stream, once
-      # `image.content` had already paid for materialising it. Skipping
-      # the call is what keeps that cost from being paid at all.
+      # Over the scan limit `prefix` is only the fixed header, so there
+      # is no walk to ask for. Under it the question is still
+      # `EmfPlus.size`'s to refuse: a prefix that came back at
+      # SCAN_LIMIT + 1 is a stream over the limit however the stat read,
+      # and that call's own bytesize check is what catches it.
       def emf_plus_bytes(prefix, oversized, declared)
-        return nil if oversized
-
-        EmfPlus.size(prefix, declared, SCAN_LIMIT)
+        oversized ? nil : EmfPlus.size(prefix, declared, SCAN_LIMIT)
       end
 
       # The delegate is handed the fixed 88-byte header with `nSize`
@@ -325,11 +356,12 @@ module Claricle
         nil
       end
 
-      # Both `image.content` and `header_prefix`'s bounded read guarantee
-      # BINARY, which matters here because `String#[]=` indexes by
-      # CHARACTER -- a UTF-16LE tag would make this raise on a file the
-      # delegate reads correctly. `byteslice` always allocates, so the
-      # caller's string is never written to.
+      # `header_prefix` guarantees BINARY -- an open file in "rb" mode,
+      # the image's own binary content, or `"".b` -- which matters here
+      # because `String#[]=` indexes by CHARACTER, and a UTF-16LE tag
+      # would make this raise on a file the delegate reads correctly.
+      # `byteslice` always allocates, so the caller's string is never
+      # written to.
       def fixed_header(prefix)
         header = prefix.byteslice(0, MINIMUM_HEADER)
         header[SIZE_OFFSET, 4] = [MINIMUM_HEADER].pack("V")
@@ -343,27 +375,36 @@ module Claricle
       # stream is framed from an impossible offset. This is record framing,
       # not the nBytes/nRecords/nHandles conformance that item 03 owns.
       #
-      # `bytesize` is the STREAM's real length, not `prefix`'s -- over the
-      # scan limit `prefix` is only the fixed header, and bounding this
-      # check to its length would accept a declared size the stream
-      # cannot actually hold.
+      # `available` is how many bytes the stream is KNOWN to hold, and the
+      # caller supplies it differently on each branch. Under the scan
+      # limit it is `prefix.bytesize`, because there the prefix IS the
+      # read: either the whole stream or SCAN_LIMIT + 1 bytes of it, and
+      # both are lengths the stream really has. Over the limit the prefix
+      # is deliberately only the fixed 88 bytes while a legal header may
+      # declare 108, so `prefix.bytesize` would reject perfectly good
+      # large files; there the stat is the only figure there is. The
+      # residual is that a stat reading high over a short file can still
+      # admit a declaration the file cannot hold.
       #
-      # `unpack1` DOES get a nil check here, unlike the in-limit path:
-      # `bytesize` comes from a `File.size` stat taken before
-      # `header_prefix`'s own read, a separate filesystem call the read
-      # can disagree with -- measured, stubbing a stat to report a file
-      # oversized while the real file underneath is a few bytes long
-      # reproduces `prefix.byteslice(4, 4)` handing back fewer than four
-      # bytes, and `unpack1("V")` on that is nil, not an Integer. Without
-      # the check the comparison below raised `NoMethodError` instead of
-      # reporting the file unreadable, which is what any other way this
-      # header fails to parse.
-      def declared_size(prefix, bytesize)
-        return nil if bytesize < MINIMUM_HEADER
+      # Measuring against the stat on BOTH branches was the defect:
+      # measured, a stat of 200 over the 99-byte `declared_100_have_99`
+      # reported `ok` for a header declaring 100, and the walk then began
+      # at offset 100 -- past the real end -- and called that a completed
+      # scan.
+      #
+      # The length guard has to be on `prefix`, not on `available`.
+      # `byteslice(4, 4)` answers nil for a prefix under four bytes and a
+      # short String for one under eight, so an empty or 1-3 byte read
+      # raised `NoMethodError` before any nil `unpack1` could be checked
+      # for -- measured, by stubbing a stat over the limit while the file
+      # underneath is 0, 1 or 3 bytes long. At MINIMUM_HEADER and up the
+      # field is always four bytes, so `unpack1` always gives an Integer.
+      def declared_size(prefix, available)
+        return nil if prefix.bytesize < MINIMUM_HEADER
 
         declared = prefix.byteslice(SIZE_OFFSET, 4).unpack1("V")
-        return nil if declared.nil? || declared < MINIMUM_HEADER
-        return nil if declared > bytesize || !(declared % ALIGNMENT).zero?
+        return nil if declared < MINIMUM_HEADER
+        return nil if declared > available || !(declared % ALIGNMENT).zero?
 
         declared
       end

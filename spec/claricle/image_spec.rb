@@ -403,6 +403,21 @@ RSpec.describe Claricle::Image do
       expect(captured).to be_closed
     end
 
+    # Once the bytes are in hand the file is not needed and must not be
+    # touched. Re-opening it would be a SECOND snapshot of something that
+    # may have changed since, and a reader taking a prefix would then
+    # disagree with #content on the same image. The file is deleted
+    # rather than File.open stubbed, so any way back to it fails.
+    it "yields a path-born image its cached content rather than re-opening the file" do
+      with_file.call(png) do |path|
+        image = described_class.from_path(path)
+        image.content
+        File.delete(path)
+
+        expect(image.with_source { |source| source }).to equal(image.content)
+      end
+    end
+
     # A content-born image has no file to open, so it hands over the
     # bytes it already holds -- the same object, not a copy of them.
     it "yields a content-born image its own content" do

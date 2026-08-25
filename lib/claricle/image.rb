@@ -197,9 +197,19 @@ module Claricle
     # Measured on a 64.0 MiB SVG, whose reader wants 8192 bytes: through
     # #content it cost +64.5 MiB RSS and left the whole file in @content,
     # through this it costs +0.8 MiB and retains nothing.
+    #
+    # Bytes already in hand are handed straight over, whichever way the
+    # image got them. Re-opening the file for an image that has already
+    # read it would take a SECOND snapshot of something that may have
+    # changed since -- and would fail outright for an image whose file
+    # has since gone, which the bytes it is holding do not need.
+    #
+    # `@content` and not `#content`: the reader would SLURP the file for
+    # a path-born image that has never read it, which is the whole cost
+    # this method exists to avoid.
     def with_source(&)
       raise ArgumentError, "with_source requires a block" unless block_given?
-      return yield(content) unless path
+      return yield(@content) if @content
 
       File.open(path, "rb", &)
     end
