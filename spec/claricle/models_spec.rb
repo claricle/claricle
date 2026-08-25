@@ -665,6 +665,25 @@ RSpec.describe Claricle::Models do
       expect(retained).not_to be_frozen
     end
 
+    # `using_default_for` is public lutaml plumbing, meant for its own
+    # deserializer. Called by a caller instead -- reachable through the
+    # block form of `new`, before finalize runs -- it flips a REQUIRED
+    # attribute to "using its default" while the attribute still holds
+    # the value it was given. Rendering skips whatever is marked default,
+    # so the value survives the reader and vanishes from the document:
+    # measured, `to_json` rendered `{"message":"m"}` for an Issue whose
+    # `severity` still read back "info", and reloading that JSON raised
+    # `ValidationError: Missing required attribute: severity`.
+    it "refuses to seal a required attribute flagged as using its default" do
+      expect do
+        models::Issue.new(severity: "info", message: "m") { |i| i.using_default_for(:severity) }
+      end.to raise_error(Lutaml::Model::ValidationError, /severity expects recorded as explicitly set/)
+    end
+
+    it "still accepts an optional attribute legitimately left at its default" do
+      expect(models::Issue.new(severity: "info", message: "m").code).to be_nil
+    end
+
     it "is idempotent, so an aggregate can seal members twice" do
       inner = models::Issue.new(severity: "info", message: "m")
       expect { models::Report.new(issues: [inner]) }.not_to raise_error
