@@ -122,9 +122,9 @@ RSpec.describe Claricle::Image do
     # and died on File.binread(false).
     it "refuses a path that is not a String" do
       expect { described_class.new(format: :png, path: false) }
-        .to raise_error(ArgumentError, /path must be a String, got FalseClass/)
+        .to raise_error(ArgumentError, /path must be a String or Pathname, got FalseClass/)
       expect { described_class.new(format: :png, path: 123) }
-        .to raise_error(ArgumentError, /path must be a String, got Integer/)
+        .to raise_error(ArgumentError, /path must be a String or Pathname, got Integer/)
     end
 
     # `File.open` takes a descriptor as happily as a name, so detecting
@@ -135,7 +135,7 @@ RSpec.describe Claricle::Image do
       with_file.call(png) do |path|
         File.open(path, "rb") do |io|
           expect { described_class.from_path(io.fileno) }
-            .to raise_error(ArgumentError, /path must be a String, got Integer/)
+            .to raise_error(ArgumentError, /path must be a String or Pathname, got Integer/)
           expect(io.read(1)).to eq("\x89".b)
         end
       end
