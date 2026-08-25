@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "stringio"
+
 RSpec.describe "the documentation" do
   root = File.expand_path("../..", __dir__)
 
@@ -37,6 +39,21 @@ RSpec.describe "the documentation" do
       end
     end
 
+    # Pins the bound, not just the verdict: a short fixture like `png`
+    # detects conclusively long before any bound matters, so a spec that
+    # only checked the returned format would pass whether `detect`
+    # drained the IO to EOF or stopped early. This asserts what is left
+    # on the IO afterward.
+    it "leaves the IO short of EOF once the probe bound is hit, as documented" do
+      shows("with unread bytes still on it, and `eof?` is false. A caller who needs")
+      bound = Claricle.const_get(:Detector)::MAX_PROBE_BYTES
+      garbage = ("\x00" * (bound + 1_000)).b
+      io = StringIO.new(garbage)
+      expect { Claricle.detect(io) }.to raise_error(Claricle::UnknownFormat)
+      expect(io.pos).to eq(bound)
+      expect(io.eof?).to be(false)
+    end
+
     it "builds an Image from a path and reads its format and content" do
       Tempfile.create(["logo", ".png"]) do |file|
         file.binmode
@@ -62,8 +79,11 @@ RSpec.describe "the documentation" do
     end
 
     it "distinguishes UnknownFormat from UnsupportedFormat, as documented" do
-      expect(readme).to match(/raise `Claricle::UnknownFormat`/)
-      expect(readme).to match(/raises\s+`Claricle::UnsupportedFormat`/)
+      # Anchored to the affirmative wording, not just the class name: a
+      # negated sentence ("does not raise `Claricle::UnknownFormat`")
+      # would still satisfy an unanchored version of these regexes.
+      expect(readme).to match(/no known signature raise `Claricle::UnknownFormat`/)
+      expect(readme).to match(/recognised but unhandled raises\s+`Claricle::UnsupportedFormat`/)
       expect { Claricle.detect("not an image") }.to raise_error(Claricle::UnknownFormat)
       expect { Claricle::Image.from_content(png).inspection }
         .to raise_error(Claricle::UnsupportedFormat)

@@ -91,7 +91,7 @@ RSpec.describe Claricle::Cli::Runner do
   describe "the real CLI" do
     it "returns 0 for version and prints it" do
       expect { expect(described_class.run(["version"])).to eq(0) }
-        .to output(/Claricle version/).to_stdout
+        .to output("Claricle version #{Claricle::VERSION}\n").to_stdout
     end
 
     it "returns 2 for an unknown command" do
@@ -129,6 +129,14 @@ RSpec.describe Claricle::Cli::Runner do
 
   describe "the exit map" do
     before { stub_const("Claricle::Cli", probe) }
+
+    # TODO.plan/01-core.md requires every named error to inherit
+    # Claricle::Error. A direct StandardError subclass would keep every
+    # exit-code mapping below green while silently dropping that.
+    it "maps InvocationError and ConversionError through Claricle::Error" do
+      expect(Claricle::InvocationError).to be < Claricle::Error
+      expect(Claricle::ConversionError).to be < Claricle::Error
+    end
 
     {
       2 => %w[enoent invocation],

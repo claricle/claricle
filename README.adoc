@@ -111,8 +111,14 @@ image.content   # read lazily, once
 ----
 
 `Image.from_path` streams the file while detecting. `Claricle.detect`
-accepts a String of bytes or an IO; an IO is read to EOF from wherever
-it currently sits and is never rewound.
+accepts a String of bytes or an IO; an IO is read from wherever it
+currently sits and is never rewound. Reading stops as soon as the
+format is conclusive, the source runs out of data, or a bounded probe
+length is consumed -- whichever comes first. On a source longer than
+that bound, detection stops there: the IO is left positioned mid-stream
+with unread bytes still on it, and `eof?` is false. A caller who needs
+the rest of the stream, or cares whether it reached EOF, should check
+rather than assume either.
 
 Bytes matching no known signature raise `Claricle::UnknownFormat`. A
 format that is recognised but unhandled raises
