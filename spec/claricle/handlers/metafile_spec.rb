@@ -3,6 +3,7 @@
 require "English"
 require "emf"
 require "json"
+require "tempfile"
 
 RSpec.describe "Claricle metafile handler" do
   let(:handler) { Claricle.const_get(:Handlers).const_get(:Metafile).new }
@@ -469,14 +470,24 @@ RSpec.describe "Claricle metafile handler" do
     # other, which is an inconsistent pair if the file changes underneath.
     # Pinning the identity of pass two still leaves pass one free, so the
     # re-read itself is what gets prohibited.
+    #
+    # The file is deleted rather than `File.binread` stubbed: a stub on
+    # one API leaves any OTHER read -- `File.read`, `File.open`, a
+    # bounded `IO#read` through `with_source` -- free to re-touch the
+    # file and still pass. Deleting it makes any re-read fail, whichever
+    # API it goes through.
     it "never re-reads the file once the content is cached" do
-      image = Claricle::Image.from_path(fixture("valid"))
-      image.content
+      Tempfile.create(["metafile", ".emf"]) do |file|
+        file.binmode
+        file.write(File.binread(fixture("valid")))
+        file.flush
 
-      allow(File).to receive(:binread).and_call_original
-      handler.inspection(image)
+        image = Claricle::Image.from_path(file.path)
+        image.content
+        File.delete(file.path)
 
-      expect(File).not_to have_received(:binread)
+        expect { handler.inspection(image) }.not_to raise_error
+      end
     end
 
     # The delegate is asked exactly once, for the header. There is no
@@ -764,6 +775,72 @@ RSpec.describe "Claricle metafile handler" do
       expect(result.meta).not_to have_key("emf_plus_present")
     end
 
+    # The record budget, not merely the byte limit: a stream built
+    # entirely of minimum-size records stays far under 200 MiB while
+    # still costing real CPU to walk -- measured, 26,214,400 of them
+    # crosses the byte boundary and takes upward of 20 CPU seconds to
+    # cross. 500,000 filler records, plus a carrier the walk must never
+    # reach, separates the record budget from the byte limit: this
+    # stream is under 4 MiB, so the byte limit alone would admit it, and
+    # only the record budget stops the walk short of the carrier.
+    it "gives up under its own record budget before reaching the byte limit" do
+      filler = [1, 8].pack("VV") * 500_000
+      content = stream_of(filler, carrier(12))
+      expect(content.bytesize).to be < (200 * 1024 * 1024)
+
+      image = Claricle::Image.from_content(content, format: :emf)
+      result = nil
+
+      expect { result = handler.inspection(image) }.not_to raise_error
+      expect(result.meta).not_to have_key("emf_plus_present")
+    end
+
+    # The path-born half of the scan limit: `image.content` on a
+    # path-born image is an unbounded `File.binread`, so reaching it
+    # before the limit is consulted would materialise a stream the
+    # handler has already decided not to walk. Stubbed the same way the
+    # byte-size boundary above is, rather than a real 200 MiB fixture:
+    # `File.size` reports over the limit while the file on disk stays
+    # tiny, and `File.binread` is asserted never called at all -- proof
+    # the header still comes from a bounded read, not from materialising
+    # the file to learn it was too big to walk.
+    it "does not materialise a path-born stream over the scan limit" do
+      path = fixture("emf_plus")
+      allow(File).to receive(:size).with(path).and_return(209_715_201)
+      image = Claricle::Image.from_path(path)
+
+      expect(File).not_to receive(:binread)
+      result = handler.inspection(image)
+
+      expect(result).to have_attributes(parse_status: "ok", width: 100.0,
+                                        height: 50.0)
+      expect(result.meta).not_to have_key("emf_plus_present")
+      expect(result.meta).not_to have_key("emf_plus_bytes")
+    end
+
+    # `image.bytesize` and `header_prefix`'s bounded read are two
+    # SEPARATE filesystem calls -- a `File.size` stat, then a later
+    # `File.open`/`read` -- and nothing keeps them in agreement. Stubbing
+    # `File.size` over the file's real, tiny length reproduces exactly
+    # what a file shrinking between the two calls would: a bounded read
+    # that comes back shorter than the header this handler expects.
+    # `declared_size` must report that as unreadable, the same as any
+    # other file too short to hold a header, rather than let a nil
+    # `unpack1` reach a comparison it cannot make.
+    it "reports failed rather than raising when a bounded read comes back shorter than its stat promised" do
+      Tempfile.create(["short", ".emf"]) do |file|
+        file.binmode
+        file.write("\x00" * 5)
+        file.flush
+
+        allow(File).to receive(:size).with(file.path).and_return(209_715_201)
+        image = Claricle::Image.new(format: :emf, path: file.path)
+
+        expect { handler.inspection(image) }.not_to raise_error
+        expect(handler.inspection(image).parse_status).to eq("failed")
+      end
+    end
+
     # EMF+ travels in EMR_COMMENT and nowhere else. This record is type
     # 38, well framed, and its bytes read as a comment look exactly like
     # a carrier -- cbData 16 at +8 and "EMF+" at +12 -- so a walk that
@@ -988,7 +1065,8 @@ RSpec.describe "Claricle metafile handler" do
     script = <<~RUBY
       require "claricle/handlers/metafile"
       handler = Claricle.const_get(:Handlers).const_get(:Metafile).new
-      image = Struct.new(:format, :content).new(:emf, File.binread(#{fixture("valid").inspect}))
+      image_class = Struct.new(:format, :content) { def bytesize = content.bytesize }
+      image = image_class.new(:emf, File.binread(#{fixture("valid").inspect}))
       print handler.inspection(image).width
     RUBY
     lib = File.expand_path("../../../lib", __dir__)

@@ -615,5 +615,26 @@ RSpec.describe Claricle::Image do
 
       expect(image.content).to be(frozen)
     end
+
+    # Frozen alone is not enough: it also has to be BINARY. Passing a
+    # frozen NON-binary string through untouched would raise later, when
+    # a handler indexes into it -- `String#[]=` indexes by CHARACTER, so
+    # the EMF handler normalising nSize on a frozen UTF-16LE string would
+    # hit Encoding::CompatibilityError on a perfectly good file. Every
+    # other frozen example above is also BINARY, so none of them can
+    # tell the two conditions apart.
+    it "still copies a frozen string that is not already BINARY" do
+      frozen = bytes.dup.force_encoding("UTF-16LE").freeze
+      image = described_class.from_content(frozen, format: :emf)
+
+      # `.equal?` compared as a plain boolean, not through the `be`
+      # matcher directly on a UTF-16LE string: RSpec's own failure-message
+      # formatting trips over that encoding while building a diff, which
+      # would otherwise mask this assertion's own result with an
+      # unrelated Encoding::CompatibilityError.
+      expect(image.content.equal?(frozen)).to be(false)
+      expect(image.content.encoding).to eq(Encoding::BINARY)
+      expect(image.content).to eq(bytes)
+    end
   end
 end

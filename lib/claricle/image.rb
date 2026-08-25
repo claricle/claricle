@@ -166,6 +166,16 @@ module Claricle
       @content ||= File.binread(path).freeze
     end
 
+    # The stream length, without paying #content's full read to learn it.
+    # Once #content is cached -- content-born from construction, or
+    # path-born and already read -- the cost is already paid and this
+    # returns the same number #content.bytesize would. A path-born image
+    # that has never been read asks the filesystem for its size instead
+    # of reading the whole file to measure it.
+    def bytesize
+      @content ? @content.bytesize : File.size(path)
+    end
+
     # Most delegates want a path. A content-born image gets a temporary one
     # that exists only for the block -- Tempfile.create's block form removes
     # it on exit, where Tempfile.new would leave it behind.
