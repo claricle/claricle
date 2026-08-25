@@ -170,19 +170,29 @@ module Claricle
       # `using_default_for` is public on lutaml, for its own deserializer
       # to mark an attribute absent from the document. A caller can reach
       # it too -- through the block form of `new`, before this runs -- and
-      # flip a required attribute to "using its default" while it still
-      # holds the value it was actually given. Rendering skips whatever is
-      # marked default, so the value survives every reader and vanishes
-      # from the document -- measured: `to_json` rendered `{"message":"m"}`
-      # for an Issue whose `severity` read back "info", and reloading that
-      # JSON raised `ValidationError: Missing required attribute: severity`.
-      # Required only: a required attribute genuinely using its default
-      # has no value and `validate!` already refused it before this runs,
-      # so seeing one here is always the bookkeeping lying about a value
-      # that IS present, never a legitimate default.
+      # flip ANY attribute to "using its default" while it still holds
+      # the value it was actually given. Rendering skips whatever is
+      # marked default, so the value survives the reader and vanishes
+      # from the document -- measured on a required attribute (`to_json`
+      # rendered `{"message":"m"}` for an Issue whose `severity` still
+      # read back "info", and reloading that JSON raised
+      # `ValidationError: Missing required attribute: severity`) and
+      # separately on optional, unguarded ones (`source_path`, `format`,
+      # `Issue#code` all round-tripped to nil having read back their real
+      # value right up to the freeze).
+      #
+      # None of these models declares `default:`, so a genuine default is
+      # always blank -- nil for a scalar, empty for a collection, once
+      # `normalize` has run (which it has by here). A NON-blank value
+      # under a true `using_default?` is therefore always the bookkeeping
+      # lying about a value that IS present, never a legitimate default,
+      # whether or not the attribute is required.
       def validate_default_bookkeeping(name, attribute)
-        return unless attribute.options[:required]
         return unless using_default?(name)
+
+        value = public_send(name)
+        blank = attribute.collection? ? value.empty? : value.nil?
+        return if blank
 
         refuse(name, "recorded as explicitly set", "flagged as using its default")
       end

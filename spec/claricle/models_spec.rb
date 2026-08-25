@@ -680,8 +680,24 @@ RSpec.describe Claricle::Models do
       end.to raise_error(Lutaml::Model::ValidationError, /severity expects recorded as explicitly set/)
     end
 
+    # The same flip on an OPTIONAL attribute is not a schema violation --
+    # `validate!` has nothing required to reject -- so it sealed and
+    # rendered silently before this check covered every attribute, not
+    # only required ones. Measured: `Report#source_path`, `#format`, and
+    # `Issue#code` all round-tripped to nil having read back their real
+    # value right up to the freeze.
+    it "refuses to seal an optional attribute flagged as using its default" do
+      expect do
+        models::Report.new(source_path: "x") { |r| r.using_default_for(:source_path) }
+      end.to raise_error(Lutaml::Model::ValidationError, /source_path expects recorded as explicitly set/)
+    end
+
     it "still accepts an optional attribute legitimately left at its default" do
       expect(models::Issue.new(severity: "info", message: "m").code).to be_nil
+    end
+
+    it "still accepts an optional collection attribute legitimately left empty" do
+      expect(models::Report.new(source_path: "x").issues).to eq([])
     end
 
     # `init_deserialization_state`/`finalize_deserialization` are public
