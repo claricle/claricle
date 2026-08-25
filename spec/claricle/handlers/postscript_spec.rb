@@ -1020,7 +1020,7 @@ RSpec.describe "Claricle PostScript handler" do
   # quadratic cost the filter above exists to close, this time behind a
   # single legitimate field DSC allows unboundedly many continuations
   # on.
-  it "filters %%+ continuations even behind a kept field" do
+  it "filters %%+ continuations out of the delegate's input" do
     # Title is genuinely continued here, so it is correctly omitted
     # regardless -- `continued_title.ps` already pins that rule. What
     # this pins is that the `%%+` line itself never reaches the

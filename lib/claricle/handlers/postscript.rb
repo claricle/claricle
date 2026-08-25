@@ -458,7 +458,9 @@ module Claricle
         matched && matched[1]
       end
 
-      # The four operands of that line, each a well-formed DSC real.
+      # The four operands of that line, each well-formed in the grammar
+      # its own comment takes -- integers for `%%BoundingBox`, reals for
+      # `%%HiResBoundingBox`.
       def self.declaration(source, name)
         text = first_text(source, name)
         return nil unless text
@@ -537,7 +539,7 @@ module Claricle
       # The most a single probe reads before checking whether the header
       # ended inside it. Generous for the common case -- a handful of
       # scalar comments and a box are a few hundred bytes -- and not a
-      # ceiling: `header_source` reads past it when a real header runs
+      # ceiling: `windowed_header` reads past it when a real header runs
       # longer, exactly the 629 KB case `FIELD_COMMENTS` exists for.
       HEADER_PROBE_BYTES = 8192
 
@@ -598,10 +600,10 @@ module Claricle
       # statement rather than inventing a number, and reporting nil for a
       # file carrying a readable `%%BoundingBox` would be less honest.
       #
-      # "Usable" means both spans come out finite, so a box that
-      # overflows on ONE axis is rejected whole -- taking width from the
-      # box whose height was just refused would report a rectangle no
-      # one declared.
+      # "Usable" is what `spans` accepts: both spans finite AND
+      # non-negative. A box that fails on ONE axis is rejected whole --
+      # taking width from the box whose height was just refused would
+      # report a rectangle no one declared.
       def usable_spans(boxes)
         [boxes["hires_bounding_box"], boxes["bounding_box"]]
           .filter_map { |box| spans(box) }
@@ -610,12 +612,13 @@ module Claricle
 
       # A box is published only when the delegate's four Floats match the
       # four operands of the FIRST declaration in the header, each of
-      # which is a well-formed DSC real.
+      # which is well-formed in its own comment's grammar -- integers for
+      # `%%BoundingBox`, reals for `%%HiResBoundingBox`.
       #
       # Two rules meet here. The delegate's numbers cannot be trusted on
       # their own, because its grammar fabricates finite values out of
       # lexemes like `e` -- so they must match the operands of the first
-      # declaration, each a well-formed DSC real. And a header that
+      # declaration, each well-formed in that grammar. And a header that
       # declares the box twice, disagreeing with itself, has not stated
       # one rectangle, so `disputed?` refuses it rather than picking.
       #
