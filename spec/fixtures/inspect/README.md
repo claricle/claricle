@@ -191,3 +191,12 @@ Note that `overflow_endpoint.ps` and `overflow_width.ps` declare
 **HiRes** boxes. They test finiteness, and a coarse box carrying
 `1e9999` or `-1e308` is refused on grammar alone before finiteness is
 ever reached.
+
+### PostScript, fifth round — exact keywords and first-occurrence coverage
+
+| Fixture | What it discriminates |
+|---|---|
+| `endcomments_colon.ps` | `%%EndComments: fake`. DSC makes the colon PART of the keyword, so this is not the bare sentinel -- but the `Begin\|End\|Include` wildcard matched it anyway as an `End<Comments>` closer, a section DSC never defines, and ended the header there |
+| `page_trailer.ps` | `%%PageTrailer`, a real DSC keyword with no delimiter between its two words. Neither the `Page` nor the `Trailer` alternative matches it alone -- each needs an immediate delimiter -- so it stayed inside the header and let the body's box reach the delegate too |
+| `duplicate_creator.ps`, `duplicate_creation_date.ps` | a repeated `%%Creator` and `%%CreationDate`, mirroring `duplicate_title.ps` for the two other textual fields the first-occurrence rule covers |
+| `duplicate_language_level.ps` | two declarations, `2` then `3`, both well-formed DSC unsigned integers -- unlike `underscored_level.ps`, where the FIRST one is not. This is the fixture that reaches `Dsc.unsigned(declared) == value` and has to reject on the values actually differing, not on either one failing to parse |
