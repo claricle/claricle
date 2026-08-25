@@ -8,14 +8,13 @@ Gem::Specification.new do |spec|
   spec.authors = ["Ribose Inc."]
   spec.email = ["open.source@ribose.com"]
 
-  spec.summary = "Claricle is a comprehensive image utility gem for validation, conversion, and compression."
+  spec.summary = "Format detection and a unified image model for Ruby."
   spec.description = <<~HEREDOC
-    Claricle provides a Ruby library for working with images, offering tools for
-    image validation (PNG, SVG), format conversion, compression, and vector
-    graphics processing. The name combines "clarity" and "particle", representing
-    the clear validation of every pixel. It is built to integrate functionality
-    from pngconform, svgconform, vectory, and other image processing tools into
-    a unified interface.
+    Claricle detects an image's format from its bytes -- PNG, SVG, EMF, WMF,
+    EPS, PS and PDF -- and gives one object and one set of models to work with.
+    The name combines "clarity" and "particle". Inspection, conformance
+    checking and conversion are being built on this foundation, wrapping
+    png_conform, svg_conform, vectory and pdfrb behind a single interface.
   HEREDOC
 
   spec.homepage = "https://github.com/ribose/claricle"

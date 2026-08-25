@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "tempfile"
 require "claricle"
 
 RSpec.configure do |config|

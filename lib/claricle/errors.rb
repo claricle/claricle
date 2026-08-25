@@ -5,6 +5,15 @@ module Claricle
 
   class UnknownFormat < Error; end
 
+  # Bad arguments, conflicting flags, a refused destination. Besides
+  # Thor::Error and ENOENT, the only *exception* that means exit 2 -- a
+  # command can still request 2 explicitly with a Status.
+  class InvocationError < Error; end
+
+  # A conversion that failed after dispatch. Reaches exit 4 through the
+  # ordinary StandardError row; there is no blanket Claricle::Error row.
+  class ConversionError < Error; end
+
   # Raised when a format is recognised but nothing handles it, or handles
   # the operation asked for. The class builds its own sentence: callers
   # pass what they were doing, not a phrase.

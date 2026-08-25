@@ -94,6 +94,9 @@ RSpec.describe "Claricle::Registry" do
   end
 
   describe "UnsupportedFormat's message" do
+    # Positional operation, per 01-core.md:21. Keyword-only would make a
+    # caller following the settled contract raise ArgumentError, which the
+    # runner maps to 4 instead of 3.
     it "builds each form exactly" do
       expect(Claricle::UnsupportedFormat.new(:wmf).message)
         .to eq("format :wmf is not supported")
