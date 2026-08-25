@@ -394,6 +394,19 @@ RSpec.describe "Claricle format detection" do
         .to raise_error(Claricle::UnknownFormat)
     end
 
+    # A single escaped ampersand ("&amp;amp;" resolving to literal
+    # "&amp;") is ordinary in a URL query string, and the reserved-prefix
+    # guard must not mistake the resolved text for a still-unresolved
+    # reference: it looks at the RAW value for that, not the resolved
+    # one. Regression guard for a bug where the resolved text alone was
+    # pattern-matched, rejecting a namespace value that had resolved
+    # correctly just because it happened to contain "&amp;".
+    it "still accepts an unrelated prefix whose resolved value contains a literal ampersand escape" do
+      source = %(<svg xmlns="#{svg_ns}" xmlns:p="https://example.test/?a=1&amp;amp;b=2"/>)
+
+      expect(Claricle.detect(source)).to eq(:svg)
+    end
+
     # Sized to sit inside the 8192-byte prolog bound. An earlier version
     # used 10_241 references, which pushed the root tag past the bound --
     # REXML then gave up on a truncated tag and resolve_references never

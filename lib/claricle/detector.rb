@@ -209,12 +209,32 @@ module Claricle
   # out-of-range reference has to reach `ReservedNamespace.violated_by?` so
   # it fails closed. One entry point cannot serve both without hiding that.
   module AttributeReferences
+    # The five entities XML itself defines -- measured: `unnormalize`
+    # expands exactly these (plus numeric references) and leaves every
+    # other named reference, of any case, byte-for-byte untouched, since
+    # it has no entity table beyond them. Checked against the RAW value,
+    # never a resolved one: a resolved value can legitimately CONTAIN
+    # "&amp;" as ordinary literal text -- raw "&amp;amp;" resolves to
+    # "&amp;b=2" verbatim, an escaped ampersand in a query string
+    # followed by unrelated text -- and that is indistinguishable from a
+    # genuinely unresolved reference once resolution has already run.
+    UNRESOLVED_REFERENCE = /&(?!amp;|lt;|gt;|apos;|quot;)[A-Za-z_:][\w.:-]*;/
+
     module_function
 
     def resolve(value)
       REXML::Text.unnormalize(value, entity_expansion_text_limit: value.bytesize)
     rescue RangeError
       nil
+    end
+
+    # True for a raw value `resolve` cannot fully account for: a named
+    # reference it has no table for, left exactly as written rather than
+    # expanded. Unproven, not provably safe -- Claricle never fetches a
+    # DTD-declared entity, so a reserved namespace name smuggled in
+    # through one would sail past a check that only compared bytes.
+    def unresolved?(raw)
+      raw.match?(UNRESOLVED_REFERENCE)
     end
   end
 
@@ -225,23 +245,20 @@ module Claricle
     # Reserved for the `xmlns` prefix's own use; must never be bound to
     # any prefix, including `xmlns` itself.
     XMLNS = "http://www.w3.org/2000/xmlns/"
-    # Whatever survives the caller's character-reference resolution is
-    # an unexpanded general entity -- unproven, not provably safe.
-    GENERAL_ENTITY_REFERENCE = /&[A-Za-z_:][\w.:-]*;/
 
     module_function
 
     # `name` is the raw attribute name ("xmlns" or "xmlns:prefix");
-    # `bound` is its value after the caller has resolved character
-    # references exactly once, bare -- nil for an out-of-range
-    # reference. A lone surrogate half resolves to invalid UTF-8
-    # without raising, so it reaches here as a string, not nil; checked
-    # before `match?`, because `Regexp#match?` raises ArgumentError on
-    # invalid encoding rather than returning false, and an invalid
-    # reference is exactly as unproven as one `match?` would flag
-    # directly.
+    # `bound` is its resolved value, or nil for an out-of-range
+    # reference. The caller has already refused an unresolved general
+    # entity reference before calling this -- see
+    # `AttributeReferences.unresolved?` -- so `bound` here is always
+    # either nil or fully accounted for. A lone surrogate half resolves
+    # to invalid UTF-8 without raising, so it reaches here as a string,
+    # not nil; checked before `==`, because a comparison against invalid
+    # encoding is exactly as unproven as one that raised outright.
     def violated_by?(name, bound)
-      return true if bound.nil? || !bound.valid_encoding? || bound.match?(GENERAL_ENTITY_REFERENCE)
+      return true if bound.nil? || !bound.valid_encoding?
       return true if bound == XMLNS
 
       (name == "xmlns:xml") != (bound == XML)
@@ -470,26 +487,34 @@ module Claricle
         declared = attributes[prefix ? "xmlns:#{prefix}" : "xmlns"]
         return false unless declared
 
-        # Normalized and resolved once, here, on the raw attribute
-        # `root_event` handed over -- never again, and never `resolve`'s
-        # raw-on-failure fallback: deciding whether this document IS an
-        # SVG needs to know a reference failed, not read its raw text as
-        # if it had resolved to itself. Resolving twice would expand a
-        # reference the document escaped on purpose: `&amp;#x67;` means
-        # the literal text `&#x67;`, and a second pass turns it into `g`.
+        # Normalized and resolved here, fresh from the raw attribute
+        # `root_event` handed over -- never from an ALREADY-resolved
+        # value, and never `resolve`'s raw-on-failure fallback: deciding
+        # whether this document IS an SVG needs to know a reference
+        # failed, not read its raw text as if it had resolved to itself.
+        # `reserved_prefix_declared?` below resolves this same raw text
+        # again, independently, for its own guard -- two resolutions of
+        # the SAME raw input agree and cost nothing worth threading a
+        # value through two methods to avoid. What must never happen is
+        # CASCADING, resolving one method's already-resolved output a
+        # second time: `&amp;#x67;` means the literal text `&#x67;`, and
+        # a second pass on THAT output turns it into `g`.
         AttributeReferences.resolve(normalized(declared)) == SVG_NAMESPACE
       end
 
       # A constraint on the root's own namespace declarations, explicit
       # or DTD-defaulted, regardless of which prefix the root itself
-      # uses -- delegated to ReservedNamespace once this method has
-      # picked out which merged attributes are namespace declarations
-      # at all and resolved each one's references, bare and exactly
-      # once, on the raw value `root_event` handed over.
+      # uses. Each value is resolved fresh from the raw attribute
+      # `root_event` handed over, never from an already-resolved one --
+      # delegated to ReservedNamespace once this method has picked out
+      # which merged attributes are namespace declarations at all,
+      # refused one still carrying an unresolved reference, and resolved
+      # the rest.
       def reserved_prefix_declared?(attributes)
         attributes.any? do |name, value|
           next true if name == "xmlns:xmlns"
           next false unless name == "xmlns" || name.start_with?("xmlns:")
+          next true if AttributeReferences.unresolved?(value)
 
           ReservedNamespace.violated_by?(name, AttributeReferences.resolve(normalized(value)))
         end
