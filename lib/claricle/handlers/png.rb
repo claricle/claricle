@@ -49,6 +49,15 @@ module Claricle
       # not even for IHDR or pHYs themselves (D-bounded-read).
       MAX_CHUNK_READ = 32
 
+      # How much `drain` discards per read when the IO cannot seek.
+      # Deliberately its own number rather than MAX_CHUNK_READ: that cap
+      # bounds what is KEPT in memory, this one only bounds how many
+      # syscalls it takes to throw bytes away, and nothing it reads is
+      # retained. Measured, draining a 20 MiB unwanted chunk off a real
+      # pipe: 32 bytes took 655,360 reads and 5.29s, 16 KiB took 1,280
+      # reads and 0.031s.
+      DRAIN_BUFFER = 16_384
+
       # What `ChunkReader#gather` collects. png_conform's own chunk
       # object is gone from this handler entirely now that its bytes
       # come from a hand read rather than `StreamingReader#each_chunk`;
@@ -144,12 +153,23 @@ module Claricle
           crc && crc.bytesize == 4
         end
 
-        # `seek`, unless the IO can't. `Errno::ESPIPE` is what a pipe or
-        # `/dev/fd/<n>` raises -- input `Image.from_path` accepts today,
-        # and which `Detector`'s own specs already treat as a supported
-        # shape rather than an accident. Falling back to reading and
-        # discarding in bounded increments keeps memory capped even
-        # though the byte count read off a pipe is not.
+        # `seek`, unless the IO can't. A pipe and a `/dev/fd/<n>` onto
+        # one both raise `Errno::ESPIPE` -- measured off a real pipe,
+        # not assumed.
+        #
+        # Reaching that shape means naming the format:
+        # `Image.new(format: :png, path: "/dev/fd/<n>")`. It is NOT
+        # `Image.from_path`, which detects first, and detection reads
+        # the stream -- a pipe hands its bytes out once, so inspection
+        # reopens a path that has already moved past the signature.
+        # Measured on the same pipe: `from_path` reports "failed" with
+        # `png.ihdr_unreadable`, and the constructor with the format
+        # given reports "ok". Widening that is the detector's business,
+        # not this handler's.
+        #
+        # Falling back to reading and discarding in bounded increments
+        # keeps memory capped even though the byte count read off a
+        # pipe is not.
         def skip(length)
           io.seek(length, IO::SEEK_CUR)
         rescue Errno::ESPIPE
@@ -159,7 +179,7 @@ module Claricle
         def drain(length)
           remaining = length
           while remaining.positive?
-            requested = [remaining, MAX_CHUNK_READ].min
+            requested = [remaining, DRAIN_BUFFER].min
             chunk = io.read(requested)
             break unless chunk
 
@@ -171,7 +191,8 @@ module Claricle
 
       private_constant :IHDR_LAYOUT, :IHDR_BYTES, :PHYS_LAYOUT, :PHYS_BYTES,
                        :METRE_UNIT, :METRES_PER_INCH, :WANTED_CHUNKS,
-                       :COLOR_SPACES, :MAX_CHUNK_READ, :Chunk, :ChunkReader
+                       :COLOR_SPACES, :MAX_CHUNK_READ, :DRAIN_BUFFER,
+                       :Chunk, :ChunkReader
 
       def inspection(image)
         chunks = read_chunks(image)
