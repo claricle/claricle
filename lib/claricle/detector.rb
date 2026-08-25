@@ -197,11 +197,6 @@ module Claricle
     end
   end
 
-  # Whether a value bound to a namespace-declaration attribute name
-  # violates the two prefixes and two namespace names XML reserves for
-  # itself. Its own module because the rule is a self-contained set of
-  # constraints, unrelated to how Detector chooses between formats or
-  # resolves a value's references.
   # The shared leaf of attribute-value resolution. Extracted because it has
   # TWO consumers that want different things: `Detector.resolve` validates
   # the result and falls back to its already-normalized input, while
@@ -218,7 +213,32 @@ module Claricle
     # "&amp;b=2" verbatim, an escaped ampersand in a query string
     # followed by unrelated text -- and that is indistinguishable from a
     # genuinely unresolved reference once resolution has already run.
-    UNRESOLVED_REFERENCE = /&(?!amp;|lt;|gt;|apos;|quot;)[A-Za-z_:][\w.:-]*;/
+    #
+    # The name class is XML 1.0 5th ed. NameStartChar and NameChar,
+    # transcribed whole rather than widened to fit a reported case. The
+    # bypass that prompted this was `&é;`, but `é` is one codepoint out
+    # of a grammar: `&あ;` (U+3042) and `&\u{10400};` were measured
+    # slipping past the same ASCII-only class, because Ruby's `\w` is
+    # ASCII-only. Widening until the reported one is caught leaves the
+    # rest.
+    #
+    # Written as codepoint escapes rather than as the characters
+    # themselves: several ranges end on an unprintable or a combining
+    # mark, and a reviewer has to be able to check them against the
+    # grammar.
+    NAME_START_CHAR = "A-Za-z_:" \
+                      "\u{C0}-\u{D6}\u{D8}-\u{F6}\u{F8}-\u{2FF}" \
+                      "\u{370}-\u{37D}\u{37F}-\u{1FFF}" \
+                      "\u{200C}-\u{200D}\u{2070}-\u{218F}" \
+                      "\u{2C00}-\u{2FEF}\u{3001}-\u{D7FF}" \
+                      "\u{F900}-\u{FDCF}\u{FDF0}-\u{FFFD}" \
+                      "\u{10000}-\u{EFFFF}"
+    NAME_CHAR = "#{NAME_START_CHAR}\\-.0-9" \
+                "\u{B7}\u{300}-\u{36F}\u{203F}-\u{2040}".freeze
+    UNRESOLVED_REFERENCE =
+      /&(?!amp;|lt;|gt;|apos;|quot;)[#{NAME_START_CHAR}][#{NAME_CHAR}]*;/
+
+    private_constant :NAME_START_CHAR, :NAME_CHAR
 
     module_function
 
@@ -233,11 +253,29 @@ module Claricle
     # expanded. Unproven, not provably safe -- Claricle never fetches a
     # DTD-declared entity, so a reserved namespace name smuggled in
     # through one would sail past a check that only compared bytes.
+    #
+    # The encoding check makes the predicate total, which it stopped
+    # being when the pattern gained non-ASCII ranges: `match?` RAISES
+    # rather than answers on a subject that is neither ASCII-only nor
+    # valid UTF-8 (measured: Encoding::CompatibilityError for BINARY
+    # carrying a high byte, ArgumentError for invalid UTF-8). So a
+    # subject it cannot read reads as unresolved -- unproven, which is
+    # this module's whole meaning. Measured unreachable from `detect`
+    # today: every value REXML hands over arrives valid UTF-8, across
+    # every declared encoding and BOM tried.
     def unresolved?(raw)
+      return true unless raw.ascii_only? ||
+                         (raw.encoding == Encoding::UTF_8 && raw.valid_encoding?)
+
       raw.match?(UNRESOLVED_REFERENCE)
     end
   end
 
+  # Whether a value bound to a namespace-declaration attribute name
+  # violates the two prefixes and two namespace names XML reserves for
+  # itself. Its own module because the rule is a self-contained set of
+  # constraints, unrelated to how Detector chooses between formats or
+  # resolves a value's references.
   module ReservedNamespace
     # XML permanently binds `xml` to this namespace; no other prefix, or
     # the default namespace, may be bound to it either.
@@ -306,10 +344,12 @@ module Claricle
         end
       end
 
-      # The root element's qname and its attributes, each resolved once
-      # with a fallback to its normalized-but-unresolved text when
-      # resolution cannot answer -- the right default for something
-      # about to be reported as metadata, not decided on. nil covers
+      # The root element's qname, raw, and its attributes, each of those
+      # resolved once with a fallback to its normalized-but-unresolved
+      # text when resolution cannot answer -- the right default for
+      # something about to be reported as metadata, not decided on. The
+      # qname is deliberately left alone: a reference is not permitted
+      # in a name, so there is nothing there to resolve. nil covers
       # every way the root can be unavailable: no root inside the
       # bound, markup REXML refuses, and an encoding name it cannot
       # use. Callers treat all three the same -- there is nothing to
@@ -449,11 +489,15 @@ module Claricle
         svg_root?(*found)
       end
 
-      # Only the prolog and the root start tag can matter here, and both
-      # fit well inside the bound. Takes an IO or a String, because both
-      # callers hand over whichever the image is made of: an open file
-      # for a path-born source, the bytes already in hand for a
-      # content-born one.
+      # Only the prolog and the root start tag can matter here, and the
+      # bound is where they stop mattering: a root that begins after
+      # SVG_PROLOG_BYTES is not found at all, and the document reads as
+      # an unknown format. That is the sniffing limit SVG_PROLOG_BYTES
+      # describes, deliberately, not an accident of sizing.
+      #
+      # Takes an IO or a String, because both callers hand over
+      # whichever the image is made of: an open file for a path-born
+      # source, the bytes already in hand for a content-born one.
       def bounded(source)
         prefix = if source.respond_to?(:read)
                    # Nothing to normalise on this side: `read(n)` answers
@@ -468,11 +512,14 @@ module Claricle
                    # detection did and the two would disagree.
                    #
                    # `.b` because byteslice keeps the String's encoding
-                   # tag, where `detect` normalises with `bytes.b` first.
-                   # Without it the SAME ASCII bytes tagged UTF-16LE
-                   # detected as :svg and then read back zero events:
-                   # REXML decoded ASCII as UTF-16, the pull loop ended,
-                   # and inspection said "failed" without raising.
+                   # tag. It is not what protects handler inspection --
+                   # `Image.from_content` binary-tags on the way in, so
+                   # a handler's bytes arrive ASCII-8BIT already. It
+                   # protects whoever calls `read_root` with a String of
+                   # their own: the SAME ASCII bytes tagged UTF-16LE
+                   # read back zero events without it, because REXML
+                   # decoded ASCII as UTF-16 and the pull loop ended, so
+                   # inspection said "failed" without raising.
                    source.byteslice(0, SVG_PROLOG_BYTES).b
                  end
         # Only the IO side can answer nil, and only at end of input.

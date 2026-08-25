@@ -92,10 +92,13 @@ module Claricle
           format: image.format.to_s,
           width: dimension(attributes["width"]),
           height: dimension(attributes["height"]),
-          # Passed straight through: lutaml copies a `:hash` attribute on
-          # assignment, so the inspection never shares the reader's hash.
-          # A `.dup` here would be defending against something that
-          # cannot happen -- measured, and pinned by a spec.
+          # Passed straight through: `Models::FreeFormHash.cast` does the
+          # copy itself, explicitly, so the inspection never shares the
+          # reader's hash. That is Claricle's own type rather than
+          # generic lutaml behaviour -- lutaml's `:hash` reshapes `text`
+          # and `elements`, which is why FreeFormHash exists at all. A
+          # `.dup` here would repeat a copy that already happened --
+          # measured, and pinned by a spec.
           meta: attributes,
           parse_status: "ok"
         )
@@ -126,8 +129,12 @@ module Claricle
       end
 
       # Finiteness is checked on the CONVERTED value, not the parsed one:
-      # 1e308 is finite, and 1e308 * 96 is Infinity, which `to_json`
-      # refuses -- so `inspect --json` would exit 4 on a file that parsed.
+      # 1e308 is finite, and 1e308 * 96 is Infinity, which an Inspection
+      # refuses to hold. Measured: building one raises
+      # Lutaml::Model::ValidationError, "width expects a finite number,
+      # got Infinity", from `validate_finite` during `initialize` -- so
+      # `inspect` on a file that parsed fine would die before any
+      # serialisation ran, not in `to_json`.
       def scale(number, factor)
         parsed = Float(number, exception: false)
         return nil unless parsed
