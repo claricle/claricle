@@ -47,6 +47,18 @@ The name reflects what the library is for:
   was readable", not "the document is well-formed". A file damaged
   after that tag still reports `ok`. Judging the whole document is
   conformance, and no handler implements it yet
+* `inspect` for EPS and PS -- dimensions from a **concrete bounding box
+  declared in the DSC header**, preferring `%%HiResBoundingBox` and
+  falling back to `%%BoundingBox`, plus the title, creator, creation
+  date and language level. Only the header is parsed. A box is reported
+  only when the parser reads the same values the file's **first**
+  declaration spells out in DSC syntax. A box that fails that check is
+  discarded rather than guessed at -- the other box, if the file
+  declares one, is still used, and dimensions are nil only when neither
+  survives. The page count is deliberately not
+  reported: the parser fills it in only for the two-argument
+  `%%Pages: n m` form, so it would be present for some files and absent
+  for others with nothing in `meta` to tell the cases apart
 * `formats`, listing each format and what Claricle can do with it
 * `Claricle::Image`, built from a path or from bytes
 * A unified issue and report model, serialising to and from JSON
@@ -54,8 +66,16 @@ The name reflects what the library is for:
 
 == What does not work yet
 
-* `inspect` for WMF, EPS, PS and PDF -- EMF, PNG and SVG have handlers
+* `inspect` for WMF and PDF -- EMF, PNG, SVG, EPS and PS have handlers
   so far, so the rest raise `Claricle::UnsupportedFormat`
+* **`(atend)` bounding boxes for EPS and PS.** The value lives in the
+  trailer, and resolving it needs the nested-document and data-section
+  handling that reading only the header exists to avoid. Such a file
+  inspects as `ok`, and its dimensions come from a concrete
+  `%%HiResBoundingBox` beside it or from nothing at all
+* **CR-only line endings for EPS and PS.** The parser reads no DSC
+  comments from them, so those files inspect as `ok` with no dimensions
+  and no metadata
 * `conform` and `convert` for every format. No handler implements
   either yet, so both raise `Claricle::UnsupportedFormat`. `claricle
   formats` reports this per format, and it reads the handlers rather
@@ -200,6 +220,7 @@ lib/claricle/
   handlers/base.rb     # what a handler subclasses
   handlers/metafile.rb # EMF header metadata
   handlers/png.rb      # PNG metadata
+  handlers/postscript.rb # EPS and PS DSC header metadata
   handlers/svg.rb      # SVG root metadata
   models/              # Location, Issue, Report, Inspection
   errors.rb            # Error, UnknownFormat, UnsupportedFormat, ...
