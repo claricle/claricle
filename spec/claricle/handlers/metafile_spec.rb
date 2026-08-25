@@ -775,24 +775,28 @@ RSpec.describe "Claricle metafile handler" do
       expect(result.meta).not_to have_key("emf_plus_present")
     end
 
-    # The record budget, not merely the byte limit: a stream built
-    # entirely of minimum-size records stays far under 200 MiB while
-    # still costing real CPU to walk -- measured, 26,214,400 of them
-    # crosses the byte boundary and takes upward of 20 CPU seconds to
-    # cross. 500,000 filler records, plus a carrier the walk must never
-    # reach, separates the record budget from the byte limit: this
-    # stream is under 4 MiB, so the byte limit alone would admit it, and
-    # only the record budget stops the walk short of the carrier.
-    it "gives up under its own record budget before reaching the byte limit" do
-      filler = [1, 8].pack("VV") * 500_000
+    # The iteration budget must not be a ceiling a legitimate file can
+    # reach. EMR_SETMETARGN is type 28 and carries no parameters, so an
+    # 8-byte one is a valid record, and EMR_HEADER's record count is an
+    # unsigned 32-bit field -- 500,000 of them is an internally
+    # consistent 4.0 MiB stream, well under the byte limit. The carrier
+    # behind them is the assertion: with a flat 500,000-record budget
+    # the walk stopped one record short of it and reported no EMF+
+    # verdict at all.
+    #
+    # The records are VALID on purpose. A midstream [1, 8] -- EMR_HEADER
+    # where no header belongs -- walks identically, so a spec built on
+    # one proves only that the budget binds, never that it binds on a
+    # file anybody could legitimately hand us.
+    it "walks a legitimate stream of 500,000 minimum-size records" do
+      filler = [28, 8].pack("VV") * 500_000
       content = stream_of(filler, carrier(12))
-      expect(content.bytesize).to be < (200 * 1024 * 1024)
+      expect(content.bytesize).to eq(88 + (8 * 500_000) + 28)
 
       image = Claricle::Image.from_content(content, format: :emf)
-      result = nil
 
-      expect { result = handler.inspection(image) }.not_to raise_error
-      expect(result.meta).not_to have_key("emf_plus_present")
+      expect(handler.inspection(image).meta)
+        .to include("emf_plus_present" => true, "emf_plus_bytes" => 12)
     end
 
     # The path-born half of the scan limit: `image.content` on a
@@ -825,20 +829,149 @@ RSpec.describe "Claricle metafile handler" do
     # what a file shrinking between the two calls would: a bounded read
     # that comes back shorter than the header this handler expects.
     # `declared_size` must report that as unreadable, the same as any
-    # other file too short to hold a header, rather than let a nil
-    # `unpack1` reach a comparison it cannot make.
-    it "reports failed rather than raising when a bounded read comes back shorter than its stat promised" do
-      Tempfile.create(["short", ".emf"]) do |file|
+    # other file too short to hold a header, rather than let a short
+    # slice reach a comparison it cannot make.
+    #
+    # Every length matters, not just one. `byteslice(4, 4)` answers a
+    # short String from five bytes -- where `unpack1` gives nil -- but
+    # nil from nought, one or three, and `nil.unpack1` raises before any
+    # nil check can run. Measured: 0, 1 and 3 each raised NoMethodError
+    # while 5 reported failed, so a spec pinned to 5 alone said nothing
+    # about the other three. 87 is the last length below the fixed
+    # header.
+    [0, 1, 3, 5, 87].each do |length|
+      it "reports failed rather than raising when the read comes back #{length} bytes long" do
+        Tempfile.create(["short", ".emf"]) do |file|
+          file.binmode
+          file.write("\x00" * length)
+          file.flush
+
+          allow(File).to receive(:size).with(file.path).and_return(209_715_201)
+          image = Claricle::Image.new(format: :emf, path: file.path)
+
+          expect { handler.inspection(image) }.not_to raise_error
+          expect(handler.inspection(image).parse_status).to eq("failed")
+        end
+      end
+    end
+
+    # The other half of the same disagreement, and the one that reported
+    # a wrong ANSWER rather than raising. This file holds 99 bytes and
+    # declares a 100-byte header; a stat still reporting the 200 it was
+    # before catches neither, because 100 fits inside 200. Measured on
+    # the old shape: `ok`, with `emf_plus_present: false` -- the walk
+    # started at offset 100, past the real end of the file, and treated
+    # having nothing left to read as a completed scan.
+    #
+    # The declared size has to be measured against the bytes actually
+    # read, which under the scan limit are the whole file.
+    it "measures the declared size against the bytes read, not a stale stat" do
+      Tempfile.create(["stale", ".emf"]) do |file|
         file.binmode
-        file.write("\x00" * 5)
+        file.write(File.binread(fixture("declared_100_have_99")))
         file.flush
 
-        allow(File).to receive(:size).with(file.path).and_return(209_715_201)
+        allow(File).to receive(:size).with(file.path).and_return(200)
         image = Claricle::Image.new(format: :emf, path: file.path)
 
-        expect { handler.inspection(image) }.not_to raise_error
         expect(handler.inspection(image).parse_status).to eq("failed")
       end
+    end
+
+    # The same disagreement the other way round, and this one used to
+    # cost a good file its inspection. A stat reading LOW -- the file
+    # grew after it was taken, or the stat was simply stale -- put the
+    # baseline's 364 bytes behind a promise of 50, and the old shape
+    # measured the declared 88 against that 50 and reported failed for a
+    # file it had read in full and could parse perfectly.
+    it "reads a header the bytes support even when the stat undercounts them" do
+      Tempfile.create(["stale", ".emf"]) do |file|
+        file.binmode
+        file.write(File.binread(fixture("valid")))
+        file.flush
+
+        allow(File).to receive(:size).with(file.path).and_return(50)
+        image = Claricle::Image.new(format: :emf, path: file.path)
+
+        expect(handler.inspection(image))
+          .to have_attributes(parse_status: "ok", width: 100.0, height: 50.0)
+      end
+    end
+
+    # What the extra byte is FOR. Under the limit the read asks for
+    # SCAN_LIMIT + 1, and getting that many back is the proof that the
+    # stream is over the limit whatever the stat claimed -- so the walk
+    # is refused and no EMF+ verdict is offered, while the header is
+    # still read out of the bytes in hand.
+    #
+    # Driven at a scaled limit, because the real one needs a 200 MiB
+    # file to cross, and from a PATH with the stat stubbed, because that
+    # is the only way the two can disagree: a content-born image's stat
+    # IS its content's length, so it can only ever be caught by the
+    # oversized branch. Both sides of the boundary come off the same
+    # 116-byte stream. Against a 116-byte limit the read comes back
+    # short of what it asked for, so those bytes are the whole stream
+    # and the walk runs; against 96 it comes back full, which is the
+    # proof the stream is longer than the walk may examine. Drop the
+    # `+ 1` and the second case reads 96 bytes, walks a stream it cannot
+    # see the end of, and reports `false` instead of staying silent.
+    #
+    # stub_const restores constants publicly; the ensure below is the
+    # same repair image_spec and registry_spec make.
+    { 116 => "present(12)", 96 => "no verdict" }.each do |limit, outcome|
+      it "gives #{outcome} for a 116-byte stream against a #{limit}-byte scan limit" do
+        Tempfile.create(["scaled", ".emf"]) do |file|
+          file.binmode
+          file.write(stream_of(carrier(12)))
+          file.flush
+          expect(File.size(file.path)).to eq(116)
+
+          allow(File).to receive(:size).with(file.path).and_return(limit)
+          stub_const("Claricle::Handlers::Metafile::SCAN_LIMIT", limit)
+
+          result = handler.inspection(Claricle::Image.new(format: :emf, path: file.path))
+
+          expect(result).to have_attributes(parse_status: "ok", width: 100.0)
+          expect(result.meta.key?("emf_plus_present")).to be(limit == 116)
+          expect(result.meta["emf_plus_bytes"]).to eq(12) if limit == 116
+        end
+      ensure
+        Claricle.const_get(:Handlers).const_get(:Metafile)
+                .send(:private_constant, :SCAN_LIMIT)
+      end
+    end
+
+    # The stat is a fast reject and nothing more. Under the limit the old
+    # shape reached `image.content`, an unbounded `File.binread` of
+    # whatever the file had become since the stat -- so a file that grew
+    # past the limit in between was materialised whole, which is the one
+    # thing the limit exists to prevent. Every read is bounded now.
+    #
+    # The length asked for is asserted, not merely that some read
+    # happened: `IO#read(nil)` is also a read, and it returns the whole
+    # stream however big it has grown. The EMF+ answer is asserted beside
+    # it, so a handler that read nothing at all cannot pass either.
+    #
+    # The image is built BEFORE the spy goes on, because detection opens
+    # the file too and its own 512-byte read is not the handler's.
+    it "asks a path-born stream for at most the scan limit, and never reads it unbounded" do
+      image = Claricle::Image.from_path(fixture("emf_plus"))
+      asked = []
+      allow(File).to receive(:open).and_wrap_original do |original, *args, &block|
+        original.call(*args) do |file|
+          allow(file).to receive(:read).and_wrap_original do |read, length|
+            asked << length
+            read.call(length)
+          end
+          block.call(file)
+        end
+      end
+
+      expect(File).not_to receive(:binread)
+      result = handler.inspection(image)
+
+      expect(asked).to eq([(200 * 1024 * 1024) + 1])
+      expect(result.meta).to include("emf_plus_present" => true, "emf_plus_bytes" => 40)
     end
 
     # EMF+ travels in EMR_COMMENT and nowhere else. This record is type
@@ -1065,7 +1198,10 @@ RSpec.describe "Claricle metafile handler" do
     script = <<~RUBY
       require "claricle/handlers/metafile"
       handler = Claricle.const_get(:Handlers).const_get(:Metafile).new
-      image_class = Struct.new(:format, :content) { def bytesize = content.bytesize }
+      image_class = Struct.new(:format, :content) do
+        def bytesize = content.bytesize
+        def with_source(&block) = block.call(content)
+      end
       image = image_class.new(:emf, File.binread(#{fixture("valid").inspect}))
       print handler.inspection(image).width
     RUBY
