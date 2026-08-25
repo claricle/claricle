@@ -4,6 +4,10 @@ require "English"
 require "stringio"
 require "tempfile"
 require "timeout"
+# Required by the specs alone, to check the detector's hand-transcribed
+# XML Name grammar against REXML's own copy of the same production. The
+# library never loads it.
+require "rexml/xmltokens"
 
 RSpec.describe "Claricle format detection" do
   svg_ns = "http://www.w3.org/2000/svg"
@@ -828,6 +832,81 @@ RSpec.describe "Claricle format detection" do
 
         expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
       end
+    end
+  end
+
+  # An entity NAME is an XML Name, and XML Names are Unicode. The guard
+  # once matched `[A-Za-z_:][\w.:-]*`, and Ruby's `\w` is ASCII-only, so
+  # every one of these sailed past it and the document read as :svg --
+  # while the same document with an ASCII entity name was correctly
+  # refused.
+  #
+  # No DTD here, deliberately, even though the neighbouring smuggling
+  # examples use one. Measured: REXML refuses a DOCTYPE that DECLARES an
+  # entity under a non-ASCII name, so a DTD-shaped version of these is
+  # rejected before the guard is ever consulted -- it stays green with
+  # the ASCII-only class restored, and would prove nothing. An
+  # undeclared reference is the shape that actually reaches the guard,
+  # and it is also the shape an external DTD produces, which is how this
+  # was reported.
+  describe "entity names outside ASCII" do
+    # One case per NameStartChar range a reviewer might expect the ASCII
+    # class to have covered by accident. `é` is the reported case; the
+    # other two are here because widening a regex until the reported
+    # case passes is exactly how these two would have been left behind.
+    {
+      "a Latin-1 name (U+00E9)" => "\u{E9}",
+      "a CJK name (U+3042)" => "\u{3042}",
+      "an astral-plane name (U+10400)" => "\u{10400}"
+    }.each do |label, entity_name|
+      it "rejects a reserved namespace smuggled through #{label}" do
+        source = %(<svg xmlns="#{svg_ns}" xmlns:p="&#{entity_name};"/>)
+
+        expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+      end
+    end
+
+    # The guard's own subject, not the detector's verdict: the examples
+    # above would stay green if detection refused these documents for
+    # some unrelated reason, and this one cannot.
+    it "sees a non-ASCII entity name as an unresolved reference" do
+      references = Claricle.const_get(:AttributeReferences)
+
+      expect(references).to be_unresolved("&\u{E9};")
+      expect(references).to be_unresolved("&\u{3042};")
+      expect(references).not_to be_unresolved("&amp;")
+    end
+
+    # The name class in the detector is hand-transcribed from XML 1.0
+    # 5th ed., and a hand transcription drifts from the production it
+    # claims to copy without anything going red. REXML ships its OWN
+    # transcription of that same production, so the two are checked
+    # against each other instead of against a reviewer's memory.
+    #
+    # Exhaustive rather than sampled: an off-by-one at a range edge is
+    # exactly the error this is looking for, and sampling is how you
+    # miss one. Every BMP codepoint plus the astral boundaries, ~120ms.
+    #
+    # REXML's constants are its own -- XMLTokens says "not for general
+    # consumption" -- which is why the detector does not simply use
+    # them. Depending on them HERE puts the risk in the right place: if
+    # REXML ever drops them, this spec fails loudly and the library
+    # keeps working.
+    it "matches REXML's own transcription of the XML Name grammar" do
+      canonical = /&(?!amp;|lt;|gt;|apos;|quot;)#{REXML::XMLTokens::NAME_START_CHAR}#{REXML::XMLTokens::NAME_CHAR}*;/
+      mine = Claricle.const_get(:AttributeReferences).const_get(:UNRESOLVED_REFERENCE)
+      # Surrogate halves are excluded because they are not codepoints a
+      # String can hold on their own, not because the grammar skips them.
+      codepoints = (0..0xFFFF).grep_v(0xD800..0xDFFF) +
+                   [0x10000, 0x10001, 0x10400, 0xEFFFF, 0xF0000, 0x10FFFF]
+
+      disagreements = codepoints.reject do |cp|
+        char = cp.chr("UTF-8")
+        mine.match?("&#{char};") == canonical.match?("&#{char};") &&
+          mine.match?("&x#{char};") == canonical.match?("&x#{char};")
+      end
+
+      expect(disagreements.map { |cp| format("U+%04X", cp) }).to be_empty
     end
   end
 

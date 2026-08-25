@@ -40,8 +40,14 @@ RSpec.describe "Claricle SVG handler" do
     %i[read close closed? path to_path to_io fileno]
   end
 
+  # Subtracting Object's methods is what makes the list manageable, and
+  # it is also a hole: copying the file is how you get an unwatched
+  # handle on it, and `dup` and `clone` both come from Object, so the
+  # subtraction removed them. A mutant duped the file and read the whole
+  # body through the copy -- neither the copy nor its reads were ever
+  # seen. They go back in by name.
   def watched_calls
-    File.instance_methods - Object.instance_methods - allowed_calls
+    (File.instance_methods - Object.instance_methods - allowed_calls) | %i[dup clone]
   end
 
   def read_recorder(taken)
@@ -303,7 +309,15 @@ RSpec.describe "Claricle SVG handler" do
     # as metadata, and the wrong one for deciding whether the document
     # IS an SVG in the first place.
     it "is what detection consumes" do
-      allow(Claricle.const_get(:Detector)).to receive(:root_event).and_return(nil)
+      detector = Claricle.const_get(:Detector)
+      allow(detector).to receive(:root_event).and_return(nil)
+      # The stub alone proves only that SOMETHING downstream of
+      # `root_event` ran, and `read_root` is downstream of it too -- so a
+      # `read_root` + `svg_root?` mutant sat on the same stub and stayed
+      # green. What separates the two paths is that detection must not
+      # reach `read_root`, whose raw-on-failure fallback would hide an
+      # unresolvable reference instead of failing closed on it.
+      expect(detector).not_to receive(:read_root)
 
       expect { Claricle.detect(svg("")) }.to raise_error(Claricle::UnknownFormat)
     end
@@ -313,11 +327,25 @@ RSpec.describe "Claricle SVG handler" do
     # content-born one would pass a handler that quietly writes one.
     it "reads content directly, never through a temporary path" do
       image = Claricle::Image.from_content(svg(%(width="7")), format: :svg)
+      received = nil
       expect(image).not_to receive(:with_path)
-      expect(Claricle.const_get(:Detector)).to receive(:read_root)
-        .with(image.content).and_call_original
+      # Forbidding `with_path` is not enough on its own: a mutant that
+      # wrote the bytes to a Tempfile itself never touches it.
+      expect(Tempfile).not_to receive(:create)
+      expect(Tempfile).not_to receive(:new)
+      allow(Claricle.const_get(:Detector)).to receive(:read_root)
+        .and_wrap_original do |reader, source|
+          received = source
+          reader.call(source)
+        end
 
-      handler.inspection(image)
+      expect(handler.inspection(image).width).to eq(7.0)
+      # `equal?`, not `==`. A round trip through a temporary file hands
+      # back a String holding the same bytes, so the old `.with(
+      # image.content)` matched it by value and stayed green through an
+      # actual Tempfile. Only object identity says the reader was given
+      # the image's own bytes.
+      expect(received).to be(image.content)
     end
 
     # The reader asks for 8192 bytes. Passing `image.content` handed it
