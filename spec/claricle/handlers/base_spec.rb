@@ -105,4 +105,60 @@ RSpec.describe "Claricle::Handlers::Base" do
         .to raise_error(Claricle::UnsupportedFormat, /:svgz is not supported/)
     end
   end
+
+  # The shape every handler needs when a parse did not get far enough to
+  # report anything. Each of them was writing it out again.
+  describe "#failed_inspection" do
+    subject(:handler) do
+      Class.new(base) do
+        formats :wmf
+
+        def inspection(image)
+          failed_inspection(image, code: "wmf.header_unreadable",
+                                   message: "WMF header could not be read")
+        end
+      end.new
+    end
+
+    it "reports the parse as failed, carrying the single error" do
+      result = handler.inspection(image.new(:wmf))
+
+      expect(result.parse_status).to eq("failed")
+      expect(result.issues.map { |i| [i.severity, i.code, i.message] })
+        .to eq([["error", "wmf.header_unreadable", "WMF header could not be read"]])
+    end
+
+    # The image's own format, not the first one the handler declared: a
+    # handler owning :svg and :svgz must not report :svg for both.
+    it "names the format of the image it was given" do
+      multi = Class.new(base) do
+        formats :svg, :svgz
+
+        def inspection(image)
+          failed_inspection(image, code: "c", message: "m")
+        end
+      end.new
+
+      expect(multi.inspection(image.new(:svgz)).format).to eq("svgz")
+    end
+
+    # A failed parse claims nothing about the file's validity -- that is
+    # conform's answer alone (D17) -- and it reports no dimensions it
+    # never read.
+    it "claims nothing it did not measure" do
+      result = handler.inspection(image.new(:wmf))
+
+      expect([result.width, result.height, result.dpi, result.color_space, result.meta])
+        .to eq([nil, nil, nil, nil, nil])
+    end
+
+    it "returns a sealed inspection" do
+      expect(handler.inspection(image.new(:wmf))).to be_frozen
+    end
+
+    # A helper for subclasses, not an operation a caller invokes.
+    it "stays off the public surface" do
+      expect(handler).not_to respond_to(:failed_inspection)
+    end
+  end
 end

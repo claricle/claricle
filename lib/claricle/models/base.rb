@@ -4,141 +4,11 @@ require "lutaml/model"
 
 module Claricle
   module Models
-    # Ruby's replacement-object Marshal protocol. Its own module because
-    # it is one concern with its own version contract, and because Base
-    # crossed the class-length limit once it moved in.
-    #
-    # The per-object hooks (`marshal_dump`/`marshal_load`) cannot be used:
-    # Ruby restores depth-first, so Location then Issue are already frozen
-    # before Report#marshal_load runs, and relinking from the parent
-    # raises FrozenError. An earlier fix dodged that by dropping lutaml's
-    # back-references from the dump -- it fixed a lifted model and
-    # silently detached every copied graph, which was a bad trade.
-    #
-    # `_dump`/`_load` make the boundary atomic instead. `_load` runs on
-    # the subclass and returns a whole object, so lutaml assigns every
-    # link while building it and the lifecycle then validates and freezes
-    # the finished subtree. A lifted model round-trips as its own root,
-    # and a whole graph keeps its hierarchy.
-    #
-    # `marshal_dump` must stay absent: Ruby prefers it over `_dump`.
-    #
-    # Three consequences, all deliberate. The payload is a nested Marshal
-    # stream, so it does not inherit the outer load's `freeze:` or load
-    # proc -- that is inherent to `_dump` returning a String. It is a
-    # semantic snapshot, so aliasing inside the subtree is normalized:
-    # the same Issue given twice reloads as two equal Issues. And the
-    # nested stream has a cycle table of its own, so a model that leads
-    # back to itself through `meta` is refused by name rather than
-    # followed -- see `guarding` below.
-    module Marshalling
-      VERSION = 1
-      DUMPING = :claricle_models_dumping
-
-      def _dump(depth)
-        Marshalling.guarding(self) do
-          Marshal.dump([VERSION, marshal_attributes], depth)
-        end
-      end
-
-      # A model reached through `meta` is written by Ruby rather than by
-      # `plain`, so it re-enters `_dump` and opens a stream of its own.
-      # Ruby's cycle table belongs to the outer stream and cannot see into
-      # this one, so a `meta` that leads back to its own model recursed
-      # until the stack gave out -- measured: `meta["box"]["self"]`
-      # pointing at the Inspection whose `box` that is, `SystemStackError`
-      # rather than any message a caller could act on. Named instead, the
-      # same trade `plain` makes for a nested subclass.
-      #
-      # Only what is open right now, so the same model written twice side
-      # by side is fine -- and Ruby links the second occurrence anyway.
-      # `compare_by_identity`, because two equal models are two models,
-      # and because hashing a lutaml model walks the parent links this is
-      # here to keep out of.
-      def self.guarding(model)
-        active = (Thread.current[DUMPING] ||= {}.compare_by_identity)
-        raise TypeError, "cannot marshal #{model.class}: its meta leads back to it" if active[model]
-
-        active[model] = true
-        begin
-          yield
-        ensure
-          active.delete(model)
-          Thread.current[DUMPING] = nil if active.empty?
-        end
-      end
-
-      # Not `to_hash`: lutaml omits explicitly-empty values from it, so a
-      # `meta: {}` came back nil and so did a present-but-empty nested
-      # model. Every declared attribute is written, empty or not, so the
-      # payload says what the object holds rather than what is worth
-      # rendering.
-      def marshal_attributes
-        self.class.attributes.to_h do |name, attribute|
-          [name.to_s, Marshalling.plain(public_send(name), attribute.type)]
-        end
-      end
-
-      # The payload carries attributes, not classes, so a nested model is
-      # rebuilt as whatever the attribute declares. A subclass would come
-      # back as its parent with its own attributes silently gone, so it is
-      # refused instead. Validation accepts subclasses, which is why this
-      # has to be checked rather than assumed: `Base` is a private
-      # constant and subclassing is not a supported extension point, so
-      # failing loudly is better than inventing a class discriminator no
-      # caller needs.
-      def self.plain(value, type = nil)
-        case value
-        when Array then value.map { |element| plain(element, type) }
-        when Base
-          unless type.nil? || value.instance_of?(type)
-            raise TypeError, "cannot marshal #{value.class}: #{type} was declared"
-          end
-
-          value.marshal_attributes
-        else value
-        end
-      end
-
-      # `_load` has to live on the class, so it arrives by `extend`.
-      module ClassMethods
-        def _load(payload)
-          # rubocop:disable Security/MarshalLoad -- this IS the Marshal
-          # hook. Ruby calls it with what our own `_dump` wrote, and it is
-          # only reached because the caller already chose to Marshal.load
-          # the outer payload. That premise needs `_load` to be private,
-          # which it is below: public, it was itself an unguarded
-          # `Marshal.load` on the model's own surface, and a payload it
-          # went on to reject had already run whatever the callbacks
-          # inside it wanted. Unnesting would not make the outer choice
-          # safer.
-          envelope = Marshal.load(payload)
-          # rubocop:enable Security/MarshalLoad
-          version, attributes = envelope
-          # Exact type and exact shape: `1.0` and `Rational(1,1)` are both
-          # `== 1`, and a longer envelope would be a different format
-          # wearing the right version number. `marshal_attributes` always
-          # writes a Hash, so anything else in that slot is a different
-          # format too -- measured, an Array there made `from_hash` hand
-          # back an Array where a Report was asked for.
-          valid = envelope.is_a?(Array) && envelope.size == 2 &&
-                  version.instance_of?(Integer) && version == VERSION &&
-                  attributes.instance_of?(::Hash)
-          raise TypeError, "unsupported Claricle marshal payload #{version.inspect}" unless valid
-
-          from_hash(attributes)
-        end
-
-        # Marshal reaches a private `_load` on the class and on every
-        # subclass -- measured -- so nothing is given up by hiding it.
-        private :_load
-      end
-    end
-
     # The per-attribute checks `validate_deeply` runs beyond what lutaml
-    # validates on its own. Its own module for the same reason Marshalling
-    # is: one concern, and Base crossed the class-length limit once this
-    # much of it lived there directly.
+    # validates on its own. Its own module because Base crosses RuboCop's
+    # class-length limit with this much of it inline -- measured, not
+    # assumed: folded back in, RuboCop reports Base at 111 lines against
+    # a limit of 100. Dropping the Marshal protocol did not change that.
     module Validation
       private
 
@@ -264,8 +134,6 @@ module Claricle
     # `validate!` does not reach nested models. Every model therefore runs
     # one lifecycle -- normalize, validate, freeze -- at both doors.
     class Base < Lutaml::Model::Serializable
-      include Marshalling
-      extend Marshalling::ClassMethods
       include Validation
 
       DESERIALIZING = :claricle_models_deserializing
@@ -395,6 +263,33 @@ module Claricle
 
       private
 
+      # Refused, rather than supported. Ruby's default Marshal writes the
+      # ivars into a fresh object and runs neither the constructor nor the
+      # lifecycle -- measured: the copy came back unfrozen, took
+      # `severity = "bogus"` past the enum, and rendered it. Nothing in
+      # this gem forks, caches or crosses a process boundary, so no model
+      # is dumped at all rather than dumped through a protocol of its own.
+      # A real one can be written the day something actually needs it.
+      #
+      # This closes the dump side only, and does not pretend otherwise.
+      # `Marshal.load` of bytes a caller got from somewhere else still
+      # builds whatever those bytes describe -- measured, a hand-built
+      # ordinary-object payload naming this class loaded unfrozen with
+      # `severity: "bogus"`. That was equally true before this refusal
+      # existed: `_load` was only ever reached for payloads our own
+      # `_dump` had written, never for a payload someone else shaped.
+      # Nothing in this gem calls `Marshal.load`.
+      #
+      # `_dump` and not `marshal_dump`: Ruby prefers `marshal_dump` where
+      # both exist, so the refusal sits on the hook a later `marshal_dump`
+      # would have to displace deliberately. Private, because Marshal
+      # reaches a private `_dump` on the class and on every subclass --
+      # measured -- so nothing is gained by publishing it. It covers a
+      # model nested inside a plain Hash or Array too, also measured.
+      def _dump(_depth)
+        raise TypeError, "cannot marshal #{self.class}: Claricle models are not marshalable"
+      end
+
       # Freeze declared attributes only. lutaml hands us its own copy of a
       # String or a collection, so freezing those in place cannot reach the
       # caller. It does NOT copy what is nested inside a free-form Hash, so
@@ -435,6 +330,9 @@ module Claricle
       end
     end
 
-    private_constant :Base
+    # Validation is an implementation detail of Base, not an extension
+    # point -- Base is private, so a mixin only Base uses has no caller
+    # left to serve.
+    private_constant :Base, :Validation
   end
 end

@@ -128,82 +128,46 @@ RSpec.describe Claricle::Image do
       end
     end
 
-    # Ruby's default Marshal reads ivars straight back in without running
-    # any of the guards, so a copy came back with mutable bytes and the
-    # original's format still on it.
-    it "re-applies its guarantees across a marshal round trip" do
-      copy = Marshal.load(Marshal.dump(described_class.from_content(png)))
-
-      expect(copy.format).to eq(:png)
-      expect(copy.content).to eq(png)
-      expect(copy.content).to be_frozen
+    # Ruby's default Marshal reads the ivars straight back in without
+    # running any of the guards, and it does not carry a String's freeze.
+    # Measured on a copy made that way: `content.replace("NOT A PNG AT
+    # ALL")` left it reporting :png over sixteen bytes of text, and
+    # `path.replace("/etc/passwd")` pointed a path-born image at another
+    # file. Nothing in this gem crosses a process boundary, so the dump is
+    # refused rather than reimplemented.
+    it "refuses to dump a content-born image" do
+      expect { Marshal.dump(described_class.from_content(png)) }
+        .to raise_error(TypeError, /cannot marshal Claricle::Image/)
     end
 
-    # A path-born image keeps both halves: a frozen path, and the bytes,
-    # which is why the file can go away afterwards. Never read before the
-    # dump, so this cannot pass on a cached copy the constructor happened
-    # to have.
-    it "carries a path-born image's bytes even when it never read them" do
+    it "refuses to dump a path-born image" do
       with_file.call(png) do |path|
-        dumped = Marshal.dump(described_class.from_path(path))
-        File.delete(path)
-        # Two steps, because the file has to go away in between; the cop
-        # only recognises the one-expression form as our own bytes.
-        copy = Marshal.load(dumped) # rubocop:disable Security/MarshalLoad
-
-        expect(copy.path).to eq(path)
-        expect(copy.path).to be_frozen
-        expect(copy.content).to eq(png)
-        expect(copy.content).to be_frozen
+        expect { Marshal.dump(described_class.from_path(path)) }
+          .to raise_error(TypeError, /not marshalable/)
       end
     end
 
-    # `freeze: true` freezes the copy before anything reads it, so a lazy
-    # `#content` had nowhere to memoize and raised FrozenError. Both
-    # constructors, because only the path-born one reads late.
-    it "loads under freeze: true, where a lazy read cannot" do
-      from_bytes = Marshal.load(Marshal.dump(described_class.from_content(png)), freeze: true)
-      expect(from_bytes.content).to eq(png)
+    it "refuses an image nested inside a plain container" do
+      expect { Marshal.dump({ "a" => [described_class.from_content(png)] }) }
+        .to raise_error(TypeError, /not marshalable/)
+    end
 
-      with_file.call(png) do |path|
-        copy = Marshal.load(Marshal.dump(described_class.from_path(path)), freeze: true)
-        expect(copy.content).to eq(png)
+    # Ruby prefers `marshal_dump` over `_dump` where both exist, so one
+    # added later would silently displace the refusal. `marshal_load` was
+    # a second constructor with none of the arity checks: handed another
+    # image's state it took the new format and kept the old bytes.
+    it "defines neither marshal hook that would displace the refusal" do
+      %i[marshal_dump marshal_load].each do |hook|
+        expect(described_class.method_defined?(hook)).to be(false)
+        expect(described_class.private_method_defined?(hook)).to be(false)
       end
     end
 
-    # Dumping must not write into the image it is dumping. Through the
-    # memoizing reader it did: a frozen path-born image could not be
-    # dumped at all, and an unfrozen one came out of `Marshal.dump`
-    # carrying the whole file it had not been asked to read.
-    it "dumps without reading through the image it is dumping" do
-      with_file.call(png) do |path|
-        unread = described_class.from_path(path)
-        Marshal.dump(unread)
-
-        expect(unread.instance_variable_get(:@content)).to be_nil
-        expect { Marshal.dump(described_class.from_path(path).freeze) }.not_to raise_error
-      end
-    end
-
-    # The copy is a copy, not a new kind of image: `with_path` uses the
-    # path it was given, the same as on the original.
-    it "leaves the copy pointing at the same file" do
-      with_file.call(png) do |path|
-        copy = Marshal.load(Marshal.dump(described_class.from_path(path)))
-
-        copy.with_path { |yielded| expect(yielded).to eq(path) }
-      end
-    end
-
-    # A public `marshal_load` is a second constructor with none of the
-    # arity checks: handed another image's state it took the new format
-    # and kept the old bytes.
-    it "keeps the marshal hooks off its public surface" do
-      image = described_class.from_content(png)
-
-      expect(image).not_to respond_to(:marshal_load)
-      expect(image).not_to respond_to(:marshal_dump)
-      expect { image.marshal_load([:emf, "x", nil]) }.to raise_error(NoMethodError, /private/)
+    # Marshal reaches a private `_dump` -- measured -- so publishing it
+    # would add surface and buy nothing.
+    it "keeps _dump off its public surface" do
+      expect(described_class.from_content(png)).not_to respond_to(:_dump)
+      expect(described_class.private_method_defined?(:_dump)).to be(true)
     end
 
     it "requires exactly one of path or content" do
