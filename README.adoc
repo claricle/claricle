@@ -55,9 +55,7 @@ The name reflects what the library is for:
 == What does not work yet
 
 * `inspect` for WMF, EPS, PS and PDF -- EMF, PNG and SVG have handlers
-  so far, so the rest raise `Claricle::UnsupportedFormat`. WMF is not
-  planned: the parser it would use reports "WMF parser not yet
-  implemented"
+  so far, so the rest raise `Claricle::UnsupportedFormat`
 * `conform` and `convert` for every format. No handler implements
   either yet, so both raise `Claricle::UnsupportedFormat`. `claricle
   formats` reports this per format, and it reads the handlers rather

@@ -7,7 +7,7 @@ each case sits next to the assertion that explains it.
 | File | Bytes | Signature | State |
 |---|---|---|---|
 | `valid.png` | 70 | `89504e47` | Complete 1×1 PNG. Every chunk CRC verifies and IDAT inflates |
-| `valid.emf` | 364 | `01000000` + `" EMF"` at `0x28` | Header and 16 records parse. `nBytes` is 0 where it should be 364 |
+| `valid.emf` | 364 | `01000000` + `" EMF"` at `0x28` | Header and 16 records parse. `nBytes` is 0 where it should be 364, and `nHandles` is 1 where it should be 4 |
 | `std.wmf` | 46 | `0100 0900` | Header only. Declared size is 0 words against 46 actual bytes |
 | `place.wmf` | 44 | `d7cdc69a` | Placeable header only. Checksum stored as `0x0000`, correct value `0x5711` |
 

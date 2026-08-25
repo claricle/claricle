@@ -360,8 +360,12 @@ module Claricle
       # the image's own binary content, or `"".b` -- which matters here
       # because `String#[]=` indexes by CHARACTER, and a UTF-16LE tag
       # would make this raise on a file the delegate reads correctly.
-      # `byteslice` always allocates, so the caller's string is never
-      # written to.
+      # The caller's string is never written to. `byteslice` returns a
+      # NEW String either way -- measured, a full-cover one SHARES the
+      # buffer at 40 bytes of object while a partial one copies -- and a
+      # shared buffer unshares on the first write, so the `[]=` below
+      # lands on this copy alone. Measured: mutating a full-cover slice
+      # of `"ABCDEFGH"` left the source unchanged.
       def fixed_header(prefix)
         header = prefix.byteslice(0, MINIMUM_HEADER)
         header[SIZE_OFFSET, 4] = [MINIMUM_HEADER].pack("V")
