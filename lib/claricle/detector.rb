@@ -232,10 +232,16 @@ module Claricle
     module_function
 
     # `name` is the raw attribute name ("xmlns" or "xmlns:prefix");
-    # `bound` is its value after the caller has already resolved
-    # character references.
+    # `bound` is its value after the caller has resolved character
+    # references exactly once, bare -- nil for an out-of-range
+    # reference. A lone surrogate half resolves to invalid UTF-8
+    # without raising, so it reaches here as a string, not nil; checked
+    # before `match?`, because `Regexp#match?` raises ArgumentError on
+    # invalid encoding rather than returning false, and an invalid
+    # reference is exactly as unproven as one `match?` would flag
+    # directly.
     def violated_by?(name, bound)
-      return true if bound.nil? || bound.match?(GENERAL_ENTITY_REFERENCE)
+      return true if bound.nil? || !bound.valid_encoding? || bound.match?(GENERAL_ENTITY_REFERENCE)
       return true if bound == XMLNS
 
       (name == "xmlns:xml") != (bound == XML)
@@ -283,16 +289,23 @@ module Claricle
         end
       end
 
-      # The root element's qname and its resolved attributes, or nil.
-      # nil covers every way the root can be unavailable: no root inside
-      # the bound, markup REXML refuses, and an encoding name it cannot
+      # The root element's qname and its attributes, each resolved once
+      # with a fallback to its normalized-but-unresolved text when
+      # resolution cannot answer -- the right default for something
+      # about to be reported as metadata, not decided on. nil covers
+      # every way the root can be unavailable: no root inside the
+      # bound, markup REXML refuses, and an encoding name it cannot
       # use. Callers treat all three the same -- there is nothing to
-      # report about -- so they are not distinguished here. Public because Handlers::Svg
-      # needs exactly this and a second reader would have to reimplement
-      # the bound, the ATTLIST precedence and the reference resolution --
-      # three rules this file spent four review rounds getting right --
-      # and then agree with this one. `Detector` is itself a private
-      # constant, so nothing about the gem's documented surface changes.
+      # report about -- so they are not distinguished here. Public
+      # because Handlers::Svg needs exactly this and a second reader
+      # would have to reimplement the bound and the ATTLIST precedence
+      # -- rules this file spent four review rounds getting right --
+      # and then agree with this one. `svg?` below shares that same
+      # parsing through `root_event`, but resolves its own xmlns-bearing
+      # attributes bare, with no fallback: detection has to fail closed
+      # when a reference can't be resolved, where this method's fallback
+      # would hide that. `Detector` is itself a private constant, so
+      # nothing about the gem's documented surface changes.
       def read_root(source)
         found = root_event(source)
         return nil unless found
@@ -413,10 +426,10 @@ module Claricle
       # would turn a malformed file into an internal error rather than
       # UnknownFormat. Undecodable bytes already arrive as a ParseException.
       def svg?(source)
-        root = read_root(source)
-        return false unless root
+        found = root_event(source)
+        return false unless found
 
-        svg_root?(*root)
+        svg_root?(*found)
       end
 
       # Only the prolog and the root start tag can matter here, and both
@@ -457,23 +470,28 @@ module Claricle
         declared = attributes[prefix ? "xmlns:#{prefix}" : "xmlns"]
         return false unless declared
 
-        # Already resolved by read_root. Resolving again would expand a
+        # Normalized and resolved once, here, on the raw attribute
+        # `root_event` handed over -- never again, and never `resolve`'s
+        # raw-on-failure fallback: deciding whether this document IS an
+        # SVG needs to know a reference failed, not read its raw text as
+        # if it had resolved to itself. Resolving twice would expand a
         # reference the document escaped on purpose: `&amp;#x67;` means
         # the literal text `&#x67;`, and a second pass turns it into `g`.
-        declared == SVG_NAMESPACE
+        AttributeReferences.resolve(normalized(declared)) == SVG_NAMESPACE
       end
 
       # A constraint on the root's own namespace declarations, explicit
       # or DTD-defaulted, regardless of which prefix the root itself
       # uses -- delegated to ReservedNamespace once this method has
       # picked out which merged attributes are namespace declarations
-      # at all and resolved each one's references.
+      # at all and resolved each one's references, bare and exactly
+      # once, on the raw value `root_event` handed over.
       def reserved_prefix_declared?(attributes)
         attributes.any? do |name, value|
           next true if name == "xmlns:xmlns"
           next false unless name == "xmlns" || name.start_with?("xmlns:")
 
-          ReservedNamespace.violated_by?(name, AttributeReferences.resolve(value))
+          ReservedNamespace.violated_by?(name, AttributeReferences.resolve(normalized(value)))
         end
       end
     end

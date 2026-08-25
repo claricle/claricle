@@ -736,6 +736,38 @@ RSpec.describe "Claricle format detection" do
       expect(Claricle.detect(source)).to eq(:svg)
     end
 
+    it "still accepts xml redeclared via a single legitimate reference" do
+      xml_attlist = %(<!ATTLIST svg xmlns:xml CDATA #FIXED "http&#x3a;//www.w3.org/XML/1998/namespace">)
+      source = doc(%(<!ATTLIST svg xmlns CDATA #FIXED "#{svg_ns}">\n  #{xml_attlist}), "<svg/>")
+
+      expect(Claricle.detect(source)).to eq(:svg)
+    end
+
+    # A value that only reads as the XML namespace after TWO rounds of
+    # reference resolution must still be refused: XML resolves a
+    # reference exactly once, so this declaration's true value is the
+    # literal text "http://www.w3.org/XML/1998/n&#x61;mespace", which is
+    # not the XML namespace. Regression guard for a bug where the guard
+    # resolved an already-resolved value a second time and accepted it.
+    it "rejects xml redeclared via a reference that only resolves after two passes" do
+      xml_attlist = %(<!ATTLIST svg xmlns:xml CDATA #FIXED "http://www.w3.org/XML/1998/n&amp;#x61;mespace">)
+      source = doc(%(<!ATTLIST svg xmlns CDATA #FIXED "#{svg_ns}">\n  #{xml_attlist}), "<svg/>")
+
+      expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+    end
+
+    # A lone UTF-16 surrogate half is not a valid Unicode scalar value,
+    # so resolving it answers with invalid UTF-8 rather than raising.
+    # The guard has to fail closed on that, not crash: regression guard
+    # for a bug where re-resolving it fed invalid bytes into a regex
+    # match and raised ArgumentError instead of refusing the document.
+    it "rejects an unrelated prefix bound to a lone surrogate reference" do
+      p_attlist = %(<!ATTLIST svg xmlns:p CDATA #FIXED "&#xD800;">)
+      source = doc(%(<!ATTLIST svg xmlns CDATA #FIXED "#{svg_ns}">\n  #{p_attlist}), "<svg/>")
+
+      expect { Claricle.detect(source) }.to raise_error(Claricle::UnknownFormat)
+    end
+
     # The XML and XMLNS namespace names are just as reserved as the
     # prefixes that normally carry them -- binding either to some other
     # prefix is invalid even though neither reserved prefix is declared.

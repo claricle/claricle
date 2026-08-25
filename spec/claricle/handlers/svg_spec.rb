@@ -295,8 +295,15 @@ RSpec.describe "Claricle SVG handler" do
       expect(inspect_svg(source).width).to eq(42.0)
     end
 
+    # Detection shares the parsing `read_root` itself wraps -- the
+    # bound and the ATTLIST precedence -- through `root_event`, not
+    # `read_root`. It resolves its own xmlns-bearing attributes bare,
+    # deliberately without `read_root`'s raw-on-failure fallback: a
+    # fallback is the right answer for something about to be reported
+    # as metadata, and the wrong one for deciding whether the document
+    # IS an SVG in the first place.
     it "is what detection consumes" do
-      allow(Claricle.const_get(:Detector)).to receive(:read_root).and_return(nil)
+      allow(Claricle.const_get(:Detector)).to receive(:root_event).and_return(nil)
 
       expect { Claricle.detect(svg("")) }.to raise_error(Claricle::UnknownFormat)
     end
