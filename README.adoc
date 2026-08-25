@@ -2,7 +2,7 @@
 
 image:https://img.shields.io/gem/v/claricle.svg[RubyGems Version]
 image:https://img.shields.io/github/license/ribose/claricle.svg[License]
-image:https://github.com/ribose/claricle/actions/workflows/test.yml/badge.svg["Build Status", link="https://github.com/ribose/claricle/actions/workflows/test.yml"]
+image:https://github.com/ribose/claricle/actions/workflows/main.yml/badge.svg["Build Status", link="https://github.com/ribose/claricle/actions/workflows/main.yml"]
 
 == Purpose
 
@@ -135,6 +135,10 @@ not read on the IO: after a source longer than that, the IO sits
 mid-stream and `eof?` is false. A caller who needs the rest of the
 stream, or cares whether it reached EOF, should check rather than
 assume.
+
+An SVG is recognised only when its root carries the SVG namespace. A
+bare `<svg>` with no `xmlns` is not detected, because SVG requires that
+declaration and the probe will not guess at one.
 
 Bytes matching no known signature raise `Claricle::UnknownFormat`. A
 format that is recognised but unhandled raises

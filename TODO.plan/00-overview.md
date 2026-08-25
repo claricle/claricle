@@ -43,10 +43,11 @@ flowchart TD
 
 Every handler is a plain subclass declaring its formats once; the
 registry derives a frozen map from one class list. Adding a format costs
-one handler class, one entry in `Registry::HANDLER_CLASSES`, one probe
-in the detector — detection is a hand-rolled sequence, not a per-handler
-sniffer — and, for an inbound conversion, an entry in the source
-handler's target list together with its feature-loss rules.
+one handler class, one `require_relative` for it in `registry.rb` —
+there is no autoloading — one entry in `Registry::HANDLER_CLASSES`, one
+probe in the detector — detection is a hand-rolled sequence, not a
+per-handler sniffer — and, for an inbound conversion, an entry in the
+source handler's target list together with its feature-loss rules.
 
 ## Item topology
 
@@ -429,7 +430,7 @@ capabilities do.
 - [ ] `Claricle.convert` covers EMF↔SVG, PS/EPS↔SVG, SVG→EPS → 04
 - [ ] CLI inspect/conform/convert, human + JSON → 02/03/04
 - [ ] `claricle formats` support matrix → 02 (command, inspect only), grows in 03 and 04, complete at 04
-- [ ] Handler registry documented; adding a format costs a handler class + a `HANDLER_CLASSES` entry + a detector probe, plus — for an inbound conversion — an entry in the source handler's target list **and** its feature-loss rules. **Not** one class → 01 (code), 01 step 7b (README correction)
+- [ ] Handler registry documented; adding a format costs a handler class + its `require_relative` in `registry.rb` + a `HANDLER_CLASSES` entry + a detector probe, plus — for an inbound conversion — an entry in the source handler's target list **and** its feature-loss rules. **Not** one class → 01 (code), 01 step 7b (README correction)
 - [ ] Exit codes match the matrix → 01 (runner, all rows incl. 4), verified per command in 02/03/04; 03 reaches 4 end-to-end
 - [ ] Conformance specs on canonical fixtures; round-trip specs per D11 → 03/04
 - [ ] `compress` stub removed → 01

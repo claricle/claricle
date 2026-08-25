@@ -97,7 +97,7 @@ module Claricle
 
       # Bytes this image owns, whatever the caller tagged them.
       # `File.binread` already gives binary; detection binary-copies its
-      # own view (detector.rb:137) and never the String we keep, so a
+      # own view (`Detector.detect`) and never the String we keep, so a
       # content-born image was the one place `content` depended on how the
       # caller happened to read the file. Measured: the same 70-byte PNG
       # through `File.read` arrives UTF-8, where `length` is 69 and

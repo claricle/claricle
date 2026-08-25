@@ -95,7 +95,8 @@ dependency where marked ⚙):
   `formats` command); no runtime mutation, no test-only APIs.
 - **Handler metadata carries what the registry derives.** The advertised
   "adding a format = one handler class" is **not** true under the settled
-  design: a new format needs a handler class, an entry in
+  design: a new format needs a handler class, a `require_relative` for
+  it in `registry.rb` (there is no autoloading), an entry in
   `HANDLER_CLASSES`, and a probe in the detector (detection is a
   hand-rolled sequence, not a per-handler sniffer), plus — for an
   inbound conversion — an entry in the source handler's target list and
@@ -156,6 +157,16 @@ dependency where marked ⚙):
   `TargetRubyVersion: 3.2` + `Metrics/BlockLength` exclude `spec/**/*`
   (rubocop-rspec isn't wired in); CI matrix `['3.2', '3.3']`, extended
   to the newest stable Ruby the gemspec actually admits.
+- **What shipped instead, on the floor and the dependency list.** The
+  gemspec floor is `>= 3.3.0`, `.rubocop.yml` is `TargetRubyVersion:
+  3.3`, and the CI matrix is `['3.3', '3.4', '4.0']` — a line above the
+  3.2 prescribed here and in 00-overview (D5, the item table, and the
+  global constraints all still say 3.2). `rexml` also joined `emf` and
+  `lutaml-model`, because `detector.rb` requires it directly. No
+  installed dependency forces 3.3: measured, `emf` 0.1.0 asks `>= 3.1.0`
+  and `lutaml-model` 0.8.19 asks `>= 3.0.0`. Whether 00-overview follows
+  this file down to 3.2, or D5 is amended up to 3.3, is the owner's
+  call — recorded here rather than left as a silent disagreement.
 - **Honesty baseline**: README.adoc and the gemspec description
   describe reality as of 01 — the current README
   advertises validation, conversion, compression and a fictional
