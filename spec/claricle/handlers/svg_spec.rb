@@ -287,7 +287,8 @@ RSpec.describe "Claricle SVG handler" do
   describe "the shared reader" do
     # Behavioural agreement proves nothing here: a duplicated reader
     # inside the handler passes every other example in this file. These
-    # assert the handler actually goes through Detector.read_root.
+    # pin which reader each caller reaches -- `read_root` for the
+    # handler, `root_event` for detection.
     it "is a public singleton method on Detector" do
       expect(Claricle.const_get(:Detector).singleton_class)
         .to be_public_method_defined(:read_root)

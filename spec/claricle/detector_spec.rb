@@ -5,8 +5,10 @@ require "stringio"
 require "tempfile"
 require "timeout"
 # Required by the specs alone, to check the detector's hand-transcribed
-# XML Name grammar against REXML's own copy of the same production. The
-# library never loads it.
+# XML Name grammar against REXML's own copy of the same production.
+# Claricle's own source never asks for it. REXML does load it, behind
+# `rexml/parsers/pullparser`, but that is REXML's require graph and not
+# something a spec should lean on.
 require "rexml/xmltokens"
 
 RSpec.describe "Claricle format detection" do
@@ -398,15 +400,17 @@ RSpec.describe "Claricle format detection" do
         .to raise_error(Claricle::UnknownFormat)
     end
 
-    # A single escaped ampersand ("&amp;amp;" resolving to literal
-    # "&amp;") is ordinary in a URL query string, and the reserved-prefix
-    # guard must not mistake the resolved text for a still-unresolved
-    # reference: it looks at the RAW value for that, not the resolved
-    # one. Regression guard for a bug where the resolved text alone was
-    # pattern-matched, rejecting a namespace value that had resolved
-    # correctly just because it happened to contain "&amp;".
-    it "still accepts an unrelated prefix whose resolved value contains a literal ampersand escape" do
-      source = %(<svg xmlns="#{svg_ns}" xmlns:p="https://example.test/?a=1&amp;amp;b=2"/>)
+    # An escaped ampersand is ordinary in a URL query string, and the
+    # reserved-prefix guard must not mistake the resolved text for a
+    # still-unresolved reference: it reads the RAW value for that.
+    #
+    # The fixture resolves to "&foo;", not to "&amp;", on purpose.
+    # "&amp;" is one of the five the lookahead already excludes, so a
+    # mutant reading the resolved value stayed green through it --
+    # measured, the whole file did. "&foo;" is the shape only the
+    # raw-versus-resolved choice gets right.
+    it "still accepts an unrelated prefix whose resolved value reads as a reference" do
+      source = %(<svg xmlns="#{svg_ns}" xmlns:p="https://example.test/?a=1&amp;foo;b=2"/>)
 
       expect(Claricle.detect(source)).to eq(:svg)
     end
@@ -874,7 +878,28 @@ RSpec.describe "Claricle format detection" do
 
       expect(references).to be_unresolved("&\u{E9};")
       expect(references).to be_unresolved("&\u{3042};")
-      expect(references).not_to be_unresolved("&amp;")
+    end
+
+    # All five, not just `amp`. Each one is a reference the resolver
+    # DOES have a table for, so reading it as unresolved would refuse a
+    # namespace value holding an ordinary escaped `<` or `"`. Measured:
+    # cutting `lt`, `gt`, `apos` and `quot` out of the lookahead left
+    # the whole suite green when only `amp` was asserted here.
+    it "sees none of the five predefined entities as unresolved" do
+      references = Claricle.const_get(:AttributeReferences)
+
+      %w[amp lt gt apos quot].each do |predefined|
+        expect(references).not_to be_unresolved("&#{predefined};")
+      end
+    end
+
+    # The other direction, which none of the examples above prove: a
+    # guard that refused every non-ASCII value would pass all of them.
+    # This value carries no reference at all and has to come through.
+    it "still accepts a non-ASCII namespace value carrying no reference" do
+      source = %(<svg xmlns="#{svg_ns}" xmlns:p="https://\u{4F8B}.test/\u{3042}"/>)
+
+      expect(Claricle.detect(source)).to eq(:svg)
     end
 
     # The name class in the detector is hand-transcribed from XML 1.0
