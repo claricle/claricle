@@ -110,24 +110,77 @@ module Claricle
         refuse("meta", "values JSON can render", e.message)
       end
 
-      # Base freezes Strings and collections, so a Hash has to be sealed
-      # here. Without it a sealed Inspection still takes `meta["x"] = 1`
-      # and reports the change in its JSON.
+      # Base freezes Strings and collections, so `meta` has to be sealed
+      # here -- and sealed all the way down, because the container is the
+      # only part of it the model owned. Measured on a sealed Inspection,
+      # against the shapes real handlers produce: SVG root attributes
+      # arrive as mutable Strings and an EMF `frame` arrives as a nested
+      # Hash, and writing through the caller's own reference to either
+      # changed a frozen Inspection's JSON. Two of those writes went
+      # further and left it with no JSON at all -- replacing a nested
+      # String with invalid binary raised `JSON::GeneratorError`, and
+      # closing a nested Hash into a cycle raised `JSON::NestingError`,
+      # both from a `to_json` long after `refuse_unrenderable` had passed
+      # the value it was given.
       #
-      # Through the reader, because deserialization stores the value
-      # wrapped and the reader unwraps it -- both doors then seal the
-      # same object. The freeze is shallow, matching the copy that cast
-      # made: what a handler nested inside `meta` stays the handler's.
+      # A copy first and a freeze second, never a freeze in place:
+      # `FreeFormHash.cast` copies the container and nothing below it, so
+      # every Hash, Array and String nested inside `meta` is still the
+      # caller's object. Sealing those where they lie would take a
+      # handler's own data away from it, which is a defect of its own.
+      #
+      # Read through the reader and written straight back to the ivar,
+      # which collapses the two shapes `meta` is stored in. Construction
+      # keeps a bare Hash and deserialization keeps one inside a
+      # FreeFormHash, and the wrapper was a second object to seal -- one
+      # that got missed, measured: after `from_json`,
+      # `@meta.instance_variable_set(:@value, {"changed" => true})` gave
+      # a frozen Inspection a different `meta` and different JSON without
+      # ever touching a frozen object. Sealing replaces the ivar outright
+      # rather than reaching into the wrapper, so after this both doors
+      # hold the same bare frozen Hash and there is no second object left
+      # to repoint. The reader keeps its unwrap because it also runs
+      # during deserialization, before this does.
       def freeze_attributes
         super
-        meta&.freeze
-        # And the wrapper the reader unwraps. Freezing only what `meta`
-        # hands back leaves the FreeFormHash deserialization stored in
-        # the ivar writable -- measured: after `from_json`,
-        # `@meta.instance_variable_set(:@value, {"changed" => true})`
-        # gave a frozen Inspection a different `meta` and different JSON,
-        # without ever touching a frozen object.
-        @meta.freeze
+        @meta = sealed_copy(meta)
+      end
+
+      # The model's own copy of the JSON graph `meta` describes, frozen
+      # at every level.
+      #
+      # Recursion needs no depth guard and no cycle guard because this
+      # runs from `seal`, after `refuse_unrenderable` has already
+      # rendered this very value: a graph that leads back to itself, or
+      # nests deeper than a document can carry, was refused before the
+      # lifecycle reached here.
+      #
+      # A String already frozen is kept rather than copied -- it cannot
+      # change, so a second copy of it buys nothing. Ruby freezes String
+      # Hash keys on insert (measured, for literals and for `JSON.parse`
+      # alike), so keys are usually that case already; they go through
+      # anyway, because a key does not have to be a String.
+      #
+      # Everything else is left exactly as it arrived. Numbers, Symbols,
+      # `true`, `false` and `nil` cannot change, and an arbitrary object
+      # a handler chose to attach is the handler's, not ours -- JSON
+      # renders it through `to_s`, and freezing someone else's object to
+      # pin that would be the very thing the copy above exists to avoid.
+      #
+      # `Ractor.make_shareable(value, copy: true)` does all of this in C
+      # and was measured rather than assumed: it refuses values this
+      # model accepts. A Proc or a lambda in `meta` renders through
+      # `to_s` and passes `refuse_unrenderable`, and `make_shareable`
+      # then raises `TypeError: allocator undefined for Proc` from inside
+      # `seal` -- trading a stored value for a crash, in a gem that
+      # starts no Ractors.
+      def sealed_copy(value)
+        case value
+        when ::Hash then value.to_h { |k, v| [sealed_copy(k), sealed_copy(v)] }.freeze
+        when ::Array then value.map { |element| sealed_copy(element) }.freeze
+        when ::String then value.frozen? ? value : value.dup.freeze
+        else value
+        end
       end
 
       def nested_models

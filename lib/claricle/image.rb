@@ -8,6 +8,29 @@ require_relative "registry"
 module Claricle
   # What every operation takes and the registry dispatches on. Built from a
   # path or from content; either way it knows its format.
+  #
+  # A path-born image is a handle to a file, not a snapshot of it.
+  # `format` is the verdict `from_path` reached from the bytes that were
+  # there at construction, and `content` and `with_path` go back to that
+  # name afterwards. So the file must not change while an image is in
+  # use -- measured: a detected PNG overwritten with a valid SVG kept
+  # reporting :png, and every later read saw the SVG.
+  #
+  # Stated rather than enforced, deliberately. Binding the format to one
+  # generation of bytes means holding that generation, which costs a
+  # file-sized allocation retained for the image's whole lifetime -- the
+  # reason `content` is lazy here at all, and the reason a handler that
+  # only needs a header should never reach for it. A `stat` taken at
+  # construction and rechecked on every read would not close the race
+  # either: `with_path` hands out a name, and whatever opens that name
+  # does so after the check. It would narrow the window in exchange for
+  # a guarantee this cannot keep.
+  #
+  # What a file replaced mid-flight costs is a wrong label on an honest
+  # failure -- the handler for the format detected first reports that it
+  # could not parse the bytes that are there now. A content-born image
+  # has no such window: its bytes and its format are settled together
+  # and it owns both.
   class Image
     attr_reader :format, :path
 
@@ -102,6 +125,11 @@ module Claricle
     # slurping it at construction would waste that. Frozen for the same
     # reason a content-born image keeps a copy: a handler that mutated
     # these bytes in place would change what every later handler sees.
+    #
+    # Remembered, so this and `with_path` can disagree: whichever ran
+    # first fixes what it saw, and the other reads the file again. They
+    # agree exactly as long as the file does not change, which is the
+    # contract stated on the class.
     def content
       @content ||= File.binread(path).freeze
     end

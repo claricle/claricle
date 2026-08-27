@@ -22,8 +22,11 @@ module Claricle
     #
     # So this type does no normalisation in either direction. Every key
     # and value goes in and comes back untouched. The container itself is
-    # a copy, so a handler that kept its reference cannot rewrite what an
-    # inspection already reported.
+    # a copy, so a handler that kept its reference cannot rewrite the
+    # container an inspection already reported. That copy is one level
+    # deep and stops there: everything nested inside it is still the
+    # handler's own object, which is why `Inspection` copies the whole
+    # graph again before sealing it.
     class FreeFormHash < Lutaml::Model::Type::Hash
       # lutaml's `hash_type?` compares the class EXACTLY, so a subclass
       # is not recognised as a hash and the value arrives wrapped in an
@@ -40,7 +43,10 @@ module Claricle
         # Not frozen here, even though what Inspection ends up storing is:
         # measured, lutaml runs this same cast on the way OUT, so a freeze
         # here would also reach the `meta` inside a rendered document and
-        # take it away from whoever asked for the Hash.
+        # take the container away from whoever asked for the Hash. This
+        # dup is what keeps that container writable; the values inside it
+        # are the inspection's own sealed ones, shared rather than copied
+        # because nothing can change them.
         value.to_h.dup
       end
 
