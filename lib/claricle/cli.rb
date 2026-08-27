@@ -10,14 +10,20 @@ module Claricle
     # Thor >= 1.5 adds `tree` to every subclass. This CLI ships the
     # `version` it declares plus the `help` Thor contributes, and the
     # README documents both -- `tree` is the one it drops. Guarded
-    # because the gemspec permits Thor down to 1.0, where `tree` does
+    # because the gemspec permits Thor down to 1.2, where `tree` does
     # not exist and `undefine: true` on a missing method raises
     # NameError.
     remove_command :tree, undefine: true if method_defined?(:tree)
 
     desc "version", "Display Claricle version"
     def version
-      puts "Claricle version #{Claricle::VERSION}"
+      tolerate_closed_output { puts "Claricle version #{Claricle::VERSION}" }
+    end
+
+    # Thor supplies this command. Keep a closed consumer of command output
+    # successful without hiding an EPIPE raised by the command's own work.
+    def help(command = nil, subcommand = false) # rubocop:disable Style/OptionalBooleanParameter
+      tolerate_closed_output { super(command, subcommand) }
     end
 
     # Turns an exception into a process status. `run` returns an Integer
@@ -52,12 +58,14 @@ module Claricle
 
       class << self
         def run(argv, output: $stderr)
-          result = Cli.start(argv, debug: true)
+          arguments = argv.dup
+          validate_arguments(arguments)
+          normalize_command_arguments(arguments)
+          result = invoke(arguments)
           result.is_a?(Status) ? result.code : 0
         rescue SystemExit => e
-          # Thor turns Errno::EPIPE into SystemExit(0) even under debug,
-          # and a command may exit deliberately. Neither is an error.
-          # The status still has to be a byte: `exit 256` reports success.
+          # A command may exit deliberately. The status still has to be a
+          # byte: `exit 256` reports success.
           bounded_status(e.status)
         rescue StandardError, ScriptError, SystemStackError => e
           report(error_message(e), output)
@@ -65,6 +73,46 @@ module Claricle
         end
 
         private
+
+        # Thor's public `start` turns every EPIPE into success, including
+        # one raised by a command's own operation. Dispatch directly so the
+        # runner can map those failures; Cli handles only its output writes.
+        def invoke(arguments)
+          Cli.send(:dispatch, nil, arguments, nil, { shell: Thor::Base.shell.new })
+        end
+
+        # Thor assumes argv text is valid and ASCII-compatible. Reject input
+        # it cannot parse as a bad invocation instead of an internal error.
+        def validate_arguments(arguments)
+          arguments.each_with_index do |argument, index|
+            valid = argument.is_a?(String) &&
+                    argument.encoding.ascii_compatible? &&
+                    argument.valid_encoding?
+            next if valid
+
+            raise InvocationError, "argument #{index + 1} must be valid ASCII-compatible text"
+          end
+        end
+
+        # Command names are semantic text, unlike future positional paths.
+        # Thor compares them with UTF-8 command keys and can choke on another
+        # valid ASCII-compatible encoding, so normalize only that boundary.
+        def normalize_command_arguments(arguments)
+          arguments[0] = command_text(arguments[0]) if arguments[0]
+          return unless help_command?(arguments[0]) && arguments[1]
+
+          arguments[1] = command_text(arguments[1])
+        end
+
+        def command_text(argument)
+          argument.encode(Encoding::UTF_8)
+        rescue EncodingError
+          raise InvocationError, "command name cannot be converted to UTF-8"
+        end
+
+        def help_command?(name)
+          Cli.send(:normalize_command_name, name) == "help"
+        end
 
         # Writing the diagnostic must not become the failure. `output.puts`
         # sits inside a rescue body, so nothing above catches it: with
@@ -96,11 +144,26 @@ module Claricle
         # not much help when the class was LoadError. A mapped Claricle
         # error already reads as a sentence, so it does not need one.
         def error_message(error)
-          return "claricle: #{error.message}" if error.is_a?(Error) || error.is_a?(Thor::Error)
+          message = utf8_message(error.message)
+          return "claricle: #{message}" if error.is_a?(Error) || error.is_a?(Thor::Error)
 
-          "claricle: #{error.class}: #{error.message}"
+          "claricle: #{error.class}: #{message}"
+        end
+
+        def utf8_message(message)
+          message.encode(Encoding::UTF_8, invalid: :replace)
+        rescue EncodingError
+          message.b.encode(Encoding::UTF_8, undef: :replace)
         end
       end
+    end
+
+    private
+
+    def tolerate_closed_output
+      yield
+    rescue Errno::EPIPE
+      Runner::Status.new(0)
     end
   end
 end

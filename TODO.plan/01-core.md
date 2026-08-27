@@ -129,9 +129,12 @@ dependency where marked ⚙):
   load-bearing (stdlib, NOT autoloaded ⚙).
 - **CLI + Runner** (`lib/claricle/cli.rb`): stubs deleted, `version`
   kept, nested `Runner` module maps `run(argv)` → exit code:
-  `Cli.start(argv, debug: true)` makes Thor re-raise `Thor::Error`
-  instead of printing-and-exiting ⚙ (fallback: `ENV["THOR_DEBUG"]`
-  scoped around the call; record which mechanism was used).
+  dispatch Thor directly so `Thor::Error` and operation failures reach
+  the map. Thor's public `start` treats every `Errno::EPIPE` as success,
+  even one raised by a command's own work; only actual `help` and
+  `version` output tolerates a closed consumer. Validate argv before
+  dispatch so malformed or non-ASCII-compatible text is an invocation
+  error rather than an internal encoding failure.
   `Thor::Error`/`Errno::ENOENT`/`InvocationError` → 2,
   `UnknownFormat`/`UnsupportedFormat` → 3, other `StandardError` → 4,
   **`LoadError` → 4 and `SystemStackError` → 4, both caught
@@ -151,27 +154,27 @@ dependency where marked ⚙):
   4 — that replaced the original prescription's "no `SystemExit`
   passthrough". Nothing is thrown through the runner either way, and
   03's nonconformant exit 1 stays a returned integer like every other
-  code.
-- **Tooling**: gemspec floor `>= 3.2.0`, add `emf` + `lutaml-model`
+  code. Normalize exception messages to UTF-8 before reporting them so
+  a delegate's differently encoded message cannot replace its mapped
+  status with an `Encoding::CompatibilityError`.
+- **Tooling**: gemspec floor `>= 3.3.0`, add `emf` + `lutaml-model`
   (only what 01 uses; 02 adds the rest) with three-segment constraints
   on the reviewed line — `~> 0.7` is not a pin, it admits every 0.x
   (D13), and this gem commits no lockfile. `.rubocop.yml`
-  `TargetRubyVersion: 3.2` + `Metrics/BlockLength` exclude `spec/**/*`
-  (rubocop-rspec isn't wired in); CI matrix `['3.2', '3.3']`, extended
+  `TargetRubyVersion: 3.3` + `Metrics/BlockLength` exclude `spec/**/*`
+  (rubocop-rspec isn't wired in); CI matrix `['3.3', '3.4', '4.0']`, extended
   to the newest stable Ruby the gemspec actually admits.
-- **What shipped instead, on the floor and the dependency list.** The
-  gemspec floor is `>= 3.3.0`, `.rubocop.yml` is `TargetRubyVersion:
-  3.3`, and the CI matrix is `['3.3', '3.4', '4.0']` — a line above the
-  3.2 prescribed here and in 00-overview (D5, the item table, and the
-  global constraints all still say 3.2). `rexml` also joined `emf` and
-  `lutaml-model`, because `detector.rb` requires it directly. No
-  installed dependency forces 3.3: measured, `emf` 0.1.0 asks `>= 3.1.0`
-  and `lutaml-model` 0.8.19 asks `>= 3.0.0`. Whether 00-overview follows
-  this file down to 3.2, or D5 is amended up to 3.3, is the owner's
-  call — recorded here rather than left as a silent disagreement.
+- **Tooling outcome.** `rexml` also joined `emf` and `lutaml-model`,
+  because `detector.rb` requires it directly. No direct runtime
+  dependency forces 3.3: measured, `emf` 0.1.0 asks `>= 3.1.0`
+  and `lutaml-model` 0.8.19 asks `>= 3.0.0`, while `rexml` 3.4.4 asks
+  `>= 2.5.0` and Thor 1.2.0 asks `>= 2.0.0`. The 3.3 project floor is a
+  deliberate policy, not a delegate constraint. Thor's floor is 1.2:
+  1.0 and 1.1 reference the removed `DidYouMean::SPELL_CHECKERS` and
+  fail on supported Ruby 3.4.
 - **Honesty baseline**: README.adoc and the gemspec description
-  describe reality as of 01 — the current README
-  advertises validation, conversion, compression and a fictional
+  describe reality as of 01 — the pre-01 README advertised validation,
+  conversion, compression and a fictional
   `Claricle::Validator` API, and the gemspec advertises compression.
   Later items extend this baseline; 04 does the final rewrite. Merged
   source should never claim capabilities it lacks, release or no
