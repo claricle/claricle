@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "json"
 require "lutaml/model"
 
 module Claricle
@@ -172,7 +173,7 @@ module Claricle
         return value unless attribute.type == Lutaml::Model::Type::String
 
         refuse(name, "a String enum value", class_of(value)) unless inherits_from?(value, ::String)
-        ::String.new(value)
+        own_string(name, value)
       end
 
       def validate_attribute(name, attribute, type)
@@ -247,6 +248,18 @@ module Claricle
           Thread.current[DESERIALIZING] = outer
         end
         result.is_a?(Array) ? result : result.finalize
+      end
+
+      # Lutaml normally deletes bytes it cannot transcode before assigning
+      # them. Preserve those bytes so the name-aware lifecycle below can
+      # report why the declared String is unusable instead of calling a
+      # required value missing.
+      def self.ensure_utf8(value)
+        return super unless value.is_a?(::String) && !Lutaml::Model.opal?
+
+        value.encode(Encoding::UTF_8)
+      rescue EncodingError
+        value
       end
 
       # Lutaml also accepts a positional attributes Hash, so take whatever
@@ -437,23 +450,27 @@ module Claricle
           slot = :"@#{name}"
           raw = instance_variable_get(slot)
           if inherits_from?(raw, ::String)
-            instance_variable_set(slot, own_string(raw))
+            instance_variable_set(slot, own_string(name, raw))
           elsif core_instance?(raw, ::Array)
-            instance_variable_set(slot, own_array(raw))
+            instance_variable_set(slot, own_array(name, raw))
           end
         end
       end
 
-      def own_array(value)
+      def own_array(name, value)
         copy = []
-        each_array(value) { |element| copy << own_string(element) }
+        each_array(value) { |element| copy << own_string(name, element) }
         copy.freeze
       end
 
-      def own_string(value)
+      def own_string(name, value)
         return value unless inherits_from?(value, ::String)
 
-        ::String.new(value).freeze
+        copy = ::String.new(value)
+        JSON.generate(copy)
+        copy.freeze
+      rescue JSON::GeneratorError => e
+        refuse(name, "a String JSON can render", e.message)
       end
 
       def normalize; end

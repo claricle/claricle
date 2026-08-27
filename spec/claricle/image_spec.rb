@@ -37,6 +37,42 @@ RSpec.describe Claricle::Image do
       expect(described_class.from_content(png).format).to eq(:png)
     end
 
+    it "preserves a content-only subclass initializer" do
+      subclass = Class.new(described_class) do
+        attr_reader :initialized_from
+
+        def initialize(format:, content:)
+          @initialized_from = :content
+          super
+        end
+      end
+
+      image = subclass.from_content(png)
+
+      expect(image).to be_an_instance_of(subclass)
+      expect(image.initialized_from).to eq(:content)
+      expect(image.content).to eq(png)
+    end
+
+    it "preserves a path-only subclass initializer" do
+      subclass = Class.new(described_class) do
+        attr_reader :initialized_from
+
+        def initialize(format:, path:)
+          @initialized_from = :path
+          super
+        end
+      end
+
+      with_file.call(png) do |path|
+        image = subclass.from_path(path)
+
+        expect(image).to be_an_instance_of(subclass)
+        expect(image.initialized_from).to eq(:path)
+        expect(image.path).to eq(path)
+      end
+    end
+
     # The caller taking responsibility, so it is not re-detected.
     it "honours an explicit format even against the bytes" do
       expect(described_class.from_content(png, format: :wmf).format).to eq(:wmf)
