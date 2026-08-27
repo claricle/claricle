@@ -128,6 +128,26 @@ RSpec.describe Claricle::Image do
       end
     end
 
+    # A String subclass can claim it is frozen and make `dup` return
+    # itself. The path boundary copies through core String semantics, so
+    # those virtual answers cannot keep the caller's object in the Image.
+    it "owns a core path when a String subclass lies" do
+      liar = Class.new(String) do
+        def dup = self
+        def frozen? = true
+      end
+
+      with_file.call(png) do |path|
+        supplied = liar.new(path)
+        image = described_class.from_path(supplied)
+        supplied.replace("/nonexistent")
+
+        expect(image.path).to be_an_instance_of(String)
+        expect(image.path).to eq(path)
+        expect(image.content).to eq(png)
+      end
+    end
+
     # Ruby's default Marshal reads the ivars straight back in without
     # running any of the guards, and it does not carry a String's freeze.
     # Measured on a copy made that way: `content.replace("NOT A PNG AT
@@ -245,6 +265,24 @@ RSpec.describe Claricle::Image do
       expect(image.format).to eq(:png)
     end
 
+    # This is the content analogue of the path lie, including every
+    # virtual shortcut the old ownership helper trusted.
+    it "owns core bytes when a String subclass lies" do
+      liar = Class.new(String) do
+        def b = self
+        def dup = self
+        def encoding = Encoding::BINARY
+        def frozen? = true
+      end
+      supplied = liar.new(png).force_encoding(Encoding::BINARY)
+      image = described_class.from_content(supplied)
+      supplied.replace("not a PNG")
+
+      expect(image.content).to be_an_instance_of(String)
+      expect(image.content).to eq(png)
+      expect(image.format).to eq(:png)
+    end
+
     it "hands back bytes nobody can rewrite in place" do
       expect(described_class.from_content(png.dup).content).to be_frozen
       with_file.call(png) do |path|
@@ -252,13 +290,20 @@ RSpec.describe Claricle::Image do
       end
     end
 
-    # A String that is already frozen and already binary cannot be
-    # rewritten, so it is kept rather than costing a second copy of the
-    # whole image.
-    it "keeps a frozen binary string rather than copying it again" do
-      frozen = png.b.freeze
+    # An exact core String can still carry singleton behavior. Detection
+    # must read the same plain bytes the image stores, even when the input
+    # was already frozen and binary.
+    it "owns frozen core bytes with singleton behavior" do
+      supplied = png.b
+      supplied.define_singleton_method(:b) { "not a PNG".b }
+      supplied.freeze
 
-      expect(described_class.from_content(frozen).content).to equal(frozen)
+      image = described_class.from_content(supplied)
+
+      expect(image.content).to be_an_instance_of(String)
+      expect(image.content).to eq(png)
+      expect(image.content).not_to equal(supplied)
+      expect(image.format).to eq(:png)
     end
   end
 

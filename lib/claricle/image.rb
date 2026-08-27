@@ -34,6 +34,10 @@ module Claricle
   class Image
     attr_reader :format, :path
 
+    KIND_OF = ::Object.instance_method(:is_a?)
+    CLASS_OF = ::Object.instance_method(:class)
+    private_constant :KIND_OF, :CLASS_OF
+
     class << self
       def from_path(path)
         # Checked before anything opens it, for the same reason `binary`
@@ -44,7 +48,7 @@ module Claricle
         # the caller's IO read `Errno::EBADF` while `io.closed?` still
         # said false.
         name = checked_path(path)
-        new(format: Detector.detect_path(name), path: name)
+        build(format: Detector.detect_path(name), path: name)
       end
 
       def from_content(content, format: nil)
@@ -54,27 +58,47 @@ module Claricle
         content = binary(content)
         # nil means "detect"; anything else is the caller's answer,
         # including a false one, which the Symbol guard then rejects.
-        new(format: format.nil? ? Detector.detect(content) : format, content: content)
+        build(format: format.nil? ? Detector.detect(content) : format, content: content)
       end
 
       private
+
+      # Go through `new`, even after the factory has canonicalized its
+      # source, so subclasses keep their normal initialize hook.
+      def build(format:, path: nil, content: nil)
+        new(format:, path:, content:)
+      end
+
+      def checked_format(format)
+        return format if KIND_OF.bind_call(format, ::Symbol)
+
+        raise ArgumentError, "format must be a Symbol, got #{CLASS_OF.bind_call(format)}"
+      end
+
+      def checked_source(path, content)
+        return if path.nil? ^ content.nil?
+
+        raise ArgumentError, "give exactly one of path: or content:"
+      end
 
       # A path is read and joined, so it has to be a name -- and one this
       # image owns, for the same reason it owns its bytes. Measured:
       # `path.replace(other_file)` after `from_path(path)` left the image
       # reading the other file while still reporting the format detected
       # from the first, and `image.path << "x"` rewrote it through the
-      # reader. A String already frozen cannot do either, so it is kept
-      # as it came.
+      # reader. A fresh core String makes that ownership independent of
+      # a subclass's virtual `frozen?` and `dup`.
       #
       # Refused rather than assumed, because `false` would clear the
       # exactly-one check in `initialize` and then read as "no path" in
       # `with_path`, so the image took the temporary-file branch and died
       # on `File.binread(false)`.
       def checked_path(path)
-        raise ArgumentError, "path must be a String, got #{path.class}" unless path.is_a?(String)
+        unless KIND_OF.bind_call(path, ::String)
+          raise ArgumentError, "path must be a String, got #{CLASS_OF.bind_call(path)}"
+        end
 
-        path.frozen? ? path : path.dup.freeze
+        ::String.new(path).freeze
       end
 
       # Bytes this image owns, whatever the caller tagged them.
@@ -90,9 +114,11 @@ module Claricle
       # a caller who kept their String could otherwise rewrite the bytes
       # out from under the format we detected -- measured:
       # `bytes.replace("not a PNG")` after `from_content(bytes)` left the
-      # image reporting :png over nine bytes of text. A String that is
-      # already frozen and already binary cannot do that, so it is kept
-      # as-is rather than costing a second copy of the whole image.
+      # image reporting :png over nine bytes of text. Every input is
+      # normalized through a fresh core String: a subclass can lie about
+      # `b`, `dup`, `frozen?` or `encoding`, and even an exact frozen
+      # String can give `b` singleton behavior that makes detection see
+      # different bytes from the ones the image stores.
       #
       # Refused rather than assumed, because `false` clears the
       # exactly-one check in `initialize` and is still falsy -- measured:
@@ -100,25 +126,26 @@ module Claricle
       # `content` then read the nil path and raised "no implicit
       # conversion of nil into String".
       def binary(bytes)
-        raise ArgumentError, "content must be a String, got #{bytes.class}" unless bytes.is_a?(String)
+        unless KIND_OF.bind_call(bytes, ::String)
+          raise ArgumentError, "content must be a String, got #{CLASS_OF.bind_call(bytes)}"
+        end
 
-        return bytes if bytes.frozen? && bytes.encoding == Encoding::BINARY
-
-        bytes.b.freeze
+        ::String.new(bytes).force_encoding(Encoding::BINARY).freeze
       end
     end
 
     def initialize(format:, path: nil, content: nil)
-      raise ArgumentError, "format must be a Symbol, got #{format.class}" unless format.is_a?(Symbol)
+      self.class.send(:checked_format, format)
 
       path = self.class.send(:checked_path, path) unless path.nil?
       # Exactly one source. Neither leaves #content reading from a nil
       # path; both is contradictory and would silently prefer one.
-      raise ArgumentError, "give exactly one of path: or content:" unless path.nil? ^ content.nil?
+      self.class.send(:checked_source, path, content)
+      content = self.class.send(:binary, content) unless content.nil?
 
       @format = format
       @path = path
-      @content = self.class.send(:binary, content) unless content.nil?
+      @content = content
     end
 
     # Read lazily and then remembered. Detection already streamed the file;
