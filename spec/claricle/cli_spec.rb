@@ -226,6 +226,26 @@ RSpec.describe Claricle::Cli::Runner do
       expect(described_class.run(%w[inspect image.png], output: StringIO.new)).to eq(4)
     end
 
+    it "maps inspection rendering's broken pipe to 4" do
+      inspection = instance_double(Claricle::Models::Inspection)
+      image = instance_double(Claricle::Image, inspection: inspection)
+      presenter = Claricle.const_get(:Cli).const_get(:Presenter)
+      allow(Claricle::Image).to receive(:from_path).and_return(image)
+      allow(presenter).to receive(:inspection).with(inspection).and_raise(Errno::EPIPE)
+
+      expect(described_class.run(%w[inspect image.png], output: StringIO.new)).to eq(4)
+    end
+
+    it "maps inspection JSON generation's broken pipe to 4" do
+      inspection = instance_double(Claricle::Models::Inspection)
+      image = instance_double(Claricle::Image, inspection: inspection)
+      allow(Claricle::Image).to receive(:from_path).and_return(image)
+      allow(inspection).to receive(:to_json).and_raise(Errno::EPIPE)
+
+      arguments = %w[inspect image.png --json]
+      expect(described_class.run(arguments, output: StringIO.new)).to eq(4)
+    end
+
     it "maps a formats operation's broken pipe to 4" do
       allow(Claricle.const_get(:Registry)).to receive(:formats).and_raise(Errno::EPIPE)
 
@@ -238,6 +258,23 @@ RSpec.describe Claricle::Cli::Runner do
       allow(registry).to receive(:capabilities_for).and_raise(Errno::EPIPE)
 
       expect(described_class.run(["formats"], output: StringIO.new)).to eq(4)
+    end
+
+    it "maps formats rendering's broken pipe to 4" do
+      registry = Claricle.const_get(:Registry)
+      presenter = Claricle.const_get(:Cli).const_get(:Presenter)
+      allow(registry).to receive(:formats).and_return([])
+      allow(presenter).to receive(:format_table).with([]).and_raise(Errno::EPIPE)
+
+      expect(described_class.run(["formats"], output: StringIO.new)).to eq(4)
+    end
+
+    it "maps formats JSON generation's broken pipe to 4" do
+      registry = Claricle.const_get(:Registry)
+      allow(registry).to receive(:formats).and_return([])
+      allow(JSON).to receive(:generate).with([]).and_raise(Errno::EPIPE)
+
+      expect(described_class.run(%w[formats --json], output: StringIO.new)).to eq(4)
     end
 
     it "does not hide a non-output error from help" do
