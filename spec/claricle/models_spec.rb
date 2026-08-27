@@ -788,6 +788,109 @@ RSpec.describe Claricle::Models do
         .to raise_error(Lutaml::Model::ValidationError, /byte_offset expects a non-negative/)
     end
 
+    # lutaml has a sentinel object standing for "never set", and the
+    # block form of `new` is the one door a caller can store it through.
+    # It made that door disagree with the rest in two directions at once
+    # -- measured, a position raised `byte_offset expects a non-negative
+    # integer, got uninitialized`, while `chunk` sealed and handed the
+    # sentinel itself back where a caller expects a String or nil.
+    #
+    # Normalised rather than refused, because refusing is only reachable
+    # from that one door: through the other five lutaml erases the
+    # sentinel before our lifecycle runs and the ivar holds a plain nil,
+    # so there is nothing left to refuse and nil is what they all report.
+    it "reads nil through every door when handed lutaml's unset sentinel" do
+      unset = Lutaml::Model::UninitializedClass.instance
+      nested = lambda do
+        models::Issue.new(severity: "error", message: "m",
+                          location: models::Location.new(byte_offset: unset)).location
+      end
+      doors = [
+        -> { models::Location.new(byte_offset: unset) },
+        -> { models::Location.new({ byte_offset: unset }) },
+        -> { models::Location.new { |l| l.byte_offset = unset } },
+        -> { models::Location.new { |l| l.byte_offset(unset) } },
+        -> { models::Location.from_hash({ "byte_offset" => unset }) },
+        -> { models::Location.from_json(%({"byte_offset":null})) },
+        nested
+      ]
+
+      expect(doors.map { |door| door.call.byte_offset }).to all(be_nil)
+      expect(doors.map { |door| door.call.to_json }).to all(eq("{}"))
+    end
+
+    # The strongest thing clearing the sentinel buys, and the reason it
+    # belongs to the lifecycle rather than to Location. Measured before
+    # the fix: `Issue.new(severity: "error") { |i| i.message(sentinel) }`
+    # sealed, `message` read back as `UninitializedClass`, and `to_json`
+    # rendered `{"severity":"error"}` -- a required field gone from the
+    # document, which then reloaded as `Missing required attribute:
+    # message`. Cleared to nil, the required check sees it and refuses at
+    # construction instead.
+    it "refuses a required attribute handed the unset sentinel" do
+      unset = Lutaml::Model::UninitializedClass.instance
+
+      expect { models::Issue.new(severity: "error") { |i| i.message(unset) } }
+        .to raise_error(Lutaml::Model::ValidationError, /Missing required attribute: message/)
+    end
+
+    # lutaml wraps a singular enum's value in an Array, so the sentinel
+    # hides inside `[sentinel]` where identity against the singleton
+    # cannot see it. Measured before that wrapper was read through:
+    # `Inspection.new { |x| x.parse_status = sentinel }` sealed and
+    # rendered `{"issues":[]}` -- a required attribute simply absent --
+    # and reloading that document raised `Missing required attribute:
+    # parse_status`. Both enums in the vocabulary, because one of them
+    # passing proves nothing about the other.
+    it "refuses a required enum handed the unset sentinel" do
+      unset = Lutaml::Model::UninitializedClass.instance
+
+      expect { models::Inspection.new { |i| i.parse_status = unset } }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /Missing required attribute: parse_status/)
+      expect { models::Issue.new(message: "m") { |i| i.severity = unset } }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /Missing required attribute: severity/)
+    end
+
+    # The other side of that guard: reading through the enum wrapper must
+    # not disturb a legitimate enum, which is stored in the very same
+    # shape.
+    it "still carries every legal enum value through the wrapper" do
+      expect(models::Inspection.new(parse_status: "failed").to_json)
+        .to eq(%({"parse_status":"failed","issues":[]}))
+      expect(%w[error warning info].map { |s| issue[s].severity })
+        .to eq(%w[error warning info])
+    end
+
+    # The boundary of that rule, so it is a decision rather than an
+    # assumption. lutaml wraps whatever a collection setter is handed, so
+    # the ivar holds `[sentinel]` and never the sentinel itself -- the
+    # clearing pass cannot see it, and the collection's own member check
+    # is what refuses it.
+    it "refuses the unset sentinel handed to a collection" do
+      unset = Lutaml::Model::UninitializedClass.instance
+
+      expect { models::Report.new { |r| r.issues(unset) } }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /issues expects Claricle::Models::Issue, got Lutaml::Model::UninitializedClass/)
+    end
+
+    # The rule is the lifecycle's, not the byte range's. Pinned on an
+    # attribute POSITIONS does not cover and on a second model, because
+    # a fix that only knew about positions would leave `chunk` reporting
+    # the sentinel one field away from where it was found.
+    it "clears the sentinel from any attribute, on any model" do
+      unset = Lutaml::Model::UninitializedClass.instance
+      located = models::Location.new { |l| l.chunk(unset) }
+      report = models::Report.new { |r| r.source_path(unset) }
+
+      expect(located.chunk).to be_nil
+      expect(located.to_json).to eq("{}")
+      expect(report.source_path).to be_nil
+      expect(report.to_json).not_to include("source_path")
+    end
+
     it "round-trips a chunk and both ends of the byte range" do
       located = issue["error", location: models::Location.new(byte_offset: 33, byte_length: 4,
                                                               chunk: "IDAT")]
@@ -1053,6 +1156,118 @@ RSpec.describe Claricle::Models do
 
       expect { deepest.to_json }.not_to raise_error
       expect(models::Inspection.from_json(deepest.to_json).meta).to eq(nest[99])
+    end
+
+    # JSON never descends into a Hash key -- it renders one through
+    # `to_s` -- so neither its depth limit nor its cycle detection ever
+    # sees a key graph, and `refuse_unrenderable` cannot bound one.
+    # Sealing used to walk keys anyway, so a meta that JSON writes
+    # perfectly well took `Inspection.new` down with SystemStackError:
+    # the model refused, by crashing, a document it had just proved it
+    # could render.
+    {
+      "leads back to itself" => [].tap { |a| a << a },
+      "nests 5,000 deep" => (1..5_000).reduce([]) { |inner, _| [inner] }
+    }.each do |label, key|
+      it "seals a meta whose key #{label}, which JSON renders fine" do
+        expect(JSON.generate({ "meta" => { key => 1 } })).to be_a(String)
+
+        inspection = models::Inspection.new(parse_status: "ok", meta: { key => 1 })
+
+        expect { inspection.to_json }.not_to raise_error
+      end
+    end
+
+    # The other half of that: bounding the keys must not have loosened
+    # the values, where JSON does look and where the guard belongs.
+    it "still refuses a value that leads back to itself" do
+      cycle = {}
+      cycle["self"] = cycle
+
+      expect { models::Inspection.new(parse_status: "ok", meta: { "v" => cycle }) }
+        .to raise_error(Lutaml::Model::ValidationError, /meta expects values JSON can render/)
+    end
+
+    # A Hash comparing by identity keeps keys that are `==` but not the
+    # same object. Rebuilt as an ordinary Hash they merge, and measured,
+    # a handler's two-entry meta sealed as one -- an entry gone with
+    # nothing raised.
+    it "keeps every entry of a meta that compares its keys by identity" do
+      supplied = {}.compare_by_identity
+      supplied[+"a"] = 1
+      supplied[+"a"] = 2
+
+      sealed = models::Inspection.new(parse_status: "ok", meta: supplied).meta
+
+      expect(sealed.size).to eq(2)
+      expect(sealed.values).to contain_exactly(1, 2)
+      expect(sealed).to be_compare_by_identity
+    end
+
+    # meta holds whatever a handler put there, so the copy must not ask
+    # that object how to traverse itself. Measured on an Array whose
+    # `map` returns `self`: the caller's own Array came back frozen AND
+    # still shared, so its mutable String went on changing a sealed
+    # Inspection's JSON -- one override defeating both halves of the
+    # copy.
+    it "copies a metadata container that lies about how to traverse it" do
+      sneaky = Class.new(Array) do
+        def map(&) = self
+        def each(&) = ["substituted"].each(&)
+      end
+      leaf = +"real"
+      supplied = sneaky.new([leaf])
+
+      inspection = models::Inspection.new(parse_status: "ok", meta: { "k" => supplied })
+      before = inspection.to_json
+      leaf << "!"
+
+      expect(supplied).not_to be_frozen
+      expect(inspection.meta["k"]).to be_an_instance_of(Array)
+      expect(inspection.meta["k"]).to eq(["real"])
+      expect(inspection.to_json).to eq(before)
+    end
+
+    # The same for a String, which can lie about being frozen as easily
+    # as an Array can lie about `map`. Asking `frozen?` is why the copy
+    # is unconditional.
+    it "copies a metadata string that lies about being frozen" do
+      sneaky = Class.new(String) do
+        def dup = self
+        def frozen? = true
+      end
+      supplied = sneaky.new("real")
+
+      inspection = models::Inspection.new(parse_status: "ok", meta: { "s" => supplied })
+      before = inspection.to_json
+      supplied.replace("substituted")
+
+      expect(inspection.meta["s"]).to be_an_instance_of(String)
+      expect(inspection.to_json).to eq(before)
+    end
+
+    # What carrying keys across gives up, pinned so it is a decision
+    # rather than a gap. JSON reduces every non-String key to text
+    # through `to_s`, which is exactly the case the copy already leaves
+    # to the handler for a value -- so a container key and an arbitrary
+    # object key behave the same, and neither is pinned. A String key
+    # needs no help: Ruby froze and copied it on insert.
+    it "leaves a non-String meta key to the handler, whatever shape it is" do
+      container = [+"a"]
+      object = Object.new
+      object.instance_variable_set(:@shown, +"one")
+      def object.to_s = @shown
+      text = +"key"
+
+      inspection = models::Inspection.new(parse_status: "ok",
+                                          meta: { container => 1, object => 2, text => 3 })
+      container << "b"
+      object.instance_variable_set(:@shown, "two")
+      text << "!"
+
+      rendered = JSON.parse(inspection.to_json)["meta"]
+
+      expect(rendered.keys).to contain_exactly("[\"a\", \"b\"]", "two", "key")
     end
 
     # lutaml generates `meta(*args)` and the block form of `new` uses the
