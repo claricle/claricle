@@ -172,6 +172,23 @@ RSpec.describe "Claricle::Registry" do
       expect(output).to eq("[:emf, :eps, :png, :ps, :svg]")
     end
 
+    it "loads the PostScript delegate only when an inspection needs it" do
+      ok, output = run.call(<<~RUBY)
+        require "claricle"
+        before = Object.const_defined?(:Postscript, false)
+        source = ["%!PS-Adobe-3.0", "%%BoundingBox: 0 0 100 50",
+                  "%%EndComments"].join("\\n") + "\\n"
+        image = Claricle::Image.from_content(source, format: :ps)
+        after_image = Object.const_defined?(:Postscript, false)
+        width = image.inspection.width
+        after_inspection = Object.const_defined?(:Postscript, false)
+        print [before, after_image, after_inspection, width].inspect
+      RUBY
+
+      expect(ok).to be(true), "subprocess failed: #{output}"
+      expect(output).to eq("[false, false, true, 100.0]")
+    end
+
     it "loads handlers/base.rb without the entry point" do
       ok, output = run.call(<<~RUBY)
         require "claricle/handlers/base"

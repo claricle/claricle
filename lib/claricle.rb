@@ -20,11 +20,12 @@ module Claricle
   # verdict on the remainder. Bytes are pulled in incrementally and
   # classification is retried after each read, so a short, conclusive
   # image (its signature or root tag already present) returns without
-  # waiting for more. PostScript and EPS are the exception: a byte that
-  # hasn't arrived yet can still turn one into the other, so that verdict
-  # always waits for the probe bound -- the largest amount any detector
-  # probe consults -- or end of stream. A source that stays open and
-  # never supplies enough to decide blocks until one of those is
+  # waiting for more. Plain PostScript and EPSF are the exception: a byte
+  # that hasn't arrived yet can still turn one into the other, so that
+  # verdict waits for the probe bound -- the largest amount any detector
+  # probe consults -- or end of stream. A binary-preview EPS has its own
+  # conclusive magic and returns immediately. A source that stays open
+  # and never supplies enough to decide blocks until one of those is
   # reached; content beyond the bound is left unread on the IO rather
   # than buffered. It should be in binary mode; newline translation
   # would corrupt the signatures this matches on. Pass a path to
@@ -53,11 +54,13 @@ module Claricle
   end
 
   def self.conclusive?(buffer)
+    return true if EpsBinary.wrapped?(buffer)
+
     format = Detector.detect(buffer)
-    # A PostScript verdict is provisional until the underlying line scan
-    # is certain: a byte that hasn't arrived yet can still flip EPSF from
-    # a trusted match to a disqualified one, so this loop must not settle
-    # for less than a real end of stream or the probe bound.
+    # A plain PostScript verdict is provisional until the underlying line
+    # scan is certain: a byte that hasn't arrived yet can still flip EPSF
+    # from a trusted match to a disqualified one, so this loop must not
+    # settle for less than a real end of stream or the probe bound.
     !%i[ps eps].include?(format)
   rescue UnknownFormat
     false

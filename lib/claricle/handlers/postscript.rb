@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "postscript"
-
 require_relative "base"
 require_relative "../detector"
 require_relative "../models/inspection"
@@ -100,14 +98,15 @@ module Claricle
       #   allows either alone for an empty section.
       #
       # `%%EndComments` is deliberately absent from both lists. Bare, it
-      # is the sentinel and `header` tests for it first; with a colon it
-      # is neither that sentinel nor any other DSC comment, and matching
-      # it as a section closer ended the header on it.
+      # is the sentinel and `HeaderScanner#classify` tests for it first;
+      # with a colon it is neither that sentinel nor any other DSC comment,
+      # and matching it as a section closer ended the header on it.
       ARGUMENT_KEYWORDS = %w[
         Page
         BeginDocument BeginBinary BeginData BeginFeature BeginFile
         BeginFont BeginProcSet BeginResource BeginPreview
-        BeginExitServer BeginEmulation BeginPaperSize
+        BeginExitServer BeginEmulation BeginPaperSize BeginObject
+        BeginCustomColor BeginProcessColor
         IncludeDocument IncludeFeature IncludeFile IncludeFont
         IncludeProcSet IncludeResource
       ].freeze
@@ -117,7 +116,7 @@ module Claricle
         BeginPageSetup EndPageSetup BeginDefaults EndDefaults
         EndDocument EndBinary EndData EndFeature EndFile EndFont
         EndProcSet EndResource EndPreview EndExitServer EndEmulation
-        EndPaperSize
+        EndPaperSize EndObject EndCustomColor EndProcessColor
         PageTrailer Trailer EOF
       ].freeze
 
@@ -128,20 +127,208 @@ module Claricle
       # header behind such a line.
       BARE_END = /(?=[\t ]|\r|\n|\z)/
 
-      # `%%?` is DSC's query prefix, and this one stays a wildcard on
-      # purpose. The query comments are an open, vendor-extensible family
-      # -- `%%?BeginVMStatus`, `%%?BeginFontListQuery`,
-      # `%%?BeginFeatureQuery` -- and no header comment carries the
-      # prefix at all, so `%%?<anything>` means the header is over. A
-      # `%!PS-Adobe-3.0 Query` file opens `%%?BeginVMStatus` straight
-      # after its header comments and never writes `%%EndComments`.
-      QUERY = /\?[A-Za-z]+/
+      # Query constructs are the forward-extensible `%%?Begin...` and
+      # `%%?End...` families. The `%%?` prefix alone is not structural:
+      # an unknown comment such as `%%?FutureHeader` is ignored like any
+      # other unrecognised DSC comment.
+      QUERY_PREFIXES = %w[?Begin ?End].freeze
+
+      ARGUMENT_PART = /\A%%(?:#{Regexp.union(ARGUMENT_KEYWORDS)}):/
+      BARE_PART = /\A%%(?:#{Regexp.union(BARE_KEYWORDS)})#{BARE_END}/
+      QUERY_PART = /\A%%(?:#{Regexp.union(QUERY_PREFIXES)})/
 
       OTHER_PART = Regexp.union(
-        /\A%%(?:#{Regexp.union(ARGUMENT_KEYWORDS)}):/,
-        /\A%%(?:#{Regexp.union(BARE_KEYWORDS)})#{BARE_END}/,
-        /\A%%#{QUERY}/
+        ARGUMENT_PART,
+        BARE_PART,
+        QUERY_PART
       )
+
+      # A partial line has no trustworthy end-of-string delimiter. These
+      # forms are decisive before its terminator arrives: argument comments
+      # once their colon is present, bare comments once real whitespace is
+      # present, and either query-family prefix.
+      PARTIAL_OTHER_PART = Regexp.union(
+        ARGUMENT_PART,
+        /\A%%(?:#{Regexp.union(BARE_KEYWORDS)})[\t \r\n]/,
+        QUERY_PART
+      )
+
+      # Enough bytes to decide every structural prefix above. Deriving it
+      # from the vocabulary keeps a future longer keyword from silently
+      # making the partial-line scan stop before its colon or whitespace.
+      PARTIAL_PREFIX_BYTES = (
+        ARGUMENT_KEYWORDS.map { |keyword| "%%#{keyword}:" } +
+        BARE_KEYWORDS.map { |keyword| "%%#{keyword} " } +
+        QUERY_PREFIXES.map { |prefix| "%%#{prefix}" }
+      ).map(&:bytesize).max
+    end
+
+    # Cursor state for the DSC header reader. Keeping it outside `Dsc`
+    # separates the mutable stream walk from the framing predicates and
+    # declaration lookups that remain module functions there.
+    class HeaderScanner
+      def initialize
+        @bytes = +"".b
+        @line_start = 0
+        @search_from = 0
+        @header_end = nil
+      end
+
+      def append(chunk)
+        @bytes << chunk
+        scan(final: false)
+        self
+      end
+
+      def finish
+        scan(final: true)
+        @header_end = @line_start if @header_end.nil?
+        self
+      end
+
+      def done?
+        !@header_end.nil?
+      end
+
+      def header
+        @bytes.byteslice(0, @header_end) if done?
+      end
+
+      private
+
+      def scan(final:)
+        scan_complete_lines(final)
+        return if done?
+
+        final ? scan_final_line : scan_partial_line
+      end
+
+      def scan_complete_lines(final)
+        while (ending = @bytes.index(Dsc::LINE_BREAK, @search_from))
+          return wait_on_cr(ending) if pending_cr?(ending, final)
+
+          classify(line_end(ending))
+          return if done?
+        end
+        @search_from = @bytes.bytesize
+      end
+
+      def pending_cr?(ending, final)
+        !final && @bytes.getbyte(ending) == 13 && ending + 1 == @bytes.bytesize
+      end
+
+      def wait_on_cr(ending)
+        @search_from = ending
+      end
+
+      def line_end(ending)
+        crlf = @bytes.getbyte(ending) == 13 && @bytes.getbyte(ending + 1) == 10
+        ending + (crlf ? 2 : 1)
+      end
+
+      def classify(line_end)
+        line = @bytes.byteslice(@line_start, line_end - @line_start)
+        if Dsc::HEADER_END.match?(line)
+          @header_end = line_end
+        elsif @line_start.positive? && !Dsc.header_line?(line)
+          @header_end = @line_start
+        else
+          @line_start = line_end
+          @search_from = line_end
+        end
+      end
+
+      def scan_final_line
+        classify(@bytes.bytesize) if @line_start < @bytes.bytesize
+        @header_end = @line_start if @header_end.nil?
+      end
+
+      def scan_partial_line
+        return unless @line_start.positive? && @line_start < @bytes.bytesize
+
+        prefix = @bytes.byteslice(@line_start, DscKeywords::PARTIAL_PREFIX_BYTES)
+        @header_end = @line_start if Dsc.partial_boundary?(prefix)
+      end
+    end
+
+    # Finds the PostScript section of a source and feeds only that section to
+    # the stateful scanner, one bounded probe at a time. Binary-preview EPS
+    # files are reframed to the offset and length declared by their wrapper.
+    module DscHeader
+      def self.signed_header(raw, signature, probe_bytes)
+        if raw.respond_to?(:read)
+          io_header(raw, signature, probe_bytes)
+        else
+          string_header(raw, signature, probe_bytes)
+        end
+      end
+
+      def self.io_header(io, signature, probe_bytes)
+        first = io.read(probe_bytes) || "".b
+        return scan_io(io, first, probe_bytes) if signed?(first, signature)
+
+        range = EpsBinary.postscript_range(first, io.size)
+        return nil unless range
+
+        offset, length = range
+        io.seek(offset)
+        first = io.read([probe_bytes, length].min) || "".b
+        return nil unless signed?(first, signature)
+
+        scan_io(io, first, probe_bytes, length - first.bytesize)
+      end
+
+      def self.scan_io(io, first, probe_bytes, remaining = nil)
+        scanner = HeaderScanner.new.append(first)
+        until scanner.done?
+          read = read_io_chunk(io, probe_bytes, remaining)
+          break unless read
+
+          chunk, remaining = read
+          scanner.append(chunk)
+        end
+        scanner.finish unless scanner.done?
+        scanner.header
+      end
+
+      def self.read_io_chunk(io, probe_bytes, remaining)
+        return nil if remaining&.zero?
+
+        amount = [probe_bytes, remaining || probe_bytes].min
+        bytes = io.read(amount)
+        return nil if bytes.nil? || bytes.empty?
+
+        [bytes, remaining && (remaining - bytes.bytesize)]
+      end
+
+      def self.string_header(raw, signature, probe_bytes)
+        return scan_string(raw, 0, raw.bytesize, probe_bytes) if signed?(raw, signature)
+
+        range = EpsBinary.postscript_range(raw, raw.bytesize)
+        return nil unless range
+
+        offset, length = range
+        return nil if length < signature.bytesize
+        return nil unless signed?(raw.byteslice(offset, signature.bytesize), signature)
+
+        scan_string(raw, offset, length, probe_bytes)
+      end
+
+      def self.scan_string(raw, offset, length, probe_bytes)
+        scanner = HeaderScanner.new
+        limit = offset + length
+        until scanner.done? || offset >= limit
+          amount = [probe_bytes, limit - offset].min
+          scanner.append(raw.byteslice(offset, amount))
+          offset += amount
+        end
+        scanner.finish unless scanner.done?
+        scanner.header
+      end
+
+      def self.signed?(bytes, signature)
+        bytes.byteslice(0, signature.bytesize) == signature
+      end
     end
 
     # DSC framing: where the header ends, and what a box comment declares.
@@ -187,128 +374,20 @@ module Claricle
       # publishing that fragment reports a truncated value as a complete
       # one. The field is omitted instead.
       CONTINUATION = /\A%%\+/
-
-      # The header only: from `%!` to `%%EndComments`, or to the first
-      # line that is not a header comment. Everything the handler reports
-      # is defined to live there, and everything that bites lives in the
-      # body.
-      #
-      # 0.2.0 applies every DSC token globally and lets later values
-      # overwrite earlier ones, so a document declaring 200x100 that
-      # contains a `%%BeginDocument` child reported the CHILD's 10x20.
-      # Scoping fixes that by never handing the body over in the first
-      # place -- and it takes the body's exceptions with it, which is how a
-      # `FloatDomainError` from `1e9999 idiv` and a `SystemStackError`
-      # from deep nesting stop escaping. `SystemStackError` is not even a
-      # `StandardError`, so the delegate's own error classes could never
-      # have covered it.
-      #
-      # The bytes are passed on unchanged; only where they end is decided.
-      # The sentinel is tested first, and taken with the header. It is
-      # itself an `%%End<Anything>` comment, so the boundary rule would
-      # otherwise stop one line short of it.
-      def self.header(content)
-        offset = 0
-        content.scan(LINE) do |line|
-          ended = HEADER_END.match?(line)
-          break if !ended && offset.positive? && !header_line?(line)
-
-          offset += line.bytesize
-          break if ended || line.empty?
-        end
-        offset.zero? ? content : content.byteslice(0, offset)
-      end
+      LINE_BREAK = /[\r\n]/
 
       def self.header_line?(line)
         HEADER_LINE.match?(line) && !DscKeywords::OTHER_PART.match?(line)
       end
 
-      # `header`, applied incrementally to an IO already holding `chunk`
-      # as its first read: grows `chunk` by another `probe_bytes` only
-      # while `header` consumed the whole of it without finding a
-      # boundary strictly inside -- a boundary sitting exactly on
-      # `chunk`'s own edge cannot be trusted yet, since the next unread
-      # byte could still belong to that same line. DSC sets no ceiling on
-      # a header's size, so this grows rather than truncating.
-      #
-      # **A probe at a time, not the remainder of the file.** Reading
-      # what was left in one unbounded `read` bounded only the SHORT
-      # header, the one that ends inside the first probe. A header
-      # running one byte past it materialised everything behind it --
-      # instrumented on a 16,787,361-byte program whose header ends at
-      # 10,145 bytes, the reads were 8,192 and then 16,779,169, the whole
-      # file, for a boundary 2 KB further on. Looping reads 8,192 twice
-      # and stops.
-      #
-      # So the bytes read are proportional to the HEADER, never to the
-      # file: at most its size rounded up to a probe, plus one probe for
-      # the boundary that lands on an edge.
-      def self.windowed_header(io, chunk, probe_bytes)
-        loop do
-          scoped = header(chunk)
-          return scoped if scoped.bytesize < terminated_bytes(chunk)
+      # A partial body's first line may never terminate, so wait only while
+      # its prefix can still become a header comment or an exact boundary.
+      def self.partial_boundary?(prefix)
+        return true unless prefix.start_with?("%")
+        return false if prefix.bytesize == 1
+        return true unless HEADER_LINE.match?(prefix)
 
-          more = io.read(probe_bytes)
-          return scoped if more.nil?
-
-          chunk << more
-        end
-      end
-
-      # How much of `chunk` a further read cannot change: everything up
-      # to and including its last line terminator. The tail behind that
-      # is a line still being read.
-      #
-      # This is the comparison `windowed_header` trusts, and comparing
-      # against the whole chunk instead was off by one line. A probe
-      # boundary that lands one byte into a `%%For:` line leaves a lone
-      # `%` as the final line -- and a lone `%` is a DSC TERMINATOR, not
-      # a header comment, so `header` reported the header ending one
-      # byte short of the chunk. That reads as a boundary strictly
-      # inside, and a 2,720,069-byte header was published as 49,151
-      # bytes with everything behind it dropped. Measured: probe six of
-      # a 68-byte-line header lands exactly there.
-      #
-      # `rindex` counts CHARACTERS, which is the byte offset the rest of
-      # this module works in only because `chunk` is always binary:
-      # `IO#read(n)` returns ASCII-8BIT for any length argument whatever
-      # mode the file was opened in -- measured across `r`, `rb` and
-      # `r:UTF-8`. Scanning `chunk.b` instead would copy the whole
-      # header on every probe, which is the cost this file exists to
-      # avoid.
-      def self.terminated_bytes(chunk)
-        last = chunk.rindex(/[\r\n]/)
-        last ? last + 1 : 0
-      end
-
-      # `header`, but only once `raw` -- a String already in memory, or
-      # an IO to read from -- is confirmed to open with `signature`, or
-      # nil for a source that does not. Checked with `byteslice` and
-      # `==`, not `start_with?`: a UTF-16-tagged String raises
-      # `Encoding::CompatibilityError` out of `start_with?` against a
-      # binary-tagged signature, where a byte comparison just answers
-      # false -- measured across ASCII-8BIT, UTF-8, UTF-16LE, UTF-16BE
-      # and ISO-8859-1.
-      #
-      # Unifies the String and IO paths behind one call, so
-      # `Handlers::Postscript` chooses neither `header` nor
-      # `windowed_header` itself -- and reads only `probe_bytes` of an
-      # IO before it is known to be worth reading further at all.
-      def self.signed_header(raw, signature, probe_bytes)
-        if raw.respond_to?(:read)
-          chunk = raw.read(probe_bytes) || ""
-          return nil unless signed?(chunk, signature)
-
-          windowed_header(raw, chunk, probe_bytes)
-        else
-          return nil unless signed?(raw, signature)
-
-          header(raw)
-        end
-      end
-
-      def self.signed?(bytes, signature)
-        bytes.byteslice(0, signature.bytesize) == signature
+        DscKeywords::PARTIAL_OTHER_PART.match?(prefix)
       end
 
       # The header's own lines, on DSC's three boundaries. Every lookup
@@ -472,7 +551,7 @@ module Claricle
       end
     end
 
-    private_constant :Dsc, :DscKeywords, :DscNumbers
+    private_constant :Dsc, :DscHeader, :DscKeywords, :DscNumbers, :HeaderScanner
 
     # Reports a PostScript program's DSC header: dimensions from the
     # bounding box, and the comments that 0.2.0 actually populates.
@@ -483,14 +562,9 @@ module Claricle
     class Postscript < Base
       formats :eps, :ps
 
-      # The detector's own signature, not a second copy of it. Both are
-      # anchored at byte zero -- `Detector.classify` tests
-      # `start_with?(POSTSCRIPT_SIGNATURE)` on a prefix from offset zero
-      # -- so two definitions would be one rule stated twice that must
-      # agree forever. Broaden the detector and a file it calls `:eps`
-      # would get `"failed"` here: claricle naming a format it then
-      # refuses to read. `Handlers::Svg` reuses `Detector.read_root` for
-      # the same reason.
+      # The detector's own PostScript-section signature, not a second copy
+      # of it. A plain file carries it at byte zero; a DOS EPS carries it
+      # at the offset shared `EpsBinary` framing declares.
       #
       # `Postscript.parse` succeeds on "not postscript at all", so the
       # delegate not raising says nothing (D17) -- exactly as it said
@@ -498,19 +572,6 @@ module Claricle
       # `lstrip`: a leading space or newline means the file does not
       # start with a header.
       SIGNATURE = Detector::POSTSCRIPT_SIGNATURE
-
-      # Every way this delegate fails on input rather than on a defect.
-      # `ParseError` and not `LexError` alone: an unmatched brace raises
-      # `SyntaxError`, and both descend from it.
-      #
-      # Currently unreachable, and kept deliberately. Now that only the
-      # DSC header is parsed there is nothing left to raise -- measured
-      # across an unterminated string, a brace, a null byte and a 100 KB
-      # comment, every header-only input parses. This is a rescue on a
-      # third-party call whose failure modes we do not control, which is
-      # a boundary guard rather than an internal nil-check, and the
-      # narrow list is what keeps a delegate defect propagating.
-      PARSE_FAILURES = [::Postscript::ParseError].freeze
 
       # The `meta` key each box comment supplies.
       BOX_COMMENTS = { "bounding_box" => "BoundingBox",
@@ -539,11 +600,11 @@ module Claricle
       # The most a single probe reads before checking whether the header
       # ended inside it. Generous for the common case -- a handful of
       # scalar comments and a box are a few hundred bytes -- and not a
-      # ceiling: `windowed_header` reads past it when a real header runs
+      # ceiling: the scanner reads past it when a real header runs
       # longer, exactly the 629 KB case `FIELD_COMMENTS` exists for.
       HEADER_PROBE_BYTES = 8192
 
-      private_constant :SIGNATURE, :PARSE_FAILURES, :BOX_COMMENTS,
+      private_constant :SIGNATURE, :BOX_COMMENTS,
                        :FIELD_COMMENTS, :HEADER_PROBE_BYTES,
                        :ISSUE_CODE, :ISSUE_MESSAGE
 
@@ -554,7 +615,7 @@ module Claricle
       # `with_source` instead, the same reader `Handlers::Svg` uses for
       # the same reason.
       def inspection(image)
-        source = image.with_source { |raw| Dsc.signed_header(raw, SIGNATURE, HEADER_PROBE_BYTES) }
+        source = image.with_source { DscHeader.signed_header(_1, SIGNATURE, HEADER_PROBE_BYTES) }
         return unreadable(image) unless source
 
         header = read_header(source)
@@ -566,9 +627,13 @@ module Claricle
       private
 
       def read_header(source)
-        ::Postscript.parse(Dsc.filter(source, FIELD_COMMENTS)).header
-      rescue *PARSE_FAILURES
-        nil
+        require "postscript"
+
+        begin
+          ::Postscript.parse(Dsc.filter(source, FIELD_COMMENTS)).header
+        rescue ::Postscript::ParseError
+          nil
+        end
       end
 
       def readable(image, header, source)
@@ -644,7 +709,6 @@ module Claricle
         return nil unless Dsc.settled?(source, name)
 
         operands = Dsc.declaration(source, name)
-        return nil unless operands
         return nil unless operands == declared
 
         declared
@@ -734,7 +798,7 @@ module Claricle
         return declared == value if value.is_a?(String)
         return DscNumbers.unsigned(declared) == value if value.is_a?(Integer)
 
-        declared == value.to_s
+        false
       end
 
       # A box reaches `meta` on its own endpoints being finite, not on
@@ -751,7 +815,7 @@ module Claricle
       def carried_box(box)
         return nil unless box
 
-        box.all?(&:finite?) ? box : nil
+        box.dup if box.all?(&:finite?)
       end
 
       # JSON safety, not encoding validity. A path-born string comes from

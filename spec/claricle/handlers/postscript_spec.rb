@@ -11,6 +11,21 @@ RSpec.describe "Claricle PostScript handler" do
     File.join(__dir__, "..", "..", "fixtures", "inspect", name)
   end
 
+  def detector_fixture(name)
+    File.join(__dir__, "..", "..", "fixtures", "detector", name)
+  end
+
+  def binary_eps(postscript, declared_length: postscript.bytesize,
+                 preview: File.binread(detector_fixture("std.wmf")))
+    header_bytes = 30
+    postscript_offset = header_bytes + preview.bytesize
+    preview_offset = preview.empty? ? 0 : header_bytes
+    "\xC5\xD0\xD3\xC6".b +
+      [postscript_offset, declared_length,
+       preview_offset, preview.bytesize, 0, 0].pack("V6") +
+      [0xFFFF].pack("v") + preview + postscript
+  end
+
   # Explicit format throughout. Several fixtures deliberately cannot be
   # DETECTED -- an empty file and plain prose have no signature -- and
   # detection would raise before the handler ever ran.
@@ -94,6 +109,117 @@ RSpec.describe "Claricle PostScript handler" do
     # rejecting it here would make inspect quietly mean conform.
     it "reports ok for structurally odd input the delegate accepts" do
       expect(inspect_ps("unmatched_brace.ps", format: :ps).parse_status).to eq("ok")
+    end
+  end
+
+  describe "a DOS binary-preview EPS" do
+    let(:postscript) do
+      "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 50\n" \
+        "%%Title: Wrapped\n%%EndComments\nshowpage\n"
+    end
+
+    %i[eps ps].each do |format|
+      it "inspects wrapped content when labelled #{format}" do
+        image = Claricle::Image.from_content(binary_eps(postscript), format: format)
+
+        expect(handler.inspection(image))
+          .to have_attributes(format: format.to_s, width: 100.0,
+                              height: 50.0, parse_status: "ok")
+      end
+    end
+
+    it "inspects the declared PostScript section from a detected path" do
+      Tempfile.create(["binary_preview", ".eps"]) do |file|
+        file.binmode
+        file.write(binary_eps(postscript))
+        file.flush
+
+        result = handler.inspection(Claricle::Image.from_path(file.path))
+
+        expect(result).to have_attributes(format: "eps", width: 100.0,
+                                          height: 50.0, parse_status: "ok")
+        expect(result.meta).to include("title" => "Wrapped")
+      end
+    end
+
+    it "seeks to a declared section beyond the first probe" do
+      wrapped = binary_eps(postscript, preview: "x".b * 16_384)
+
+      Tempfile.create(["binary_preview_offset", ".eps"]) do |file|
+        file.binmode
+        file.write(wrapped)
+        file.flush
+
+        result = handler.inspection(Claricle::Image.from_path(file.path))
+
+        expect(result).to have_attributes(width: 100.0, height: 50.0,
+                                          parse_status: "ok")
+        expect(result.meta).to include("title" => "Wrapped")
+      end
+    end
+
+    it "does not parse content beyond the declared PostScript section" do
+      declared = "%!PS-Adobe-3.0 EPSF-3.0\n%%Title: Scoped\n"
+      trailing = "%%BoundingBox: 0 0 999 999\n%%EndComments\n"
+      image = Claricle::Image.from_content(binary_eps(declared) + trailing,
+                                           format: :eps)
+
+      result = handler.inspection(image)
+
+      expect(result).to have_attributes(width: nil, height: nil, parse_status: "ok")
+      expect(result.meta).to include("title" => "Scoped")
+      expect(result.meta).not_to have_key("bounding_box")
+    end
+
+    it "does not parse a path beyond the declared PostScript section" do
+      declared = "%!PS-Adobe-3.0 EPSF-3.0\n%%Title: Scoped\n"
+      trailing = "%%BoundingBox: 0 0 999 999\n%%EndComments\n"
+
+      Tempfile.create(["binary_preview_length", ".eps"]) do |file|
+        file.binmode
+        file.write(binary_eps(declared) + trailing)
+        file.flush
+
+        result = handler.inspection(Claricle::Image.from_path(file.path))
+
+        expect(result).to have_attributes(width: nil, height: nil, parse_status: "ok")
+        expect(result.meta).to include("title" => "Scoped")
+        expect(result.meta).not_to have_key("bounding_box")
+      end
+    end
+
+    it "requires the declared section to contain the complete signature" do
+      wrapped = binary_eps("%!PS-Adobe-3.0\n%%EndComments\n", declared_length: 1)
+      results = [handler.inspection(Claricle::Image.from_content(wrapped, format: :eps))]
+
+      Tempfile.create(["binary_preview_short_section", ".eps"]) do |file|
+        file.binmode
+        file.write(wrapped)
+        file.flush
+        results << handler.inspection(Claricle::Image.from_path(file.path))
+      end
+
+      results.each do |result|
+        expect(result.parse_status).to eq("failed")
+        expect(result.issues.map(&:code)).to eq(["postscript.header_unreadable"])
+      end
+    end
+
+    it "rejects a declared section extending beyond the source" do
+      wrapped = binary_eps(postscript, declared_length: postscript.bytesize + 1)
+      results = [handler.inspection(Claricle::Image.from_content(wrapped, format: :eps))]
+
+      Tempfile.create(["binary_preview_long_section", ".eps"]) do |file|
+        file.binmode
+        file.write(wrapped)
+        file.flush
+        results << handler.inspection(Claricle::Image.from_path(file.path))
+      end
+
+      results.each do |result|
+        expect(result.parse_status).to eq("failed")
+        expect(result.issues.map(&:code)).to eq(["postscript.header_unreadable"])
+      end
     end
   end
 
@@ -242,13 +368,9 @@ RSpec.describe "Claricle PostScript handler" do
     end
   end
 
-  # The first-declaration check compares textually for a String field and
-  # semantically for an Integer one, so which branch a field takes is
-  # decided by its CLASS. That rests on 0.2.0 handing back those two
-  # classes and nothing else. The gemspec permits any 0.2.x, so the
-  # contract is pinned rather than assumed at each call site: a release
-  # that returns a Date for `%%CreationDate` turns a textual comparison
-  # into a comparison against `to_s`, and this goes red first.
+  # The installed delegate currently returns only the two field classes
+  # the handler supports. The behavioural examples below separately pin
+  # that an unexpected future shape is refused rather than stringified.
   it "types the header fields it populates" do
     header = Postscript.parse(File.binread(fixture("basic.eps"))).header
 
@@ -256,6 +378,29 @@ RSpec.describe "Claricle PostScript handler" do
                                       creator: an_instance_of(String),
                                       creation_date: an_instance_of(String),
                                       language_level: an_instance_of(Integer))
+  end
+
+  {
+    title: ["%%Title: Kept", "Kept", "title"],
+    language_level: ["%%LanguageLevel: 2", "2", "language_level"]
+  }.each do |field, (comment, rendered, key)|
+    it "omits an unsupported #{field} object even when to_s agrees" do
+      source = "%!PS-Adobe-3.0\n#{comment}\n%%EndComments\n"
+      parsed = Postscript.parse(source)
+      masquerader = Object.new
+      masquerader.define_singleton_method(:to_s) { rendered }
+      changed = parsed.with(
+        header: parsed.header.with(**{ field => masquerader })
+      )
+      allow(Postscript).to receive(:parse).and_return(changed)
+
+      result = handler.inspection(
+        Claricle::Image.from_content(source, format: :ps)
+      )
+
+      expect(result.parse_status).to eq("ok")
+      expect(result.meta).not_to have_key(key)
+    end
   end
 
   # The handler parses the DSC header only. Everything it reports is
@@ -397,6 +542,32 @@ RSpec.describe "Claricle PostScript handler" do
       expect(result.meta).not_to have_key("bounding_box")
     end
 
+    it "keeps reading past an unknown query-shaped header comment" do
+      source = "%!PS-Adobe-3.0\n%%?FutureHeader\n" \
+               "%%BoundingBox: 0 0 100 50\n%%Title: Kept\n%%EndComments\n"
+
+      result = handler.inspection(
+        Claricle::Image.from_content(source, format: :ps)
+      )
+
+      expect(result).to have_attributes(width: 100.0, height: 50.0,
+                                        parse_status: "ok")
+      expect(result.meta).to include("title" => "Kept")
+    end
+
+    it "ends the header at an end-query construct" do
+      source = "%!PS-Adobe-3.0 Query\n%%Title: Kept\n" \
+               "%%?EndVMStatus: Unknown\n%%BoundingBox: 0 0 100 50\n"
+
+      result = handler.inspection(
+        Claricle::Image.from_content(source, format: :ps)
+      )
+
+      expect(result).to have_attributes(width: nil, height: nil, parse_status: "ok")
+      expect(result.meta).to include("title" => "Kept")
+      expect(result.meta).not_to have_key("bounding_box")
+    end
+
     # `%%EOF` ends the document, so nothing behind it is header. This
     # published a box the file declares after its own end.
     it "does not read past %%EOF" do
@@ -512,6 +683,42 @@ RSpec.describe "Claricle PostScript handler" do
                                           parse_status: "ok")
         expect(result.meta).to include("title" => "Kept")
       end
+    end
+
+    {
+      "%%BeginObject: illustration" => "BeginObject",
+      "%%EndObject" => "EndObject",
+      "%%BeginCustomColor: (Brand Blue)" => "BeginCustomColor",
+      "%%EndCustomColor" => "EndCustomColor",
+      "%%BeginProcessColor: Cyan" => "BeginProcessColor",
+      "%%EndProcessColor" => "EndProcessColor"
+    }.each do |boundary, name|
+      it "ends the header at %%#{name}" do
+        source = "%!PS-Adobe-3.0\n%%Title: Kept\n#{boundary}\n" \
+                 "%%BoundingBox: 0 0 100 50\n%%EndComments\n"
+
+        result = handler.inspection(
+          Claricle::Image.from_content(source, format: :ps)
+        )
+
+        expect(result).to have_attributes(width: nil, height: nil,
+                                          parse_status: "ok")
+        expect(result.meta).to include("title" => "Kept")
+        expect(result.meta).not_to have_key("bounding_box")
+      end
+    end
+
+    it "still ends the header at the existing %%BeginFeature boundary" do
+      source = "%!PS-Adobe-3.0\n%%Title: Kept\n%%BeginFeature: *PageSize\n" \
+               "%%BoundingBox: 0 0 100 50\n%%EndComments\n"
+
+      result = handler.inspection(
+        Claricle::Image.from_content(source, format: :ps)
+      )
+
+      expect(result).to have_attributes(width: nil, height: nil, parse_status: "ok")
+      expect(result.meta).to include("title" => "Kept")
+      expect(result.meta).not_to have_key("bounding_box")
     end
   end
 
@@ -750,6 +957,29 @@ RSpec.describe "Claricle PostScript handler" do
         "bounding_box" => [0.0, 0.0, 100.0, 50.0],
         "hires_bounding_box" => [0.0, 0.0, 100.5, 50.25]
       )
+    end
+
+    it "copies box arrays before carrying them into metadata" do
+      delegate_header = nil
+      allow(Postscript).to receive(:parse).and_wrap_original do |original, source|
+        original.call(source).tap { |program| delegate_header = program.header }
+      end
+
+      result = inspect_ps("hires.eps")
+
+      expect(result).to be_frozen
+      {
+        "bounding_box" => :bounding_box,
+        "hires_bounding_box" => :hires_bounding_box
+      }.each do |key, reader|
+        carried = result.meta.fetch(key)
+        delegated = delegate_header.public_send(reader)
+        expect(carried).to eq(delegated)
+        expect(carried).not_to be(delegated)
+
+        carried << 999.0
+        expect(delegated.length).to eq(4)
+      end
     end
 
     # epsf is never populated, even for a genuine EPSF header, so a nil
@@ -1186,6 +1416,50 @@ RSpec.describe "Claricle PostScript handler" do
 
         expect(reads.sum).to eq(8192)
       end
+    end
+
+    it "stops at EndComments before a newline-free body" do
+      Tempfile.create(["newline_free_body", ".ps"]) do |file|
+        file.binmode
+        file.write("%!PS-Adobe-3.0\n%%BoundingBox: 0 0 100 50\n%%EndComments\n")
+        file.write("%X#{"x" * 1_048_574}")
+        file.flush
+        image = Claricle::Image.from_path(file.path)
+
+        reads = reads_for(file.path) do
+          expect(handler.inspection(image))
+            .to have_attributes(width: 100.0, height: 50.0, parse_status: "ok")
+        end
+
+        expect(reads).to eq([8192])
+      end
+    end
+
+    it "classifies each line once in a multi-probe header" do
+      comments = 2000
+      padding = "%%For: #{"x" * 60}\n" * comments
+      content = "%!PS-Adobe-3.0\n#{padding}" \
+                "%%BoundingBox: 0 0 100 50\n%%Title: Kept\n%%EndComments\nshowpage\n"
+      dsc = Claricle.const_get(:Handlers).const_get(:Dsc)
+      checks = 0
+      allow(dsc).to receive(:header_line?).and_wrap_original do |original, line|
+        checks += 1
+        original.call(line)
+      end
+
+      Tempfile.create(["linear_header", ".ps"]) do |file|
+        file.binmode
+        file.write(content)
+        file.flush
+
+        result = handler.inspection(Claricle::Image.from_path(file.path))
+
+        expect(result).to have_attributes(width: 100.0, height: 50.0,
+                                          parse_status: "ok")
+        expect(result.meta).to include("title" => "Kept")
+      end
+
+      expect(checks).to be <= comments + 2
     end
 
     # And this is the case the probe did NOT bound. One byte of header
