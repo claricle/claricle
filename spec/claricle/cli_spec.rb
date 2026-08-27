@@ -10,6 +10,7 @@ RSpec.describe Claricle::Cli::Runner do
   # happens to an exception on its way out of Thor. Status is captured in
   # a closure because stubbing Claricle::Cli replaces the namespace the
   # probe would otherwise look it up through.
+  accepted_arguments = []
   errors = {
     "enoent" => [Errno::ENOENT, "nope"],
     "invocation" => [Claricle::InvocationError, "bad flags"],
@@ -21,7 +22,11 @@ RSpec.describe Claricle::Cli::Runner do
     "load" => [LoadError, "missing gem"],
     "syntax" => [SyntaxError, "bad syntax"],
     "stack" => [SystemStackError, "too deep"],
-    "epipe" => [Errno::EPIPE],
+    "unknown_utf16" => [Claricle::UnknownFormat, "no signature".encode(Encoding::UTF_16LE)],
+    "standard_utf16" => [StandardError, "delegate failure".encode(Encoding::UTF_16LE)],
+    "standard_utf7" => [StandardError, "converter missing".dup.force_encoding(Encoding.find("UTF-7"))],
+    "standard_invalid_utf8" => [StandardError, "invalid \xFF".b.force_encoding(Encoding::UTF_8)],
+    "standard_binary" => [StandardError, "binary \xFF".b],
     "interrupt" => [Interrupt]
   }.freeze
 
@@ -37,8 +42,20 @@ RSpec.describe Claricle::Cli::Runner do
     desc "integer", "returns a bare integer"
     def integer = 37
 
+    desc "accept VALUE", "accepts a positional value"
+    define_method(:accept) { |value| accepted_arguments << value }
+
     desc "boom CLASS", "raises the named error"
     define_method(:boom) { |name| raise(*errors.fetch(name)) }
+
+    desc "broken_pipe", "fails while writing its own data"
+    def broken_pipe
+      reader, writer = IO.pipe
+      reader.close
+      writer.write("unread")
+    ensure
+      writer&.close
+    end
 
     desc "quit CODE", "exits deliberately"
     def quit(code) = exit(code.to_i)
@@ -63,6 +80,15 @@ RSpec.describe Claricle::Cli::Runner do
     # incidental File.write must not become the exit status.
     it "ignores a bare Integer return" do
       expect(run.call(["integer"])).to eq(0)
+    end
+
+    it "preserves valid ASCII-compatible positional text" do
+      argument = "é".encode(Encoding.find("Big5-HKSCS"))
+      accepted_arguments.clear
+
+      expect(run.call(["accept", argument])).to eq(0)
+      expect(accepted_arguments.first.encoding).to eq(argument.encoding)
+      expect(accepted_arguments.first.bytes).to eq(argument.bytes)
     end
   end
 
@@ -89,6 +115,17 @@ RSpec.describe Claricle::Cli::Runner do
   # Everything above drives a probe, so none of it would notice the real
   # CLI losing its commands or its runner wiring.
   describe "the real CLI" do
+    def with_closed_stdout
+      reader, writer = IO.pipe
+      reader.close
+      previous_stdout = $stdout
+      $stdout = writer
+      yield
+    ensure
+      $stdout = previous_stdout
+      writer&.close
+    end
+
     it "returns 0 for version and prints it" do
       expect { expect(described_class.run(["version"])).to eq(0) }
         .to output("Claricle version #{Claricle::VERSION}\n").to_stdout
@@ -96,6 +133,63 @@ RSpec.describe Claricle::Cli::Runner do
 
     it "returns 2 for an unknown command" do
       expect(described_class.run(["nope"], output: StringIO.new)).to eq(2)
+    end
+
+    it "returns 2 for malformed argv text" do
+      argument = "\xC3".b.force_encoding(Encoding::UTF_8)
+
+      expect(described_class.run([argument], output: StringIO.new)).to eq(2)
+    end
+
+    it "returns 2 for non-ASCII-compatible argv text" do
+      argument = "version".encode(Encoding::UTF_16LE)
+
+      expect(described_class.run([argument], output: StringIO.new)).to eq(2)
+    end
+
+    it "returns 2 for a non-String argv element" do
+      expect(described_class.run([nil], output: StringIO.new)).to eq(2)
+    end
+
+    it "returns 2 for a command name in another compatible encoding" do
+      argument = "é".encode(Encoding.find("Big5-HKSCS"))
+
+      expect(described_class.run([argument], output: StringIO.new)).to eq(2)
+    end
+
+    it "returns 2 when the command name cannot be transcoded" do
+      stream = StringIO.new
+
+      expect(described_class.run(["\xFF".b], output: stream)).to eq(2)
+      expect(stream.string).to eq("claricle: command name cannot be converted to UTF-8\n")
+    end
+
+    it "returns 2 for an encoded abbreviated help target" do
+      argument = "é".encode(Encoding.find("Big5-HKSCS"))
+
+      expect(described_class.run(["h", argument], output: StringIO.new)).to eq(2)
+    end
+
+    %w[help version].each do |command|
+      it "returns 0 when #{command} output is closed" do
+        result = with_closed_stdout do
+          described_class.run([command], output: StringIO.new)
+        end
+
+        expect(result).to eq(0)
+      end
+    end
+
+    it "does not hide a non-output error from help" do
+      expect(described_class.run(%w[help nope], output: StringIO.new)).to eq(2)
+    end
+
+    it "does not consume the caller's argv array" do
+      arguments = ["nope"]
+
+      described_class.run(arguments, output: StringIO.new)
+
+      expect(arguments).to eq(["nope"])
     end
 
     # Thor contributes help itself, so assert the deleted ones are gone
@@ -124,6 +218,12 @@ RSpec.describe Claricle::Cli::Runner do
 
     it "exits with the runner's status for an unknown command" do
       expect(run_exe.call("nope")).to eq(2)
+    end
+
+    it "exits 2 for malformed argv text" do
+      argument = "\xC3".b.force_encoding(Encoding::UTF_8)
+
+      expect(run_exe.call(argument)).to eq(2)
     end
   end
 
@@ -159,6 +259,18 @@ RSpec.describe Claricle::Cli::Runner do
     it "maps a wrong-arity invocation to 2" do
       expect(run.call(%w[ok extra])).to eq(2)
     end
+
+    it "rejects malformed positional text before invoking the command" do
+      argument = "\xC3".b.force_encoding(Encoding::UTF_8)
+      accepted_arguments.clear
+
+      expect(run.call(["accept", argument])).to eq(2)
+      expect(accepted_arguments).to be_empty
+    end
+
+    it "maps an operation's broken pipe to 4" do
+      expect(run.call(["broken_pipe"])).to eq(4)
+    end
   end
 
   describe "exits that are not errors" do
@@ -173,13 +285,6 @@ RSpec.describe Claricle::Cli::Runner do
     it "refuses a status that is not a byte" do
       expect(run.call(%w[quit 256])).to eq(4)
       expect(run.call(%w[quit -1])).to eq(4)
-    end
-
-    # thor converts EPIPE to SystemExit(0) before the map sees it, and
-    # that is right: a closed pipe is not a failure. Pinned so it is not
-    # later "corrected" to 4.
-    it "returns 0 for a closed pipe" do
-      expect(run.call(%w[boom epipe])).to eq(0)
     end
 
     it "lets Interrupt propagate rather than mapping it" do
@@ -241,6 +346,22 @@ RSpec.describe Claricle::Cli::Runner do
       stream = StringIO.new
       described_class.run(%w[boom unknown], output: stream)
       expect(stream.string).to eq("claricle: no signature\n")
+    end
+
+    {
+      "unknown_utf16" => [3, "claricle: no signature\n"],
+      "standard_utf16" => [4, "claricle: StandardError: delegate failure\n"],
+      "standard_utf7" => [4, "claricle: StandardError: converter missing\n"],
+      "standard_invalid_utf8" => [4, "claricle: StandardError: invalid \uFFFD\n"],
+      "standard_binary" => [4, "claricle: StandardError: binary \uFFFD\n"]
+    }.each do |name, (code, message)|
+      it "normalizes #{name} output without changing its status" do
+        stream = StringIO.new
+
+        expect(described_class.run(["boom", name], output: stream)).to eq(code)
+        expect(stream.string).to eq(message)
+        expect(stream.string).to be_valid_encoding
+      end
     end
   end
 end

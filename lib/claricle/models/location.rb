@@ -51,8 +51,6 @@ module Claricle
       attribute :chunk, :string
       attribute :node_path, :string
 
-      private_constant :POSITIONS
-
       private
 
       # Absent is fine -- every field is nullable. Anything present has

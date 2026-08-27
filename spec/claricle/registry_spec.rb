@@ -100,8 +100,6 @@ RSpec.describe "Claricle::Registry" do
     it "builds each form exactly" do
       expect(Claricle::UnsupportedFormat.new(:wmf).message)
         .to eq("format :wmf is not supported")
-      # Positional, per 01-core.md's contract: a caller following the
-      # documented signature must not get an ArgumentError.
       expect(Claricle::UnsupportedFormat.new(:wmf, :convert).message)
         .to eq("format :wmf is not supported for convert")
       expect(Claricle::UnsupportedFormat.new(:wmf, :convert, target: :svg).message)

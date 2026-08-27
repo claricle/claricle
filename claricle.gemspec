@@ -40,5 +40,5 @@ Gem::Specification.new do |spec|
   spec.add_dependency "emf", "~> 0.1.0"
   spec.add_dependency "lutaml-model", "~> 0.8.19"
   spec.add_dependency "rexml", "~> 3.4.4"
-  spec.add_dependency "thor", "~> 1.0"
+  spec.add_dependency "thor", "~> 1.2"
 end

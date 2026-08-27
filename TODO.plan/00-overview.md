@@ -51,9 +51,10 @@ source handler's target list together with its feature-loss rules.
 
 ## Item topology
 
-Strictly sequential — each item is an independently green, shippable
-PR building on the previous one. 04 depends on 03 because the CLI
-batch helper is built in 03 and reused verbatim in 04.
+Strictly sequential — each item builds on the previous one, and an item
+may span several stacked PRs. Every PR is independently green and
+shippable. 04 depends on 03 because the CLI batch helper is built in 03
+and reused verbatim in 04.
 
 ```mermaid
 flowchart LR
@@ -77,7 +78,7 @@ not hold work waiting for a response to a report.
 
 | # | Item | Delivers | Can start |
 |---|------|----------|-----------|
-| 01 | Core | errors, models, detector, registry, `Image`, CLI runner + exit codes, stub removal, Ruby 3.2 floor, honesty baseline | now |
+| 01 | Core | errors, models, detector, registry, `Image`, CLI runner + exit codes, stub removal, Ruby 3.3 floor, honesty baseline | now |
 | 02 | Inspect | five handlers' `inspection`, `claricle inspect`, `claricle formats`, `--json` | after 01 |
 | 03 | Conform | conformance mappings for png/svg/emf/pdf, `--profile`, `Claricle.conform?`, `claricle conform`, batch helper, `--strict` | after 02 |
 | 04 | Convert | vectory-backed conversion, lossiness classification, `claricle convert`, README rewrite | after 03 |
@@ -101,7 +102,7 @@ agreed with reading, and only running the thing disagreed.
 | `postscript` and `pdfrb` are not installable here | Both install cleanly (`pdfrb` 0.7.10, `postscript` 0.2.0). The earlier draft confused "absent from every local gemset" with "unavailable" and built a blocking gate on it |
 | `libpng` is unused, no v1 operation needs it | `vectory → emfsvg → libpng ~> 1.6`, and emfsvg uses it for embedded images in SVG→EMF. It is a live transitive dependency. Only Claricle's **direct** dependency is redundant |
 | vectory's own round-trip specs are semantic | vectory 0.12.0 has no A→B→A suite at all — only one-way conversion and reference tests, some checking little more than a format signature. The claim was invented |
-| Ruby floor 3.2 comes from pdfrb (asserted, unverified) | True, but only confirmed on 2026-08-13. `pdfrb` 0.7.10 requires `>= 3.2.0`; every other delegate tops out at 3.1 (`emf`, `svg_conform`, `vectory`, `emfsvg` 3.1; `lutaml-model`, `png_conform`, `postscript` 3.0) |
+| Ruby floor 3.2 comes from pdfrb (asserted, unverified) | Only the delegate fact was true: confirmed 2026-08-13, `pdfrb` 0.7.10 requires `>= 3.2.0`; every other delegate tops out at 3.1 (`emf`, `svg_conform`, `vectory`, `emfsvg` 3.1; `lutaml-model`, `png_conform`, `postscript` 3.0). That establishes the highest delegate minimum, not Claricle's deliberate 3.3 project floor |
 
 ## Measured delegate contracts (2026-08-13)
 
@@ -292,7 +293,8 @@ installed and inspected. Findings:
   `SyntaxError`, `UndefinedOperatorError`, `StackUnderflowError`,
   `RecursionLimitError`, `SizeLimitError`. The exception-only reporting
   the plan assumed is real.
-- **`pdfrb` 0.7.10**, Ruby `>= 3.2` — this is what sets our floor.
+- **`pdfrb` 0.7.10**, Ruby `>= 3.2` — the highest delegate minimum;
+  Claricle's deliberate project floor is 3.3.
   `Pdfrb::Document.open` exists as assumed. `Validator.validate` /
   `validate!` are class methods and perform structural checks.
   `Conformance` ships named standards: `PdfA` (A1–A4), `PdfUA`, `PdfX`,
@@ -332,8 +334,8 @@ object to any of them:
 | D18 | EMF+ payload never validated — no upstream parser |
 | D22 | EPS/PS conform unsupported — the parser certifies raw binary |
 
-Everything else was forced once measured and needs no discussion:
-D5 (Ruby floor from pdfrb; libpng already transitive), D15 (dimensions
+Everything else is settled and needs no discussion:
+D5 (pdfrb's 3.2 minimum and libpng transitivity were measured; Claricle's 3.3 floor is deliberate), D15 (dimensions
 follow the shape the issue itself sketched), D19 (positional-or-glob
 covers both the issue's examples and ambiguous filenames), D20 (PNG
 locations turned out available), D21 (svg_conform's own default rejects
@@ -347,8 +349,8 @@ D10 folded into D23.
 | D2 | `Image#inspect` → `Image#inspection` (`Object#inspect` stays Ruby's debugging protocol; no module-level facade — it would shadow `Module#inspect`) | settled — report: renames an API the issue named |
 | D3 | Plain handler subclasses + `formats` declaration macro; frozen derived registry, no runtime mutation, no self-registration | settled |
 | D4 | All unified models are lutaml-model classes. The constraint is **three-segment on the reviewed line (0.8.19)** — `~> 0.8` would admit 0.9 through 0.99 and contradict D13. Model invariants (severity enum, non-nil message) are enforced at construction **and** deserialization — lutaml-model 0.8.19 accepts a bogus enum until `validate!` runs. `Report#valid` is derived, not stored, so appending an issue can't leave it stale | settled |
-| D5 | Hard deps on all delegates; Ruby floor **3.2**, set by `pdfrb` 0.7.10 and verified 2026-08-13 (everything else tops out at 3.1). No **direct** `libpng` dependency — it is already in the tree via `vectory → emfsvg` and emfsvg uses it for embedded images, so a direct dep would be redundant, not an exclusion. Heavy gems required lazily inside handlers; `emf` (bindata-only, powers the detector) is the sole eager require | settled — no sign-off needed |
-| D6 | Keep Thor; `Runner` wraps `Cli.start(argv, debug: true)` and maps errors → exit codes (matrix below) | settled |
+| D5 | Hard deps on all delegates; Claricle's deliberate Ruby floor is **3.3**. `pdfrb` 0.7.10 has the highest delegate minimum at 3.2, verified 2026-08-13 (everything else tops out at 3.1). No **direct** `libpng` dependency — it is already in the tree via `vectory → emfsvg` and emfsvg uses it for embedded images, so a direct dep would be redundant, not an exclusion. Heavy gems required lazily inside handlers; `emf` (bindata-only, powers the detector) is the sole eager require | settled — no sign-off needed |
+| D6 | Keep Thor at `>= 1.2, < 2`; 1.0 and 1.1 fail to load on supported Ruby 3.4 because they reference the removed `DidYouMean::SPELL_CHECKERS`. `Runner` dispatches directly so operation errors reach the exit-code map. The CLI treats EPIPE as success only around actual `help` and `version` output | settled |
 | D7 | Hand-rolled detector (no marcel): PNG signature, `%PDF-`, `%!PS` + `EPSF` first-line split, `Emf.detect_format` **wrapped in a `rescue Emf::FormatError`** so an unrecognised file continues to the next probe, and encoding-aware XML root detection for SVG — decode the BOM/declaration, resolve the root QName, require the SVG namespace, and disable external entity and DTD expansion (XXE). The 4096-byte binary regex is dropped as proven insufficient | settled |
 | D8 | Tri-state `valid`, decided in order: any `error` → `no`; else any `warning` → `suspicious`; else (`info` only, or no issues at all) → `yes`. `info` never downgrades validity. Non-strict `conform?` passes `yes` AND `suspicious`; `--strict`/`strict:` requires `yes` | settled |
 | D9 | Conversion via vectory. **All twelve edges between svg/emf/eps/ps were measured working**, so the earlier "only these are verified" hedge is retired — v1 exposes the full matrix rather than an arbitrary subset. PNG/PDF stay inspect+conform only (vectory has no class for them). EMF+ handling is **not settled here** — see D18. What is measured is only that `Emf::EmfPlus::Parser.call` raises "EMF+ parser not yet implemented", which constrains the options without choosing among them | settled |
@@ -452,7 +454,7 @@ cross-format round trips (D11). PNG locations are **not** in this list
 
 ## Global constraints (every item)
 
-- Ruby >= 3.2; CI matrix `['3.2', '3.3']`; RuboCop `TargetRubyVersion: 3.2`.
+- Ruby >= 3.3; CI matrix `['3.3', '3.4', '4.0']`; RuboCop `TargetRubyVersion: 3.3`.
   The gemspec admits Ruby 3.4+, so CI should cover the newest stable line
   it actually allows.
 - Claricle's own code is pure Ruby; delegates are not (vectory pulls in

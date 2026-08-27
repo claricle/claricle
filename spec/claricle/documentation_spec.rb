@@ -311,6 +311,17 @@ RSpec.describe "the documentation" do
       expect(prose).not_to match(/comprehensive/i)
     end
 
+    # Thor 1.0 and 1.1 reference DidYouMean::SPELL_CHECKERS, which is
+    # absent on supported Ruby 3.4. Thor 1.2.0 is the first tested
+    # compatible line there; the upper bound keeps unreviewed 2.x out.
+    it "requires the supported Thor line" do
+      dependency = spec.runtime_dependencies.find { |item| item.name == "thor" }
+
+      expect(dependency.requirement).not_to be_satisfied_by(Gem::Version.new("1.1.0"))
+      expect(dependency.requirement).to be_satisfied_by(Gem::Version.new("1.2.0"))
+      expect(dependency.requirement).not_to be_satisfied_by(Gem::Version.new("2.0.0"))
+    end
+
     # Published metadata, so a wrong URL here is what a user lands on from
     # the gem page rather than something they can correct in a checkout.
     #
