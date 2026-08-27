@@ -64,14 +64,15 @@ structurally valid PDF 1.4 with a catalog, a pages node and a single
   Codes reuse the scheme 03 formalizes, so 03 extends this mapping
   instead of replacing it. `dpi`/`color_space` nullable where the
   format has none. Note that a `"failed"` inspection still exits 0.
-- New deps in gemspec: `png_conform`, `svg_conform`, `vectory`,
-  `postscript`, `pdfrb` — three-segment constraints on the reviewed
-  line (D13), not a floating `~> 0.x`. Locally installed and reviewed:
-  png_conform 0.1.4, svg_conform 0.2.1, vectory 0.12.0, postscript
-  0.2.0, pdfrb 0.7.10. The earlier plan's `png_conform ~> 0.7` /
-  `svg_conform ~> 0.8.0` figures were wrong and contradicted this list.
-  No direct `libpng` dep — it arrives via `vectory → emfsvg` already
-  (D5). Verify Bundler resolution.
+- New deps in gemspec as item 02's handlers land: `png_conform`,
+  `postscript`, `pdfrb` — three-segment constraints on the reviewed line
+  (D13), not a floating `~> 0.x`. Locally installed and reviewed:
+  png_conform 0.1.4, postscript 0.2.0, pdfrb 0.7.10. The earlier plan's
+  `png_conform ~> 0.7` figure was wrong and contradicted this list.
+  `svg_conform` belongs to item 03 and `vectory` to item 04; neither is
+  introduced here. Item 04's `vectory → emfsvg` chain will bring
+  `libpng` transitively, so no direct dependency is planned (D5). Verify
+  Bundler resolution.
 - CLI: `claricle inspect FILE [--json]`; human output prints format,
   dimensions, each populated metadata field one per line, the
   `parse_status`, and every issue — a delegate that failed to parse

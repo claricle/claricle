@@ -2,7 +2,9 @@
 
 require "stringio"
 require "rexml/parsers/pullparser"
+require "rexml/source"
 require "rexml/text"
+require "rexml/xmltokens"
 require "emf"
 
 module Claricle
@@ -20,15 +22,18 @@ module Claricle
   # rather than misdetecting, and working around REXML's DTD parser
   # would cost more than the gap.
   module AttributeDefaults
+    XML_NAME = "#{REXML::XMLTokens::NAME_START_CHAR}" \
+               "#{REXML::XMLTokens::NAME_CHAR}*".freeze
+
     # One "name TYPE [#DEFAULT] value" group of an ATTLIST body, enough
     # to recover declaration order. Values may be absent (#REQUIRED etc).
     DECLARATION = /
-      (?<name>[\w:.-]+)\s+
+      (?<name>#{XML_NAME})\s+
       (?:\([^)]*\)|[A-Z]+(?:\s*\([^)]*\))?)\s*
       (?:\#(?:REQUIRED|IMPLIED)|(?:\#FIXED\s+)?(?:"(?<dq>[^"]*)"|'(?<sq>[^']*)'))
     /x
 
-    private_constant :DECLARATION
+    private_constant :XML_NAME, :DECLARATION
 
     class << self
       # XML accumulates ATTLIST declarations and the FIRST declaration of
@@ -45,11 +50,10 @@ module Claricle
       # such as one separated from `#FIXED` by a tab, which arrives as
       # `"#FIXED\t"`. REXML is the fallback, for attributes the regex
       # could not read at all.
-      def collect(defaults, event)
+      def collect(defaults, event, declarations)
         element = event[0]
-        within = first_of(event[2])
-        event[1].each { |name, value| within[name] = value unless within.key?(name) }
-        defaults[element] = within.merge(defaults[element] || {})
+        event[1].each { |name, value| declarations[name] = value unless declarations.key?(name) }
+        defaults[element] = declarations.merge(defaults[element] || {})
       end
 
       # Explicit attributes beat declared defaults, and only the final
@@ -59,12 +63,12 @@ module Claricle
         defaults.fetch(event[0], {}).merge(event[1]).compact
       end
 
-      private
-
       # nil is a real answer here -- `#IMPLIED` means "declared, no
       # default" -- so first-wins is decided by key?, never by the
-      # value's truthiness.
-      def first_of(raw)
+      # value's truthiness. RootParser also uses this exact scan to make
+      # canonical DTD-defaulted namespace prefixes visible to REXML's
+      # namespace validator before it reaches the root.
+      def declarations(raw)
         body = raw.to_s.sub(/\A<!ATTLIST\s+\S+/, "").sub(/>\s*\z/, "")
         body.scan(DECLARATION).each_with_object({}) do |(name, quoted, single), acc|
           acc[name] = quoted || single unless acc.key?(name)
@@ -217,31 +221,9 @@ module Claricle
     # example -- the lookahead already excludes those five, so they read
     # the same whichever value is checked and prove nothing.
     #
-    # The name class is XML 1.0 5th ed. NameStartChar and NameChar,
-    # transcribed whole rather than widened to fit a reported case. The
-    # bypass that prompted this was `&é;`, but `é` is one codepoint out
-    # of a grammar: `&あ;` (U+3042) and `&\u{10400};` were measured
-    # slipping past the same ASCII-only class, because Ruby's `\w` is
-    # ASCII-only. Widening until the reported one is caught leaves the
-    # rest.
-    #
-    # Written as codepoint escapes rather than as the characters
-    # themselves: several ranges end on an unprintable or a combining
-    # mark, and a reviewer has to be able to check them against the
-    # grammar.
-    NAME_START_CHAR = "A-Za-z_:" \
-                      "\u{C0}-\u{D6}\u{D8}-\u{F6}\u{F8}-\u{2FF}" \
-                      "\u{370}-\u{37D}\u{37F}-\u{1FFF}" \
-                      "\u{200C}-\u{200D}\u{2070}-\u{218F}" \
-                      "\u{2C00}-\u{2FEF}\u{3001}-\u{D7FF}" \
-                      "\u{F900}-\u{FDCF}\u{FDF0}-\u{FFFD}" \
-                      "\u{10000}-\u{EFFFF}"
-    NAME_CHAR = "#{NAME_START_CHAR}\\-.0-9" \
-                "\u{B7}\u{300}-\u{36F}\u{203F}-\u{2040}".freeze
-    UNRESOLVED_REFERENCE =
-      /&(?!amp;|lt;|gt;|apos;|quot;)[#{NAME_START_CHAR}][#{NAME_CHAR}]*;/
-
-    private_constant :NAME_START_CHAR, :NAME_CHAR
+    # Use REXML's canonical XML Name production rather than maintaining a
+    # second transcription that can drift from the parser adapter below.
+    UNRESOLVED_REFERENCE = /&(?!amp;|lt;|gt;|apos;|quot;)#{REXML::XMLTokens::NAME};/
 
     module_function
 
@@ -387,10 +369,10 @@ module Claricle
       # reporting it as "this file has no root" would hide it behind an
       # unknown format.
       def root_event(source)
-        parser = REXML::Parsers::PullParser.new(bounded(source))
+        parser = RootParser.new(bounded(source))
         defaults = {}
         while (event = next_event(parser))
-          AttributeDefaults.collect(defaults, event) if event.event_type == :attlistdecl
+          parser.collect_defaults(defaults, event) if event.event_type == :attlistdecl
           return [event[0], AttributeDefaults.for_root(event, defaults)] if event.start_element?
         end
         nil
@@ -401,9 +383,9 @@ module Claricle
       # is REXML's answer to an unusable encoding name; every other
       # ArgumentError belongs to whoever raised it.
       def next_event(parser)
-        parser.pull if parser.has_next?
+        REXML::Parsers::PullEvent.new(parser.pull) if parser.has_next?
       rescue REXML::ParseException, ArgumentError
-        nil
+        parser.propagate_adapter_error
       end
 
       # Every root attribute, not just xmlns: the PullParser hands values
@@ -525,8 +507,11 @@ module Claricle
                    # inspection said "failed" without raising.
                    source.byteslice(0, SVG_PROLOG_BYTES).b
                  end
-        # Only the IO side can answer nil, and only at end of input.
-        StringIO.new(prefix || "")
+        # XML defaults to UTF-8 when neither a declaration nor a BOM says
+        # otherwise. Tag, do not transcode, the already-bounded copy; REXML
+        # still detects either marker and switches encodings itself. dup also
+        # keeps a frozen read result or the empty fallback safe to retag.
+        RootSource.for((prefix || "").dup.force_encoding(Encoding::UTF_8))
       end
 
       def svg_root?(qname, attributes)
@@ -571,4 +556,99 @@ module Claricle
       end
     end
   end
+
+  module Detector
+    # REXML publishes XML's canonical name grammar in XMLTokens, but its
+    # BaseParser's live root, attribute, prolog and internal-subset scans use
+    # older, narrower productions. Keep the workaround on this one bounded
+    # source rather than changing REXML's process-wide constants. Rewriting
+    # the grammar fragments, rather than enumerating current regex objects,
+    # also reaches NAME copies embedded in ATTLIST and ENTITY patterns while
+    # preserving every surrounding capture exactly.
+    class RootSource < REXML::IOSource
+      base = REXML::Parsers::BaseParser
+      tokens = REXML::XMLTokens
+      SUBSTITUTIONS = [
+        [base::NCNAME_STR.dup.freeze, tokens::NCNAME_STR.dup.freeze].freeze,
+        [base::NAME.dup.freeze, tokens::NAME.dup.freeze].freeze,
+        [base::NMTOKEN.dup.freeze, tokens::NMTOKEN.dup.freeze].freeze
+      ].freeze
+
+      private_constant :SUBSTITUTIONS
+
+      attr_reader :adapter_error
+
+      def self.for(content)
+        content.ascii_only? ? StringIO.new(content) : new(content)
+      end
+
+      def initialize(content)
+        super(StringIO.new(content))
+      end
+
+      # Positional `consume` matches the REXML method BaseParser calls.
+      def match(pattern, consume = false) # rubocop:disable Style/OptionalBooleanParameter
+        pattern = canonical(pattern)
+        # The first argument was deliberately replaced, so zsuper would send
+        # the original regex and silently undo the adapter.
+        super(pattern, consume) # rubocop:disable Style/SuperArguments
+      end
+
+      private
+
+      def canonical(pattern)
+        return pattern unless pattern.is_a?(Regexp)
+
+        @canonical_patterns ||= {}.compare_by_identity
+        @canonical_patterns[pattern] ||= rewritten(pattern)
+      rescue StandardError => e
+        @adapter_error = e
+        raise
+      end
+
+      def rewritten(pattern)
+        source = SUBSTITUTIONS.reduce(pattern.source) do |candidate, (narrow, canonical)|
+          candidate.gsub(narrow) { canonical }
+        end
+        return pattern if source == pattern.source
+
+        Regexp.new(source, pattern.options)
+      end
+    end
+
+    # BaseParser validates a root prefix against namespaces it learned while
+    # parsing. Its direct String#scan of an ATTLIST body cannot be adapted by
+    # RootSource, so register canonical DTD-defaulted namespace declarations
+    # from the same scan Detector later uses to merge attribute defaults.
+    class RootParser < REXML::Parsers::BaseParser
+      def propagate_adapter_error
+        error = source.adapter_error if source.is_a?(RootSource)
+        raise error if error
+      end
+
+      # Called between pulls so Claricle-owned failures remain outside the
+      # parser-only rescue in Detector.next_event.
+      def collect_defaults(defaults, event)
+        declarations = AttributeDefaults.declarations(event[2])
+        register_declared_namespaces(declarations)
+        AttributeDefaults.collect(defaults, event, declarations)
+      end
+
+      private
+
+      def register_declared_namespaces(declarations)
+        declarations.each do |name, value|
+          next unless value && name.start_with?("xmlns:")
+
+          prefix = name.delete_prefix("xmlns:")
+          @namespaces[prefix] = value unless @namespaces.key?(prefix)
+        end
+      end
+    end
+
+    private_constant :RootSource, :RootParser
+  end
+
+  private_constant :Detector, :EpsHeader, :ReservedNamespace,
+                   :AttributeDefaults, :AttributeReferences
 end

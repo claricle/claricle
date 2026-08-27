@@ -4,11 +4,8 @@ require "English"
 require "stringio"
 require "tempfile"
 require "timeout"
-# Required by the specs alone, to check the detector's hand-transcribed
-# XML Name grammar against REXML's own copy of the same production.
-# Claricle's own source never asks for it. REXML does load it, behind
-# `rexml/parsers/pullparser`, but that is REXML's require graph and not
-# something a spec should lean on.
+# Required explicitly because these specs compare Claricle's name handling
+# with REXML's canonical XML grammar rather than its narrower live parser.
 require "rexml/xmltokens"
 
 RSpec.describe "Claricle format detection" do
@@ -26,6 +23,18 @@ RSpec.describe "Claricle format detection" do
       file.flush
       block.call(file.path)
     end
+  end
+
+  # Both ends of every non-ASCII NameStartChar range, followed by every
+  # NameChar-only production. One prefix exercises the whole canonical
+  # grammar without turning each codepoint into another parser example.
+  canonical_prefix = lambda do
+    boundaries = [
+      0xC0, 0xD6, 0xD8, 0xF6, 0xF8, 0x2FF, 0x370, 0x37D,
+      0x37F, 0x1FFF, 0x200C, 0x200D, 0x2070, 0x218F, 0x2C00, 0x2FEF,
+      0x3001, 0xD7FF, 0xF900, 0xFDCF, 0xFDF0, 0xFFFD, 0x10000, 0xEFFFF
+    ]
+    "a#{boundaries.pack("U*")}-.0\u{B7}\u{300}\u{36F}\u{203F}\u{2040}"
   end
 
   describe "formats" do
@@ -246,6 +255,71 @@ RSpec.describe "Claricle format detection" do
       end
     end
 
+    it "accepts the canonical XML QName grammar through an ordinary prolog" do
+      prefix = canonical_prefix.call
+      source = <<~XML
+        <?xml version="1.0" encoding="UTF-8"?>
+        <?#{prefix} probe?>
+        <!DOCTYPE #{prefix}:svg>
+        <#{prefix}:svg xmlns:#{prefix}="#{svg_ns}" width="7"/>
+      XML
+      ncname = /\A#{REXML::XMLTokens::NCNAME_STR}\z/u
+
+      expect(prefix).to match(ncname)
+      expect(Claricle.detect(source)).to eq(:svg)
+      expect(Claricle.const_get(:Detector).read_root(source))
+        .to eq(["#{prefix}:svg", { "xmlns:#{prefix}" => svg_ns, "width" => "7" }])
+    end
+
+    it "accepts canonical XML names in an entity declaration" do
+      name = canonical_prefix.call
+      source = <<~XML
+        <!DOCTYPE svg [
+          <!ENTITY #{name} "unused">
+        ]>
+        <svg xmlns="#{svg_ns}"/>
+      XML
+
+      expect(Claricle.detect(source)).to eq(:svg)
+    end
+
+    it "applies a namespace default declared with canonical XML names" do
+      prefix = canonical_prefix.call
+      source = <<~XML
+        <!DOCTYPE #{prefix}:svg [
+          <!ATTLIST #{prefix}:svg xmlns:#{prefix} CDATA "#{svg_ns}"
+            width CDATA "7" kind (#{prefix}|plain) "#{prefix}">
+        ]>
+        <#{prefix}:svg/>
+      XML
+
+      expect(Claricle.detect(source)).to eq(:svg)
+      expect(Claricle.const_get(:Detector).read_root(source))
+        .to eq(["#{prefix}:svg", { "xmlns:#{prefix}" => svg_ns, "width" => "7",
+                                   "kind" => prefix }])
+    end
+
+    it "treats declaration-less XML QNames as UTF-8 through both entry points" do
+      source = %(<é:svg xmlns:é="#{svg_ns}" width="7"/>)
+
+      expect(Claricle.detect(source)).to eq(:svg)
+      with_file.call(source) do |path|
+        expect(Claricle::Image.from_path(path).format).to eq(:svg)
+      end
+    end
+
+    it "preserves a declared legacy encoding while adapting XML names" do
+      source = <<~XML.encode("ISO-8859-1").b
+        <?xml version="1.0" encoding="ISO-8859-1"?>
+        <a·:svg xmlns:a·="#{svg_ns}" width="7"/>
+      XML
+
+      expect(Claricle.detect(source)).to eq(:svg)
+      with_file.call(source) do |path|
+        expect(Claricle::Image.from_path(path).format).to eq(:svg)
+      end
+    end
+
     it "detects SVG encoded UTF-16LE with a BOM" do
       content = "\xFF\xFE".b + %(<svg xmlns="#{svg_ns}"/>).encode("UTF-16LE").b
       expect(Claricle.detect(content)).to eq(:svg)
@@ -264,6 +338,9 @@ RSpec.describe "Claricle format detection" do
     {
       "a root in a foreign namespace" => %(<svg xmlns="urn:not-svg"/>),
       "an svg with no namespace at all" => "<svg/>",
+      "an undeclared root prefix" => "<s:svg/>",
+      "a root prefix bound to a foreign namespace" => %(<s:svg xmlns:s="urn:not-svg"/>),
+      "a prefixed root with only the SVG default namespace" => %(<s:svg xmlns="#{svg_ns}"/>),
       "a decoy inside a comment" => "<!-- <svg --><html/>",
       "the right namespace on the wrong root" => %(<rect xmlns="#{svg_ns}"/>)
     }.each do |description, content|
@@ -845,14 +922,9 @@ RSpec.describe "Claricle format detection" do
   # while the same document with an ASCII entity name was correctly
   # refused.
   #
-  # No DTD here, deliberately, even though the neighbouring smuggling
-  # examples use one. Measured: REXML refuses a DOCTYPE that DECLARES an
-  # entity under a non-ASCII name, so a DTD-shaped version of these is
-  # rejected before the guard is ever consulted -- it stays green with
-  # the ASCII-only class restored, and would prove nothing. An
-  # undeclared reference is the shape that actually reaches the guard,
-  # and it is also the shape an external DTD produces, which is how this
-  # was reported.
+  # No DTD here, deliberately: the reference should reach the reserved-name
+  # guard without making declaration parsing another precondition. It is also
+  # the raw shape an external DTD produces, which is how this was reported.
   describe "entity names outside ASCII" do
     # One case per NameStartChar range a reviewer might expect the ASCII
     # class to have covered by accident. `é` is the reported case; the
@@ -878,6 +950,17 @@ RSpec.describe "Claricle format detection" do
 
       expect(references).to be_unresolved("&\u{E9};")
       expect(references).to be_unresolved("&\u{3042};")
+    end
+
+    {
+      "binary text with a high byte" => "\xFF".b,
+      "invalid UTF-8" => "\xFF".dup.force_encoding(Encoding::UTF_8)
+    }.each do |label, raw|
+      it "treats #{label} as unresolved rather than raising" do
+        references = Claricle.const_get(:AttributeReferences)
+
+        expect(references).to be_unresolved(raw)
+      end
     end
 
     # All five, not just `amp`. Each one is a reference the resolver
