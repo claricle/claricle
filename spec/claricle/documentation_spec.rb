@@ -174,6 +174,14 @@ RSpec.describe "the documentation" do
       expect(body).not_to match(/Claricle::Validator/)
     end
 
+    # The org moved from `ribose` to `claricle` and these links did not,
+    # so every one of them 404'd. Scanned rather than counted, because the
+    # wrong org is only visible next to the right one.
+    it "links to a repository that exists" do
+      repos = readme.scan(%r{github\.com/[\w.-]+/claricle}).uniq
+      expect(repos).to eq(["github.com/claricle/claricle"])
+    end
+
     it "names only constants that exist" do
       readme.scan(/Claricle::[A-Z][\w:]*/).uniq.each do |const|
         expect { Object.const_get(const) }.not_to raise_error, "README names #{const}"
@@ -184,7 +192,6 @@ RSpec.describe "the documentation" do
     # the honest question -- and it is the one the README answers.
     it "describes the internals as internal" do
       %w[Detector Registry Handlers].each do |name|
-        expect(readme).to match(/#{name}/), "README should mention #{name}"
         expect(Claricle.constants).not_to include(name.to_sym), "#{name} is public"
       end
       # Nested privacy is not implied by the outer check.
@@ -192,34 +199,83 @@ RSpec.describe "the documentation" do
       expect(Claricle::Models.constants).not_to include(:Base)
     end
 
-    it "leaves exactly the documented public surface" do
-      expect(Claricle.constants.sort)
-        .to eq(%i[Cli ConversionError Error Image InvocationError Models
-                  UnknownFormat UnsupportedFormat VERSION])
+    # A list of one namespace's constants says nothing about what is
+    # nested below it. That is how `FreeFormHash` once reached the public
+    # surface without the README naming it, and how `PARSE_STATUSES`,
+    # `SEVERITIES` and `POSITIONS` sat public and undocumented after it:
+    # privatising all three left every other example in this suite green,
+    # so nothing was watching them. Walking the tree closes it for good --
+    # a constant added anywhere under `Claricle`, at any depth, has to be
+    # accounted for here.
+    #
+    # `constants(false)`, twice deliberately. `constants` omits a private
+    # constant, which is the question being asked, where `const_get` walks
+    # straight past `private_constant` and hands the value back. And
+    # `false`, because these are mostly classes: inherited would drag in
+    # every constant on `StandardError` and `Thor` and answer a different
+    # question.
+    #
+    # A constant pointing back up would recurse to `SystemStackError`,
+    # which fails this example rather than hiding in it. Nothing under
+    # `Claricle` does today.
+    def surface_of(namespace)
+      namespace.constants(false).sort.each_with_object({}) do |name, tree|
+        value = namespace.const_get(name)
+        tree[name] = value.is_a?(Module) ? surface_of(value) : nil
+      end
+    end
+
+    it "leaves exactly the documented public surface, at every depth" do
+      expect(surface_of(Claricle)).to eq(
+        Cli: { Runner: { Status: {} } },
+        ConversionError: {},
+        Error: {},
+        Image: {},
+        InvocationError: {},
+        Models: {
+          Inspection: { PARSE_STATUSES: nil },
+          Issue: { SEVERITIES: nil },
+          Location: {},
+          Report: {}
+        },
+        UnknownFormat: {},
+        UnsupportedFormat: {},
+        VERSION: nil
+      )
       expect(Claricle.methods(false)).to eq([:detect])
     end
 
-    # The list above stops at `Models` and says nothing about what is
-    # inside it, which is how `FreeFormHash` once reached the public
-    # surface without the README ever naming it. Assert the nested list
-    # too, and that the README accounts for every constant on it.
+    # The tree above is what the code exposes; this is what the README
+    # says about it. Both halves are needed -- the tree alone lets the
+    # README fall silent on a constant, and the README alone lets one
+    # appear that it never mentions.
     #
     # `FreeFormHash` and `Validation` are private: the first is a
     # documented workaround for one lutaml-model version, the second a
-    # mixin only the already-private `Base` uses. Neither is API, and
-    # publishing either would bind the gem until a major bump.
-    it "accounts for every constant Models exposes" do
-      expect(Claricle::Models.constants.sort)
-        .to eq(%i[Inspection Issue Location Report])
+    # mixin only the already-private `Base` uses. `POSITIONS` joins them
+    # because only the private `validate_types` reads it, where the two
+    # enums above are vocabulary a caller builds a model from. Publishing
+    # any of the three would bind the gem until a major bump.
+    it "documents every constant on that surface, and calls the rest private" do
       %w[Inspection Issue Location Report].each do |name|
         expect(readme).to include("Models::#{name}")
       end
+      expect(readme).to include("Inspection::PARSE_STATUSES")
+      expect(readme).to include("Issue::SEVERITIES")
+      # The whole sentence, not the names in it: asserting each name
+      # appeared somewhere left the wording free to be reversed to "are
+      # public constants" and stay green.
+      claims("`Detector`, `Registry`, `Handlers::Base`, `Models::Base`, " \
+             "`Models::FreeFormHash`, `Models::Validation` and " \
+             "`Models::Location::POSITIONS` are private constants.")
       # `::`, not `const_get` -- measured: `Module#const_get` walks
       # straight past `private_constant` and hands the class back, so an
       # assertion written that way passes whatever the visibility is.
       expect { Claricle::Models::FreeFormHash }
         .to raise_error(NameError, /private constant/)
       expect { Claricle::Models::Validation }
+        .to raise_error(NameError, /private constant/)
+      expect { Claricle::Models::Location::POSITIONS }
         .to raise_error(NameError, /private constant/)
     end
   end
@@ -233,6 +289,15 @@ RSpec.describe "the documentation" do
     it "promises no capability the code lacks" do
       expect(prose).not_to match(/compress/i)
       expect(prose).not_to match(/comprehensive/i)
+    end
+
+    # Published metadata, so a wrong URL here is what a user lands on from
+    # the gem page rather than something they can correct in a checkout.
+    it "points every public URL at a repository that exists" do
+      urls = [spec.homepage,
+              *spec.metadata.values_at("homepage_uri", "source_code_uri",
+                                       "changelog_uri")]
+      expect(urls).to all(eq("https://github.com/claricle/claricle"))
     end
 
     # Any bare uppercase token, so an added BMP or AVIF fails rather than

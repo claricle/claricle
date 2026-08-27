@@ -53,8 +53,8 @@ dependency where marked ⚙):
   back as a String ⚙, so compare against `"ok"`, never `:ok`. It replaces
   a `valid` field outright — `valid` would mean five different things
   across five delegates, and vectory parses SVG in Nokogiri's default
-  RECOVER mode ⚙, so a repaired malformed SVG would read as valid. Validity claims
-  belong to `conform` alone. An **allowlisted** parse failure gives
+  RECOVER mode ⚙, so a repaired malformed SVG would read as valid.
+  Validity claims belong to `conform` alone. An **allowlisted** parse failure gives
   `"failed"` and exits 0 — the command succeeded in reporting that the
   file doesn't parse. A fault off the allowlist is not absorbed; it
   propagates and exits 4. **`parse_status` comes from Claricle's own
@@ -249,8 +249,11 @@ subjects in quotes):
   proves the frozen issue collection refuses mutation rather than
   silently accepting it, and proves the verdict is correct after a
   deserialization round trip.
-- The detector accepts every SVG form vectory accepts, rejects foreign
-  namespaces and decoys, and never resolves an external entity.
+- The detector accepts every SVG form vectory accepts **within
+  `SVG_PROLOG_BYTES`**, rejects foreign namespaces and decoys, and never
+  resolves an external entity. That bound is a real divergence, not a
+  formality: a valid SVG behind a 9,000-byte comment parses for a
+  conforming XML reader and is `UnknownFormat` here ⚙.
 - Execution-diff vs main shows ONLY: stubs gone, version unchanged,
   README/gemspec/RBS truthful.
 - Every ⚙ contract check ran against the installed gem and its outcome
