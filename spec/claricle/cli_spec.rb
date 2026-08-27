@@ -434,14 +434,17 @@ RSpec.describe Claricle::Cli::Runner do
     # file, and `&#xA;` is a character reference, so XML keeps it as a
     # real newline. Printed raw it made a line of Claricle's own shape.
     #
-    # Four characters, because C0 is not the whole set and each forges
+    # Six characters, because C0 is not the whole set and each forges
     # differently: LF adds a line, CR overwrites the one already there,
-    # NEL is C1's own next-line, and U+2028 is Unicode's line separator
-    # by definition. All four measured arriving intact before this.
+    # NEL is C1's own next-line, CSI introduces control sequences, and
+    # U+2028/U+2029 are Unicode's line and paragraph separators. All six
+    # measured arriving intact before this.
     { "a newline" => ["&#xA;", '\x0A'],
       "a carriage return" => ["&#xD;", '\x0D'],
       "a next-line control" => ["&#x85;", '\x85'],
-      "a line separator" => ["&#x2028;", '\u{2028}'] }
+      "a control sequence introducer" => ["&#x9B;", '\x9B'],
+      "a line separator" => ["&#x2028;", '\u{2028}'],
+      "a paragraph separator" => ["&#x2029;", '\u{2029}'] }
       .each do |label, (reference, escaped)|
       it "refuses to print #{label} out of a file's metadata" do
         Tempfile.create(["forge", ".svg"]) do |file|

@@ -180,14 +180,20 @@ RSpec.describe "Claricle::Registry" do
       expect(output).to eq("format :png is not supported for inspect")
     end
 
-    # Privacy declared where the constant is defined, not only in the
+    # Privacy declared where each constant is defined, not only in the
     # entry point: this require path is supported, and it used to leave
-    # both modules public until claricle.rb happened to run.
+    # these internals public until claricle.rb happened to run.
     it "ships them private when loaded on their own too" do
       ok, output = run.call(<<~RUBY)
         require "claricle/registry"
         require "claricle/handlers/base"
-        print([-> { Claricle::Registry }, -> { Claricle::Handlers }].map do |probe|
+        probes = [
+          -> { Claricle::Registry }, -> { Claricle::Handlers },
+          -> { Claricle::Detector }, -> { Claricle::EpsHeader },
+          -> { Claricle::ReservedNamespace }, -> { Claricle::AttributeDefaults },
+          -> { Claricle::AttributeReferences }
+        ]
+        print(probes.map do |probe|
           probe.call
           "public"
         rescue NameError => e
@@ -195,7 +201,7 @@ RSpec.describe "Claricle::Registry" do
         end.join(","))
       RUBY
       expect(ok).to be(true), "subprocess failed: #{output}"
-      expect(output).to eq("private,private")
+      expect(output).to eq((["private"] * 7).join(","))
     end
 
     # The privacy examples below cannot prove privacy on their own: the

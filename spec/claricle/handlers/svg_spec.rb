@@ -30,6 +30,15 @@ RSpec.describe "Claricle SVG handler" do
     handler.inspection(Claricle::Image.from_content(source, format: :svg))
   end
 
+  def canonical_prefix
+    boundaries = [
+      0xC0, 0xD6, 0xD8, 0xF6, 0xF8, 0x2FF, 0x370, 0x37D,
+      0x37F, 0x1FFF, 0x200C, 0x200D, 0x2070, 0x218F, 0x2C00, 0x2FEF,
+      0x3001, 0xD7FF, 0xF900, 0xFDCF, 0xFDF0, 0xFFFD, 0x10000, 0xEFFFF
+    ]
+    "a#{boundaries.pack("U*")}-.0\u{B7}\u{300}\u{36F}\u{203F}\u{2040}"
+  end
+
   # `read` is the only call the reader is allowed to make, so it is the
   # only one counted in bytes. Everything else is counted as an event
   # that must never happen -- and the list is INVERTED for that: naming
@@ -252,6 +261,64 @@ RSpec.describe "Claricle SVG handler" do
     end
   end
 
+  describe "qualified root names" do
+    it "inspects the canonical XML QName grammar through an ordinary prolog" do
+      prefix = canonical_prefix
+      source = <<~XML
+        <?xml version="1.0" encoding="UTF-8"?>
+        <?#{prefix} probe?>
+        <!DOCTYPE #{prefix}:svg>
+        <#{prefix}:svg xmlns:#{prefix}="#{svg_ns}" width="7"/>
+      XML
+
+      expect(inspect_svg(source))
+        .to have_attributes(parse_status: "ok", width: 7.0,
+                            meta: include("xmlns:#{prefix}" => svg_ns))
+    end
+
+    it "inspects a canonical prefix defaulted by an internal DTD" do
+      prefix = canonical_prefix
+      source = <<~XML
+        <!DOCTYPE #{prefix}:svg [
+          <!ATTLIST #{prefix}:svg xmlns:#{prefix} CDATA "#{svg_ns}"
+            width CDATA "7" kind (#{prefix}|plain) "#{prefix}">
+        ]>
+        <#{prefix}:svg/>
+      XML
+
+      expect(inspect_svg(source))
+        .to have_attributes(parse_status: "ok", width: 7.0,
+                            meta: include("xmlns:#{prefix}" => svg_ns, "kind" => prefix))
+    end
+
+    it "inspects declaration-less UTF-8 QNames from content and a path" do
+      source = %(<é:svg xmlns:é="#{svg_ns}" width="7"/>)
+      inspections = [inspect_svg(source)]
+      with_svg_file.call(source) do |path|
+        inspections << Claricle::Image.from_path(path).inspection
+      end
+
+      expect(inspections)
+        .to all(have_attributes(parse_status: "ok", width: 7.0,
+                                meta: include("xmlns:é" => svg_ns)))
+    end
+
+    it "inspects a declared legacy encoding from content and a path" do
+      source = <<~XML.encode("ISO-8859-1").b
+        <?xml version="1.0" encoding="ISO-8859-1"?>
+        <a·:svg xmlns:a·="#{svg_ns}" width="7" label="é"/>
+      XML
+      inspections = [inspect_svg(source)]
+      with_svg_file.call(source) do |path|
+        inspections << Claricle::Image.from_path(path).inspection
+      end
+
+      expect(inspections)
+        .to all(have_attributes(parse_status: "ok", width: 7.0,
+                                meta: include("xmlns:a·" => svg_ns, "label" => "é")))
+    end
+  end
+
   describe "what it does not judge" do
     # Root name, namespace and viewBox are conformance (item 03). Only
     # the detector decides whether a file is an SVG at all.
@@ -430,6 +497,28 @@ RSpec.describe "Claricle SVG handler" do
       expect { Claricle.detect(svg(%(width="7"))) }.to raise_error(RuntimeError)
     end
 
+    it "propagates an ArgumentError through detection too" do
+      allow(REXML::Text).to receive(:unnormalize).and_raise(ArgumentError, "boom")
+
+      expect { Claricle.detect(svg(%(width="7"))) }.to raise_error(ArgumentError, "boom")
+    end
+
+    it "propagates an ArgumentError from the name adapter through detection" do
+      root_source = Claricle.const_get(:Detector).const_get(:RootSource, false)
+      allow_any_instance_of(root_source).to receive(:rewritten).and_raise(ArgumentError, "boom")
+      source = %(<a·:svg xmlns:a·="#{svg_ns}"/>).encode("ISO-8859-1").b
+
+      expect { Claricle.detect(source) }.to raise_error(ArgumentError, "boom")
+    end
+
+    it "propagates a RuntimeError from the name adapter through inspection" do
+      root_source = Claricle.const_get(:Detector).const_get(:RootSource, false)
+      allow_any_instance_of(root_source).to receive(:rewritten).and_raise(RuntimeError, "boom")
+
+      expect { inspect_svg(%(<a·:svg xmlns:a·="#{svg_ns}"/>)) }
+        .to raise_error(RuntimeError, "boom")
+    end
+
     # The reader's ArgumentError rescue is for REXML's unusable encoding
     # name and nothing else. One raised while assembling attribute
     # defaults comes from the detector's own code, and reporting it as
@@ -446,6 +535,15 @@ RSpec.describe "Claricle SVG handler" do
     it "propagates one from collecting declared defaults" do
       source = %(<!DOCTYPE svg [<!ATTLIST svg width CDATA "10">]><svg xmlns="#{svg_ns}"/>)
       allow(Claricle.const_get(:AttributeDefaults)).to receive(:collect)
+        .and_raise(ArgumentError, "boom")
+
+      expect { inspect_svg(source) }.to raise_error(ArgumentError)
+    end
+
+    it "propagates one from registering declared namespaces" do
+      source = %(<!DOCTYPE svg [<!ATTLIST svg width CDATA "10">]><svg xmlns="#{svg_ns}"/>)
+      root_parser = Claricle.const_get(:Detector).const_get(:RootParser, false)
+      allow_any_instance_of(root_parser).to receive(:register_declared_namespaces)
         .and_raise(ArgumentError, "boom")
 
       expect { inspect_svg(source) }.to raise_error(ArgumentError)
