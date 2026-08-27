@@ -210,6 +210,7 @@ module Claricle
       end
 
       def validate_deeply
+        clear_uninitialized
         normalize
         validate!
         validate_types
@@ -262,6 +263,67 @@ module Claricle
       end
 
       private
+
+      # lutaml has a sentinel object standing for "never set", and the
+      # block form of `new` is the one door that can put it in a SINGULAR
+      # attribute's ivar. Through the five others -- keyword, positional,
+      # `from_hash`, `from_json`, and nested inside a parent -- lutaml
+      # erases it before our lifecycle runs and the ivar holds a plain
+      # nil. That is why the doors are made to agree by normalising
+      # rather than by refusing: a refusal is only reachable from one of
+      # the six.
+      #
+      # Measured on 0.8.19, the block form disagreed with the rest and
+      # with itself. `Location.new { |l| l.byte_offset(sentinel) }` raised
+      # `ValidationError: byte_offset expects a non-negative integer, got
+      # uninitialized`, while `Location.new { |l| l.chunk(sentinel) }`
+      # sealed and handed the sentinel itself back out of `chunk`, where
+      # a caller expects a String or nil. Worse on a required attribute:
+      # `Issue.new(severity: "error") { |i| i.message(sentinel) }` sealed
+      # and rendered `{"severity":"error"}`, a document missing a field
+      # it cannot be missing, which reloaded as `Missing required
+      # attribute: message`. Cleared to nil, the required check sees it.
+      #
+      # A COLLECTION never reaches here: lutaml wraps whatever the setter
+      # is given, so the ivar holds `[sentinel]` rather than the sentinel
+      # and `uninitialized?` is false. `validate_types` refuses that on
+      # its own -- measured, `issues expects Claricle::Models::Issue, got
+      # Lutaml::Model::UninitializedClass` -- which is the right answer
+      # for a member of a typed collection and not this method's job.
+      #
+      # A no-op on every other path. Measured across 16 shapes -- all
+      # four models, empty and fully populated, through `new`,
+      # `from_json`, `from_yaml`, `from_hash`, `of_json`, `dup` and
+      # nested inside a parent -- it cleared nothing in any of them.
+      def clear_uninitialized
+        self.class.attributes.each do |name, attribute|
+          slot = :"@#{name}"
+          next unless Lutaml::Model::Utils.uninitialized?(stored_value(instance_variable_get(slot), attribute))
+
+          instance_variable_set(slot, nil)
+        end
+      end
+
+      # lutaml wraps a singular enum's value in an Array, so its sentinel
+      # arrives as `[sentinel]` and identity against the singleton walks
+      # straight past it. The same wrapper `validate_cardinality` reads
+      # through, and the same two guards it uses to find it.
+      #
+      # Measured before this looked inside: `Inspection.new { |x|
+      # x.parse_status = sentinel }` sealed and rendered `{"issues":[]}`
+      # -- a required attribute absent from the document -- and reloading
+      # that raised `Missing required attribute: parse_status`. Every
+      # other door refused it outright. `Issue#severity` did the same.
+      #
+      # A collection's `[sentinel]` is deliberately left alone: there the
+      # Array is the value, not a wrapper, and `validate_types` refuses
+      # the member on its own.
+      def stored_value(raw, attribute)
+        return raw if attribute.collection? || !attribute.enum?
+        return raw unless raw.is_a?(::Array) && raw.size == 1
+
+        raw.first
+      end
 
       # Refused, rather than supported. Ruby's default Marshal writes the
       # ivars into a fresh object and runs neither the constructor nor the
