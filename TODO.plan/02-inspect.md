@@ -76,8 +76,8 @@ turned out false.
   schema. Missing file → exit 2 (runner spec example deferred from 01
   lands here).
 - Registry: `HANDLER_CLASSES` gains the five classes. Each handler file
-  must be required in `lib/claricle.rb` **before** `registry` — the
-  frozen map derives at load time and there is no autoloading, so a
+  is required in `registry.rb` itself, next to the list that names it —
+  the frozen map derives at load time and there is no autoloading, so a
   missing require is a `NameError` at boot, not a lazy failure. Replace
   01's "no handler registered" spec example with
   `from_content("x", format: :unregistered)`.
@@ -95,7 +95,7 @@ it, and after that every handler arrives as a complete slice.
    against the empty registry.
 4. One handler per commit, each commit carrying the whole slice: the
    handler class, its `capabilities :inspect` declaration, its
-   `require` in `lib/claricle.rb`, its `HANDLER_CLASSES` entry, its
+   `require` in `registry.rb`, its `HANDLER_CLASSES` entry, its
    spec against a real fixture, and the `formats` expected-output
    update. No commit ever advertises an operation it didn't ship.
 5. Replace 01's "no handler registered" spec example.
@@ -115,9 +115,10 @@ it, and after that every handler arrives as a complete slice.
 
 ## Files
 
-`claricle.gemspec`, `lib/claricle.rb` (handler requires, before
-registry), `lib/claricle/handlers/{png,svg,metafile,postscript,pdf}.rb`,
+`claricle.gemspec`,
+`lib/claricle/handlers/{png,svg,metafile,postscript,pdf}.rb`,
 `lib/claricle/handlers/base.rb` (capabilities),
-`lib/claricle/registry.rb` (class list), `lib/claricle/cli.rb`,
+`lib/claricle/registry.rb` (handler requires + class list),
+`lib/claricle/cli.rb`,
 `README.adoc`, `spec/claricle/handlers/*_spec.rb`,
 `spec/claricle/cli_spec.rb`, `spec/fixtures/`.

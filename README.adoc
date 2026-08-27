@@ -170,12 +170,14 @@ lib/claricle/
 ----
 
 `Detector`, `Registry`, `Handlers::Base`, `Models::Base`,
-`Models::FreeFormHash` and `Models::Validation` are private constants.
+`Models::FreeFormHash`, `Models::Validation` and
+`Models::Location::POSITIONS` are private constants.
 The public surface is `Claricle.detect`, `Claricle::Image`,
 `Claricle::Cli` (including `Cli::Runner` and `Runner::Status`),
-`Claricle::VERSION`, the error classes, and the model classes
+`Claricle::VERSION`, the error classes, the model classes
 `Models::Inspection`, `Models::Issue`, `Models::Location` and
-`Models::Report`.
+`Models::Report`, and the two vocabularies those models validate
+against, `Inspection::PARSE_STATUSES` and `Issue::SEVERITIES`.
 
 === Adding a format
 

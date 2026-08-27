@@ -39,6 +39,10 @@ module Claricle
       # negative: an offset into the source, the length that runs from
       # it, and a line and a column, which are counts into a document.
       POSITIONS = %i[byte_offset byte_length line column].freeze
+      # Only `validate_types` below reads it, and that is private. The two
+      # enums on `Inspection` and `Issue` are vocabulary a caller builds a
+      # model from; this is the loop counter for a check they never run.
+      private_constant :POSITIONS
 
       attribute :byte_offset, UncoercedInteger
       attribute :byte_length, UncoercedInteger
