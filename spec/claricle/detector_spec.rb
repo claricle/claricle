@@ -35,6 +35,12 @@ RSpec.describe "Claricle format detection" do
       0x3001, 0xD7FF, 0xF900, 0xFDCF, 0xFDF0, 0xFFFD, 0x10000, 0xEFFFF
     ]
     "a#{boundaries.pack("U*")}-.0\u{B7}\u{300}\u{36F}\u{203F}\u{2040}"
+
+  binary_eps = lambda do |postscript|
+    header_bytes = 30
+    "\xC5\xD0\xD3\xC6".b +
+      [header_bytes, postscript.bytesize, 0, 0, 0, 0].pack("V6") +
+      [0xFFFF].pack("v") + postscript
   end
 
   describe "formats" do
@@ -63,6 +69,17 @@ RSpec.describe "Claricle format detection" do
         with_file.call(content) do |path|
           expect(Claricle::Image.from_path(path).format).to eq(format)
         end
+      end
+    end
+
+    it "detects a minimal DOS binary-preview EPS from content and from a path" do
+      content = binary_eps.call(
+        "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 10 10\n%%EndComments\n"
+      )
+
+      expect(Claricle.detect(content)).to eq(:eps)
+      with_file.call(content) do |path|
+        expect(Claricle::Image.from_path(path).format).to eq(:eps)
       end
     end
   end
@@ -628,6 +645,16 @@ RSpec.describe "Claricle format detection" do
       writer&.close
     end
 
+    it "does not block on a binary-preview EPS over a pipe that stays open" do
+      reader, writer = IO.pipe
+      writer.write(binary_eps.call("%!PS-Adobe-3.0 EPSF-3.0\n%%EndComments\n"))
+
+      expect(Timeout.timeout(2) { Claricle.detect(reader) }).to eq(:eps)
+    ensure
+      reader&.close
+      writer&.close
+    end
+
     # A byte that has not arrived yet can still turn EPSF from a trusted
     # match into a disqualified one, so an :eps read from a still-growing
     # buffer must not be trusted the way a PNG signature match is --
@@ -1073,12 +1100,16 @@ RSpec.describe "Claricle format detection" do
       expect { Claricle::EpsHeader }.to raise_error(NameError, /private constant/)
     end
 
+    it "keeps EpsBinary private" do
+      expect { Claricle::EpsBinary }.to raise_error(NameError, /private constant/)
+    end
+
     it "keeps ReservedNamespace private" do
       expect { Claricle::ReservedNamespace }.to raise_error(NameError, /private constant/)
     end
 
     it "lists none of them among its constants" do
-      expect(Claricle.constants & %i[Detector EpsHeader ReservedNamespace]).to be_empty
+      expect(Claricle.constants & %i[Detector EpsBinary EpsHeader ReservedNamespace]).to be_empty
     end
 
     it "loads REXML for itself in a fresh process" do

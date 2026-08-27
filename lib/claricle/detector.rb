@@ -8,6 +8,38 @@ require "rexml/xmltokens"
 require "emf"
 
 module Claricle
+  # The table of contents at the front of a DOS/Windows binary-preview
+  # EPS. Detection needs its magic while the PostScript handler needs the
+  # declared language-section range, so both answers live with the other
+  # format framing rather than being transcribed twice.
+  module EpsBinary
+    SIGNATURE = "\xC5\xD0\xD3\xC6".b.freeze
+    HEADER_BYTES = 30
+    POSTSCRIPT_FIELDS_OFFSET = 4
+    POSTSCRIPT_FIELDS_BYTES = 8
+
+    class << self
+      def wrapped?(bytes)
+        bytes.byteslice(0, SIGNATURE.bytesize) == SIGNATURE
+      end
+
+      # `[offset, length]` for a complete, non-empty PostScript section,
+      # or nil when the wrapper's declared range is outside the file.
+      def postscript_range(bytes, total_bytes)
+        return nil unless wrapped?(bytes) && bytes.bytesize >= HEADER_BYTES
+
+        offset, length = bytes.byteslice(POSTSCRIPT_FIELDS_OFFSET,
+                                         POSTSCRIPT_FIELDS_BYTES).unpack("V2")
+        return nil if offset < HEADER_BYTES || length.zero? || offset > total_bytes
+        return nil if length > total_bytes - offset
+
+        [offset, length]
+      end
+    end
+  end
+
+  private_constant :EpsBinary
+
   # Attribute defaults declared in an internal DTD subset. XML 1.0
   # requires a processor to apply them and REXML's DOM does, but the
   # PullParser hands the declarations over raw, so this reassembles them.
@@ -445,7 +477,7 @@ module Claricle
         return :pdf if header.start_with?(PDF_SIGNATURE)
         return postscript_flavour(yield) if header.start_with?(POSTSCRIPT_SIGNATURE)
 
-        format = metafile_format(header)
+        format = EpsBinary.wrapped?(header) ? :eps : metafile_format(header)
         return format if format
         return :svg if svg?(yield)
 
