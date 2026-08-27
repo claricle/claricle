@@ -48,7 +48,7 @@ module Claricle
         # the caller's IO read `Errno::EBADF` while `io.closed?` still
         # said false.
         name = checked_path(path)
-        build(format: Detector.detect_path(name), path: name)
+        new(format: Detector.detect_path(name), path: name)
       end
 
       def from_content(content, format: nil)
@@ -58,16 +58,10 @@ module Claricle
         content = binary(content)
         # nil means "detect"; anything else is the caller's answer,
         # including a false one, which the Symbol guard then rejects.
-        build(format: format.nil? ? Detector.detect(content) : format, content: content)
+        new(format: format.nil? ? Detector.detect(content) : format, content: content)
       end
 
       private
-
-      # Go through `new`, even after the factory has canonicalized its
-      # source, so subclasses keep their normal initialize hook.
-      def build(format:, path: nil, content: nil)
-        new(format:, path:, content:)
-      end
 
       def checked_format(format)
         return format if KIND_OF.bind_call(format, ::Symbol)

@@ -71,6 +71,58 @@ RSpec.describe Claricle::Models do
         .to raise_error(Lutaml::Model::ValidationError)
     end
 
+    bad_message = "\xFF".b
+    bad_json = %({"severity":"info","message":"\xFF"}).b
+    {
+      "keyword construction" => lambda {
+        models::Issue.new(severity: "info", message: bad_message)
+      },
+      "positional-hash construction" => lambda {
+        models::Issue.new({ severity: "info", message: bad_message })
+      },
+      "builder writer construction" => lambda {
+        models::Issue.new(severity: "info") { |built| built.message = bad_message }
+      },
+      "builder call construction" => lambda {
+        models::Issue.new(severity: "info") { |built| built.message(bad_message) }
+      },
+      "hash deserialization" => lambda {
+        models::Issue.from_hash({ "severity" => "info", "message" => bad_message })
+      },
+      "JSON deserialization" => -> { models::Issue.from_json(bad_json) },
+      "nested deserialization" => lambda {
+        models::Report.from_hash(
+          { "issues" => [{ "severity" => "info", "message" => bad_message }] }
+        )
+      }
+    }.each do |door, construct|
+      it "rejects an unrenderable String during #{door}" do
+        expect { construct.call }
+          .to raise_error(Lutaml::Model::ValidationError,
+                          /message expects a String JSON can render, got/)
+      end
+    end
+
+    it "names an unrenderable String used as an enum value" do
+      expect { models::Issue.new(severity: bad_message, message: "m") }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /severity expects a String JSON can render, got/)
+    end
+
+    it "keeps renderable Strings in non-UTF-8 encodings" do
+      messages = [
+        "plain".b,
+        (+"caf\xE9").force_encoding(Encoding::ISO_8859_1),
+        "wide".encode(Encoding::UTF_16)
+      ]
+
+      messages.each do |message|
+        built = models::Issue.from_hash({ "severity" => "info", "message" => message })
+
+        expect { built.to_json }.not_to raise_error
+      end
+    end
+
     # Deserialization builds a blank instance first; the marker that defers
     # finalization is this library's own dynamic extent, so passing
     # lutaml-model's reserved keyword directly must not reach that path.
