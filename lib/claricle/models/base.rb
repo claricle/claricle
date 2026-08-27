@@ -290,13 +290,11 @@ module Claricle
         raise TypeError, "cannot marshal #{self.class}: Claricle models are not marshalable"
       end
 
-      # Freeze declared attributes only. lutaml hands us its own copy of a
-      # String or a collection, so freezing those in place cannot reach the
-      # caller. It does NOT copy what is nested inside a free-form Hash, so
-      # descending into `meta` would freeze containers the caller still
-      # holds -- and 01-core.md:47 asks for the issue collection, not for
-      # every value a handler chose to attach. Inspection overrides this
-      # to seal `meta`'s own container, which the model does own.
+      # Freeze declared attributes only, and freeze them where they lie.
+      # lutaml hands us its own copy of a String or a collection, so that
+      # cannot reach the caller. It does NOT copy what is nested inside a
+      # free-form Hash, so Inspection cannot seal `meta` this way and
+      # overrides it to copy the graph first -- see `Inspection#sealed_copy`.
       # Works on the backing storage, not the getters. An enum declared with
       # `values:` is stored as a mutable Array behind a String getter, so
       # freezing what the getter returns leaves that array writable and a

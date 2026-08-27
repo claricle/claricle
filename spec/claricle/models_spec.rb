@@ -296,13 +296,17 @@ RSpec.describe Claricle::Models do
       end
 
       # The one place a model can reach Marshal without a caller naming
-      # it: `meta` holds whatever a handler attached.
-      it "refuses an Inspection whose meta holds a model" do
+      # it: `meta` holds whatever a handler attached, and `meta` is
+      # public. Dumped through the Inspection this passes on the OUTER
+      # refusal and says nothing about the Issue inside, so it goes
+      # through the Hash the reader hands back and names the class the
+      # refusal has to come from.
+      it "refuses a model a caller reaches through meta" do
         held = models::Inspection.new(format: "svg", parse_status: "ok",
                                       meta: { "held" => issue.call("info") })
 
-        expect { Marshal.dump(held) }
-          .to raise_error(TypeError, /Claricle models are not marshalable/)
+        expect { Marshal.dump(held.meta) }
+          .to raise_error(TypeError, /cannot marshal Claricle::Models::Issue/)
       end
 
       # Ruby prefers `marshal_dump` over `_dump` where both exist, so a
@@ -645,15 +649,20 @@ RSpec.describe Claricle::Models do
       expect(from_floats.width).to eql(from_integers.width)
     end
 
-    # lutaml copies a declared attribute but shares what is nested inside a
-    # free-form Hash. Descending into meta would freeze containers the
-    # caller still holds, and 01-core.md:47 never asked us to.
-    it "leaves free-form metadata alone" do
+    # lutaml copies a declared attribute but shares what is nested inside
+    # a free-form Hash, so the model seals a copy of that graph rather
+    # than the graph itself. Both halves, because either one alone is a
+    # defect: the handler keeps its own objects writable, and the write
+    # does not reach the inspection.
+    it "seals its own copy of free-form metadata, not the caller's" do
       inner = +"v"
       nested = [inner]
-      models::Inspection.new(format: "png", parse_status: "ok", meta: { "a" => nested })
+      inspection = models::Inspection.new(format: "png", parse_status: "ok",
+                                          meta: { "a" => nested })
+
       expect { nested << "x" }.not_to raise_error
       expect { inner << "x" }.not_to raise_error
+      expect(inspection.meta).to eq({ "a" => ["v"] })
     end
 
     it "leaves dpi nullable" do
@@ -708,6 +717,58 @@ RSpec.describe Claricle::Models do
       expect { models::Location.from_json(%({"column":-2})) }
         .to raise_error(Lutaml::Model::ValidationError,
                         /column expects a non-negative integer, got -2/)
+    end
+
+    # lutaml casts an integer attribute before anything can look at the
+    # value, and the cast is lossy in five measured directions. The
+    # non-negative check used to run on the RESULT, so each of these
+    # sealed and rendered a position the caller never gave.
+    {
+      "-0.5" => -0.5, "1.5" => 1.5, "true" => true, "false" => false,
+      %("3") => "3"
+    }.each do |shown, value|
+      it "refuses #{shown}, which lutaml would have made a legal position" do
+        expect { models::Location.new(byte_offset: value) }
+          .to raise_error(Lutaml::Model::ValidationError,
+                          /byte_offset expects a non-negative integer, got #{Regexp.escape(shown)}/)
+      end
+    end
+
+    # The same five from a document, because deserialization runs its own
+    # cast and that is where `{"byte_offset":-0.5}` was measured
+    # rendering back out as 0.
+    it "refuses the same coercions arriving from a document" do
+      ["-0.5", "1.5", "true", "false", %("3")].each do |literal|
+        expect { models::Location.from_json(%({"byte_offset":#{literal}})) }
+          .to raise_error(Lutaml::Model::ValidationError,
+                          /byte_offset expects a non-negative integer/)
+      end
+    end
+
+    # Nested, because that is the shape the corrupted position survived
+    # in: the aggregate validated, sealed, and rendered it.
+    it "refuses a coerced position nested in a report" do
+      json = %({"issues":[{"severity":"error","message":"m",) +
+             %("location":{"byte_offset":-0.5}}]})
+      expect { models::Report.from_json(json) }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /byte_offset expects a non-negative integer, got -0.5/)
+    end
+
+    # The declared type exists to stop the cast, so it must still let a
+    # legal position through untouched at both doors.
+    it "still round-trips a legal position as an Integer" do
+      built = models::Location.new(byte_offset: 33, byte_length: 4, line: 2, column: 9)
+
+      expect(built.byte_offset).to eql(33)
+      expect(models::Location.from_json(built.to_json).to_json).to eq(built.to_json)
+    end
+
+    # Only the private validation reads it, and it is not vocabulary a
+    # caller ever names -- unlike SEVERITIES and PARSE_STATUSES, which
+    # say what a field may hold.
+    it "keeps POSITIONS off the public surface" do
+      expect { models::Location::POSITIONS }.to raise_error(NameError, /private constant/)
     end
 
     # Zero is a legal offset and a legal length, so the guard has to key
@@ -822,32 +883,103 @@ RSpec.describe Claricle::Models do
       expect(built.to_json).to eq(loaded.to_json)
     end
 
-    # Sealing the Hash the reader unwraps is only half of it.
-    # Deserialization stores a FreeFormHash around that Hash, and the
-    # wrapper is a separate object -- left writable, it could be pointed
-    # at another Hash without ever touching a frozen one, and the frozen
-    # Inspection's own JSON changed with it.
-    it "seals the wrapper deserialization stores, not only the hash inside" do
-      loaded = described_class.const_get(:Inspection)
-                              .from_json(%({"parse_status":"ok","meta":{"a":1}}))
-      wrapper = loaded.instance_variable_get(:@meta)
+    # Sealing the container is only its top level. Real metadata is not
+    # flat -- an SVG root gives Strings and an EMF header gives a nested
+    # `frame` Hash -- and every one of those arrived as the handler's own
+    # object, which the container copy never touched.
+    it "seals free-form metadata all the way down, at both doors" do
+      built = described_class.const_get(:Inspection)
+                             .new(format: "svg", parse_status: "ok",
+                                  meta: { "title" => +"t", "frame" => { "x" => 1 },
+                                          "l" => [+"a"] })
+      loaded = described_class.const_get(:Inspection).from_json(built.to_json)
 
-      expect(wrapper).to be_frozen
-      expect { wrapper.instance_variable_set(:@value, { "changed" => true }) }
-        .to raise_error(FrozenError)
+      [built, loaded].each do |inspection|
+        expect { inspection.meta["frame"]["x"] = 2 }.to raise_error(FrozenError)
+        expect { inspection.meta["title"] << "!" }.to raise_error(FrozenError)
+        expect { inspection.meta["l"] << "b" }.to raise_error(FrozenError)
+        expect { inspection.meta["l"][0] << "!" }.to raise_error(FrozenError)
+      end
+    end
+
+    # The point of sealing it. A frozen Inspection whose nested values
+    # were still the handler's reported whatever the handler wrote next,
+    # without anything ever touching a frozen object.
+    it "keeps its document when a handler writes to metadata it still holds" do
+      title = +"hello"
+      frame = { "x" => 1 }
+      inspection = described_class.const_get(:Inspection)
+                                  .new(format: "svg", parse_status: "ok",
+                                       meta: { "title" => title, "frame" => frame })
+      before = inspection.to_json
+
+      title << " world"
+      frame["x"] = 999
+
+      expect(inspection.to_json).to eq(before)
+      expect(inspection.meta).to eq({ "title" => "hello", "frame" => { "x" => 1 } })
+    end
+
+    # `refuse_unrenderable` passes on the graph it was handed, so a
+    # nested value rewritten afterwards used to reach `to_json`
+    # unchecked. Measured, both ways it can go wrong: invalid binary
+    # raised JSON::GeneratorError and a container closed into a cycle
+    # raised JSON::NestingError, each from a model that had already
+    # validated and sealed.
+    it "still renders after a handler makes its old metadata unrenderable" do
+      text = +"ok"
+      nested = { "a" => 1 }
+      inspection = described_class.const_get(:Inspection)
+                                  .new(parse_status: "ok",
+                                       meta: { "t" => text, "n" => nested })
+
+      text.replace("\xFF".b)
+      nested["self"] = nested
+
+      expect { inspection.to_json }.not_to raise_error
+      expect(inspection.meta).to eq({ "t" => "ok", "n" => { "a" => 1 } })
+    end
+
+    # Sealing the Hash the reader unwraps used to be only half of it.
+    # Deserialization stored a FreeFormHash around that Hash, and the
+    # wrapper was a separate object -- left writable, it could be pointed
+    # at another Hash without ever touching a frozen one, and the frozen
+    # Inspection's own JSON changed with it. Sealing now replaces the
+    # ivar, so both doors end on one bare frozen Hash and the second
+    # object is gone rather than guarded.
+    #
+    # `be_an_instance_of`, not `be_a`: FreeFormHash is a Hash subclass, so
+    # `be_a` would pass on the very wrapper this says is no longer
+    # there.
+    it "leaves one bare sealed hash in the ivar, whichever door built it" do
+      built = described_class.const_get(:Inspection)
+                             .new(format: "svg", parse_status: "ok", meta: { "a" => 1 })
+      loaded = described_class.const_get(:Inspection).from_json(built.to_json)
+
+      [built, loaded].each do |inspection|
+        stored = inspection.instance_variable_get(:@meta)
+
+        expect(stored).to be_an_instance_of(Hash)
+        expect(stored).to be_frozen
+      end
       expect(loaded.meta).to eq({ "a" => 1 })
     end
 
-    # Sealing the model must not follow the value out into a document.
-    # Every other key `to_hash` renders comes back writable, and meta is
-    # not special to whoever asked for the Hash.
-    it "renders a document the caller can still edit" do
+    # Sealing the model must not follow the CONTAINER out into a
+    # document. Every other key `to_hash` renders comes back writable,
+    # and meta is not special to whoever asked for the Hash -- the cast
+    # dups it on the way out for exactly that reason. What is inside it
+    # is the inspection's own sealed data, shared rather than copied
+    # again because nothing can change it.
+    it "renders a document whose meta container the caller can still edit" do
       inspection = described_class.const_get(:Inspection)
-                                  .new(format: "svg", parse_status: "ok", meta: { "a" => 1 })
+                                  .new(format: "svg", parse_status: "ok",
+                                       meta: { "a" => 1, "n" => { "b" => 2 } })
       doc = inspection.to_hash
 
-      expect { doc["meta"]["b"] = 2 }.not_to raise_error
-      expect(inspection.meta).to eq({ "a" => 1 })
+      expect { doc["meta"]["c"] = 3 }.not_to raise_error
+      expect { doc["meta"]["n"]["d"] = 4 }.to raise_error(FrozenError)
+      expect(inspection.meta).to eq({ "a" => 1, "n" => { "b" => 2 } })
     end
 
     # meta is verbatim and JSON is what the CLI reports, so a value JSON
