@@ -36,7 +36,8 @@ module Claricle
     # override below are what keep the method name from leaking out.
     def inspect_file(file)
       inspection = Image.from_path(file).inspection
-      tolerate_closed_output { puts(options[:json] ? inspection.to_json : Presenter.inspection(inspection)) }
+      payload = options[:json] ? inspection.to_json : Presenter.inspection(inspection)
+      tolerate_closed_output { puts payload }
     end
     # Thor registers a command under its METHOD name, so this shipped as
     # the command `inspect_file` -- and `normalize_command_name`
@@ -77,12 +78,12 @@ module Claricle
     option :json, type: :boolean, default: false, desc: "Emit JSON"
     def formats
       rows = Registry.formats.map { |format| Presenter.format_row(format) }
-      tolerate_closed_output { puts(options[:json] ? JSON.generate(rows) : Presenter.format_table(rows)) }
+      payload = options[:json] ? JSON.generate(rows) : Presenter.format_table(rows)
+      tolerate_closed_output { puts payload }
     end
 
-    # Rendering, kept together so the commands above stay one line each.
-    # Nothing here touches `options` or writes output; the commands do
-    # both.
+    # Rendering, kept together so the commands only choose a payload and
+    # write it. Nothing here touches `options` or writes output.
     module Presenter
       module_function
 
