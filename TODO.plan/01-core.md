@@ -48,12 +48,14 @@ dependency where marked ⚙):
   collection. Contract specs must cover an invalid severity, a missing
   message, post-build mutation, and inconsistent JSON.
 - **Inspection means "did the metadata parse", nothing more.**
-  `parse_status` is `:ok` or `:failed`, and it replaces a `valid` field
-  outright — `valid` would mean five different things across five
-  delegates, and vectory parses SVG in Nokogiri's default RECOVER mode
-  ⚙, so a repaired malformed SVG would read as valid. Validity claims
+  `parse_status` is `"ok"` or `"failed"` — Strings, because the model
+  declares a string enum. A Symbol is accepted on construction and reads
+  back as a String ⚙, so compare against `"ok"`, never `:ok`. It replaces
+  a `valid` field outright — `valid` would mean five different things
+  across five delegates, and vectory parses SVG in Nokogiri's default
+  RECOVER mode ⚙, so a repaired malformed SVG would read as valid. Validity claims
   belong to `conform` alone. An **allowlisted** parse failure gives
-  `:failed` and exits 0 — the command succeeded in reporting that the
+  `"failed"` and exits 0 — the command succeeded in reporting that the
   file doesn't parse. A fault off the allowlist is not absorbed; it
   propagates and exits 4. **`parse_status` comes from Claricle's own
   structural check (D23), never from delegate silence** — measured, a
