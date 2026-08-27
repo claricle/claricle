@@ -184,7 +184,7 @@ Plumbing first again, then one edge family per commit.
    write a general round-trip assertion). Add a feature-loss rule only
    when a fixture demonstrates the loss.
 6. `formats` full-matrix spec once the last edge lands.
-7. README rewrite + gemspec metadata + RBS update + stub-spec update.
+7. README rewrite + gemspec metadata + stub-spec update.
 
 ## Done when
 

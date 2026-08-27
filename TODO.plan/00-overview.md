@@ -434,7 +434,7 @@ capabilities do.
 - [ ] Exit codes match the matrix → 01 (runner, all rows incl. 4), verified per command in 02/03/04; 03 reaches 4 end-to-end
 - [ ] Conformance specs on canonical fixtures; round-trip specs per D11 → 03/04
 - [ ] `compress` stub removed → 01
-- [ ] README.adoc, gemspec and RBS truthful → 01 (full baseline), extended per item, final rewrite 04
+- [ ] README.adoc and gemspec truthful → 01 (full baseline), extended per item, final rewrite 04
 
 Two promises the plan must own rather than escalate:
 

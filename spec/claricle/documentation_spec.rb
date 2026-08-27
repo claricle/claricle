@@ -194,7 +194,11 @@ RSpec.describe "the documentation" do
         expect { Object.const_get(const) }.not_to raise_error, "README names #{const}"
       end
     end
+  end
 
+  # Grouped by what they are about -- the surface -- rather than by
+  # where the claim lives. The first of these reads no README at all.
+  describe "the public surface" do
     # Only what the surface tree below cannot reach. That tree is exact on
     # every public namespace, so it already proves `Detector`, `Registry`
     # and `Handlers` are not public constants, and that `Models` exposes
@@ -264,17 +268,23 @@ RSpec.describe "the documentation" do
     # enums above are vocabulary a caller builds a model from. Publishing
     # any of the three would bind the gem until a major bump.
     it "documents every constant on that surface, and calls the rest private" do
-      %w[Inspection Issue Location Report].each do |name|
-        expect(readme).to include("Models::#{name}")
-      end
-      expect(readme).to include("Inspection::PARSE_STATUSES")
-      expect(readme).to include("Issue::SEVERITIES")
-      # The whole sentence, not the names in it: asserting each name
-      # appeared somewhere left the wording free to be reversed to "are
-      # public constants" and stay green.
+      # Both sentences whole, not the names in them. Naming alone pinned
+      # nothing in either direction -- measured twice: with only `include`
+      # calls, rewriting "The public surface is" to "Nothing here is
+      # public, least of all" stayed green, and before the private
+      # sentence was pinned, reversing it to "are public constants" did
+      # the same.
+      claims("The public surface is `Claricle.detect`, `Claricle::Image`, " \
+             "`Claricle::Cli` (including `Cli::Runner` and " \
+             "`Runner::Status`), `Claricle::VERSION`, the error classes, " \
+             "the model classes `Models::Inspection`, `Models::Issue`, " \
+             "`Models::Location` and `Models::Report`, and the two " \
+             "vocabularies those models validate against, " \
+             "`Inspection::PARSE_STATUSES` and `Issue::SEVERITIES`.")
       claims("`Detector`, `Registry`, `Handlers::Base`, `Models::Base`, " \
-             "`Models::FreeFormHash`, `Models::Validation` and " \
-             "`Models::Location::POSITIONS` are private constants.")
+             "`Models::FreeFormHash`, `Models::Validation`, " \
+             "`Models::Location::POSITIONS`, `Cli::Runner::Status::RANGE` " \
+             "and `UnsupportedFormat::ABSENT` are private constants.")
       # `::`, not `const_get` -- measured: `Module#const_get` walks
       # straight past `private_constant` and hands the class back, so an
       # assertion written that way passes whatever the visibility is.
@@ -284,9 +294,12 @@ RSpec.describe "the documentation" do
         .to raise_error(NameError, /private constant/)
       expect { Claricle::Models::Location::POSITIONS }
         .to raise_error(NameError, /private constant/)
+      expect { Claricle::Cli::Runner::Status::RANGE }
+        .to raise_error(NameError, /private constant/)
+      expect { Claricle::UnsupportedFormat::ABSENT }
+        .to raise_error(NameError, /private constant/)
     end
   end
-
   # The built spec, not the raw file: a comment mentioning compression is
   # harmless and should not fail this.
   describe "what the gemspec claims" do
