@@ -98,8 +98,12 @@ module Claricle
         # Thor compares them with UTF-8 command keys and can choke on another
         # valid ASCII-compatible encoding, so normalize only that boundary.
         def normalize_command_arguments(arguments)
-          arguments[0] = command_text(arguments[0]) if arguments[0]
-          return unless help_command?(arguments[0]) && arguments[1]
+          command_name = arguments[0]
+          # A leading terminator selects Thor's default command without itself
+          # becoming a command name; leave it in argv for Thor to consume.
+          command_name = nil if command_name == "--"
+          arguments[0] = command_name = command_text(command_name) if command_name
+          return unless help_command?(command_name) && arguments[1]
 
           arguments[1] = command_text(arguments[1])
         end

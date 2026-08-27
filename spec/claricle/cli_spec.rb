@@ -131,6 +131,20 @@ RSpec.describe Claricle::Cli::Runner do
         .to output("Claricle version #{Claricle::VERSION}\n").to_stdout
     end
 
+    {
+      ["--"] => /\ACommands:\n\s+\S+ help \[COMMAND\].*\n\s+\S+ version.*\n\n\z/,
+      %w[-- version] => /\AUsage:\n\s+\S+ version\n\nDisplay Claricle version\n\z/,
+      %w[-- --help] => /\AUsage:\n\s+\S+ help \[COMMAND\]\n\nDescribe available commands or one specific command\n\z/
+    }.each do |arguments, expected_output|
+      it "preserves #{arguments.inspect} as option-terminator input" do
+        expect do
+          expect(described_class.run(arguments, output: StringIO.new)).to eq(0)
+        end.to output(expected_output).to_stdout
+
+        expect { Claricle::Cli.start(arguments) }.to output(expected_output).to_stdout
+      end
+    end
+
     it "returns 2 for an unknown command" do
       expect(described_class.run(["nope"], output: StringIO.new)).to eq(2)
     end
@@ -168,6 +182,12 @@ RSpec.describe Claricle::Cli::Runner do
       argument = "é".encode(Encoding.find("Big5-HKSCS"))
 
       expect(described_class.run(["h", argument], output: StringIO.new)).to eq(2)
+    end
+
+    it "returns 2 for an encoded help target after the option terminator" do
+      argument = "é".encode(Encoding.find("Big5-HKSCS"))
+
+      expect(described_class.run(["--", argument], output: StringIO.new)).to eq(2)
     end
 
     %w[help version].each do |command|
