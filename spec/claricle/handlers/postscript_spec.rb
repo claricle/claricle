@@ -959,11 +959,17 @@ RSpec.describe "Claricle PostScript handler" do
       )
     end
 
-    it "copies box arrays before carrying them into metadata" do
+    it "carries equal box values without sharing the delegate's arrays" do
       delegate_header = nil
+      carried_meta = nil
       allow(Postscript).to receive(:parse).and_wrap_original do |original, source|
         original.call(source).tap { |program| delegate_header = program.header }
       end
+      allow(Claricle::Models::Inspection).to receive(:new)
+        .and_wrap_original do |original, **attributes|
+          carried_meta = attributes.fetch(:meta)
+          original.call(**attributes)
+        end
 
       result = inspect_ps("hires.eps")
 
@@ -972,13 +978,14 @@ RSpec.describe "Claricle PostScript handler" do
         "bounding_box" => :bounding_box,
         "hires_bounding_box" => :hires_bounding_box
       }.each do |key, reader|
-        carried = result.meta.fetch(key)
+        carried = carried_meta.fetch(key)
         delegated = delegate_header.public_send(reader)
+        expected = delegated.dup
         expect(carried).to eq(delegated)
         expect(carried).not_to be(delegated)
 
-        carried << 999.0
-        expect(delegated.length).to eq(4)
+        delegated << 999.0
+        expect(carried).to eq(expected)
       end
     end
 
@@ -1552,13 +1559,10 @@ RSpec.describe "Claricle PostScript handler" do
       end
     end
 
-    # Identity here, since there is a single object to compare: bytes
-    # already tagged BINARY are handed straight through, not re-tagged
-    # into a copy. The header the delegate sees is a slice of them.
-    it "leaves a frozen binary content string as the very object it was given" do
-      # Frozen as well as binary: Image hands back the caller's own
-      # object only when it is both, because sharing an unfrozen buffer
-      # would let a caller mutate bytes an image is still reading.
+    # Image ownership is unconditional, even when the caller's String is
+    # already frozen and binary. The header the delegate sees is a slice
+    # of the equal, independently owned bytes.
+    it "uses equal frozen binary content in a distinct owned object" do
       bytes = File.binread(fixture("basic.eps")).freeze
       image = Claricle::Image.from_content(bytes, format: :eps)
       seen = []
@@ -1569,7 +1573,8 @@ RSpec.describe "Claricle PostScript handler" do
       end
       handler.inspection(image)
 
-      expect(image.content).to be(bytes)
+      expect(image.content).to eq(bytes)
+      expect(image.content).not_to equal(bytes)
       expect(seen.first).to eq(bytes[0, bytes.index("%%EndComments") + 14])
     end
   end

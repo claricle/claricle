@@ -35,6 +35,7 @@ RSpec.describe "Claricle format detection" do
       0x3001, 0xD7FF, 0xF900, 0xFDCF, 0xFDF0, 0xFFFD, 0x10000, 0xEFFFF
     ]
     "a#{boundaries.pack("U*")}-.0\u{B7}\u{300}\u{36F}\u{203F}\u{2040}"
+  end
 
   binary_eps = lambda do |postscript|
     header_bytes = 30
