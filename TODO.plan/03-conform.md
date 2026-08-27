@@ -144,7 +144,8 @@ so no commit declares a capability the CLI can't yet deliver.
 
 1. `Models::BatchItem` + operation-neutral batch helper + module API +
    `conform` command, with the exit codes reachable now (2 for zero
-   matches, 3 for a format no handler conforms). No capability changes.
+   matches, 3 for a format no handler conforms). Extend the exact command
+   inventory with `conform` in the same commit. No capability changes.
 2. Module API argument specs — both call shapes, `InvocationError`
    cases, and `conformance_batch` collecting every outcome without
    short-circuiting.

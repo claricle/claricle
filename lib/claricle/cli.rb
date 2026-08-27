@@ -9,12 +9,10 @@ module Claricle
       true
     end
 
-    # Thor >= 1.5 adds `tree` to every subclass. This CLI ships the
-    # `version` it declares plus the `help` Thor contributes, and the
-    # README documents both -- `tree` is the one it drops. Guarded
-    # because the gemspec permits Thor down to 1.2, where `tree` does
-    # not exist and `undefine: true` on a missing method raises
-    # NameError.
+    # Thor >= 1.5 contributes both `help` and `tree` to every subclass.
+    # Claricle keeps `help` and drops `tree`. Guarded because the gemspec
+    # permits Thor down to 1.2, where `tree` does not exist and
+    # `undefine: true` on a missing method raises NameError.
     remove_command :tree, undefine: true if method_defined?(:tree)
 
     desc "version", "Display Claricle version"
@@ -38,7 +36,7 @@ module Claricle
     # override below are what keep the method name from leaking out.
     def inspect_file(file)
       inspection = Image.from_path(file).inspection
-      puts(options[:json] ? inspection.to_json : Presenter.inspection(inspection))
+      tolerate_closed_output { puts(options[:json] ? inspection.to_json : Presenter.inspection(inspection)) }
     end
     # Thor registers a command under its METHOD name, so this shipped as
     # the command `inspect_file` -- and `normalize_command_name`
@@ -79,7 +77,7 @@ module Claricle
     option :json, type: :boolean, default: false, desc: "Emit JSON"
     def formats
       rows = Registry.formats.map { |format| Presenter.format_row(format) }
-      puts(options[:json] ? JSON.generate(rows) : Presenter.format_table(rows))
+      tolerate_closed_output { puts(options[:json] ? JSON.generate(rows) : Presenter.format_table(rows)) }
     end
 
     # Rendering, kept together so the commands above stay one line each.

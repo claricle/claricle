@@ -148,15 +148,15 @@ svg/emf/eps/ps were measured working, so v1 ships the full matrix.
 - Docs closure: README.adoc fully rewritten on top of 01's honesty
   baseline — real API + CLI, the format × operation matrix, exit codes,
   and the registry extension workflow. That workflow must describe what
-  adding a format **actually** costs: if handlers don't yet declare
-  their sniffer, capabilities, targets, extensions and lossiness, then
-  it is a handler class plus a detector edit plus a require plus a
+  adding a format **actually** costs: if handlers do not yet implement
+  their operations or declare sniffers, targets, extensions and lossiness,
+  then it is a handler class plus a detector edit plus a require plus a
   registry entry plus a lossiness edge, and the README says so rather
   than repeating the one-class claim. Gemspec description refreshed for
   the operations that now exist; its URLs moved to the `claricle` org in
   01 and need no further edit. `sig/` stays deleted (01's docs rule).
-  Drop `"convert"` from 01's stub-removal spec assertion (a real
-  `convert` now exists).
+  Extend the exact command inventory with `convert` in the same commit
+  as the command.
 
 ## Do
 
@@ -175,16 +175,17 @@ Plumbing first again, then one edge family per commit.
 3. `convert` command + batch + `--force`/`--output -`/`--json`
    boundary specs + `--to` inference, its exit-2 cases, and the
    `--to`/`--output` suffix conflict; `--output -` spec asserts stdout
-   carries bytes only, with no trailing newline.
+   carries bytes only, with no trailing newline. Extend the exact command
+   inventory with `convert` in the same commit.
 4. One edge family per commit: handler `convert` TDD against real
-   fixtures, `capabilities :convert` with that handler's target list,
-   and the `formats` expected-output update, together.
+   fixtures, override `convert`, declare only that handler's target-list
+   data, and update the `formats` expected output together.
 5. Semantic spec suite over the fixture corpus, each spec naming the
    property it checks (D11 leaves the overall invariant open, so do not
    write a general round-trip assertion). Add a feature-loss rule only
    when a fixture demonstrates the loss.
 6. `formats` full-matrix spec once the last edge lands.
-7. README rewrite + gemspec metadata + stub-spec update.
+7. README rewrite + gemspec metadata.
 
 ## Done when
 

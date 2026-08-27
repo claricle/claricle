@@ -71,8 +71,8 @@ turned out false.
   Dimensions carry whatever D15's sign-off decides; until then do not
   assert cross-format dimension equality anywhere. `claricle formats` prints the format ×
   operation matrix (human + `--json`). `formats --json` is an array of
-  `{"format": "svg", "inspect": true, "conform": false, "convert_to":
-  []}` objects, sorted by format — the keys stay fixed across items, so
+  `{"format": "svg", "inspect": true, "conform": false, "convert":
+  false, "convert_to": []}` objects, sorted by format — the keys stay fixed across items, so
   03 and 04 flip booleans and fill `convert_to` without reshaping the
   schema. Missing file → exit 2 (runner spec example deferred from 01
   lands here).
@@ -117,8 +117,8 @@ it, and after that every handler arrives as a complete slice.
 - A real WMF fixture is detected as `:wmf` and refused with exit 3.
 - `claricle inspect`/`claricle formats` work in human and JSON modes;
   exit codes verified (0 / 2 missing file / 3 unknown format).
-- `formats` reports `inspect` only — the spec asserts `conform` is
-  false and `convert_to` is empty for every format.
+- `formats` reports `inspect` only — the spec asserts `conform` and
+  `convert` are false and `convert_to` is empty for every format.
 - Full Pre-Push Review Chain passed.
 
 ## Files
