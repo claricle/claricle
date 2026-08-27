@@ -94,12 +94,6 @@ module Claricle
       # guarantee above: what is stored is still a frozen String the image
       # owns, and `false` still has no `to_path` and is still refused.
       def checked_path(path)
-        # A Pathname is converted, not refused. The PNG reader takes one
-        # and callers pass one, so refusing it made PNG the odd handler
-        # out -- it surfaced as NoMethodError on `rewind`, which is off
-        # the allowlist and so exited 4, the defect code. `false` still
-        # has no `to_path` and is still refused.
-        #
         # `KIND_OF.bind_call`, not `is_a?`: a subclass that overrides
         # `is_a?` must not talk its way past this.
         path = path.to_path if !KIND_OF.bind_call(path, ::String) && path.respond_to?(:to_path)

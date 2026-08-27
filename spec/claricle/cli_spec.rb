@@ -195,14 +195,49 @@ RSpec.describe Claricle::Cli::Runner do
       expect(described_class.run(["--", argument], output: StringIO.new)).to eq(2)
     end
 
-    %w[help version].each do |command|
+    {
+      "help" => ["help"],
+      "version" => ["version"],
+      "formats" => ["formats"],
+      "inspect" => [
+        "inspect", File.join(__dir__, "..", "fixtures", "inspect", "valid.png")
+      ]
+    }.each do |command, arguments|
       it "returns 0 when #{command} output is closed" do
         result = with_closed_stdout do
-          described_class.run([command], output: StringIO.new)
+          described_class.run(arguments, output: StringIO.new)
         end
 
         expect(result).to eq(0)
       end
+    end
+
+    it "maps an inspect operation's broken pipe to 4" do
+      allow(Claricle::Image).to receive(:from_path).and_raise(Errno::EPIPE)
+
+      expect(described_class.run(%w[inspect image.png], output: StringIO.new)).to eq(4)
+    end
+
+    it "maps inspection generation's broken pipe to 4" do
+      image = instance_double(Claricle::Image)
+      allow(Claricle::Image).to receive(:from_path).and_return(image)
+      allow(image).to receive(:inspection).and_raise(Errno::EPIPE)
+
+      expect(described_class.run(%w[inspect image.png], output: StringIO.new)).to eq(4)
+    end
+
+    it "maps a formats operation's broken pipe to 4" do
+      allow(Claricle.const_get(:Registry)).to receive(:formats).and_raise(Errno::EPIPE)
+
+      expect(described_class.run(["formats"], output: StringIO.new)).to eq(4)
+    end
+
+    it "maps capability lookup's broken pipe to 4" do
+      registry = Claricle.const_get(:Registry)
+      allow(registry).to receive(:formats).and_return([:png])
+      allow(registry).to receive(:capabilities_for).and_raise(Errno::EPIPE)
+
+      expect(described_class.run(["formats"], output: StringIO.new)).to eq(4)
     end
 
     it "does not hide a non-output error from help" do
@@ -217,12 +252,11 @@ RSpec.describe Claricle::Cli::Runner do
       expect(arguments).to eq(["nope"])
     end
 
-    # Thor contributes help itself, so assert the deleted ones are gone
-    # rather than that version stands alone.
-    it "no longer exposes the deleted commands" do
-      expect(Claricle::Cli.all_commands.keys).to include("version")
+    # Pin Thor-contributed commands alongside Claricle's own, so a new
+    # inherited command cannot slip into the public inventory.
+    it "exposes exactly the intended commands" do
       expect(Claricle::Cli.all_commands.keys)
-        .not_to include("validate", "convert", "compress")
+        .to contain_exactly("formats", "help", "inspect", "version")
     end
   end
 
