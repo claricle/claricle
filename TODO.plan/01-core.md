@@ -249,13 +249,17 @@ subjects in quotes):
   proves the frozen issue collection refuses mutation rather than
   silently accepting it, and proves the verdict is correct after a
   deserialization round trip.
-- The detector accepts every SVG form vectory accepts **within
-  `SVG_PROLOG_BYTES`**, rejects foreign namespaces and decoys, and never
-  resolves an external entity. That bound is a real divergence, not a
-  formality: a valid SVG behind a 9,000-byte comment parses for a
-  conforming XML reader and is `UnknownFormat` here ⚙.
+- The detector's SVG contract is stated as what it accepts, not as
+  parity with vectory — vectory is not a dependency of this item, so a
+  parity claim cannot be measured here. It accepts a root carrying the
+  SVG namespace within `SVG_PROLOG_BYTES`; a foreign namespace, a decoy
+  and a namespace-less root are all refused, and no external entity is
+  ever resolved. Both bounds are real divergences from a permissive XML
+  reader, not formalities ⚙: REXML parses a valid SVG behind a
+  9,000-byte comment, and behind no comment at all with the namespace
+  dropped, that `Claricle.detect` refuses in both cases.
 - Execution-diff vs main shows ONLY: stubs gone, version unchanged,
-  README/gemspec/RBS truthful.
+  README and gemspec truthful.
 - Every ⚙ contract check ran against the installed gem and its outcome
   is recorded in the PR description. `Emf.detect_format` raising, the
   SVG root cases, lutaml-model's deferred validation and `tempfile`'s
