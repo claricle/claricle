@@ -152,8 +152,9 @@ svg/emf/eps/ps were measured working, so v1 ships the full matrix.
   their sniffer, capabilities, targets, extensions and lossiness, then
   it is a handler class plus a detector edit plus a require plus a
   registry entry plus a lossiness edge, and the README says so rather
-  than repeating the one-class claim. Gemspec description/homepage
-  refreshed (org moved ribose → claricle). `sig/` brought up to date.
+  than repeating the one-class claim. Gemspec description refreshed for
+  the operations that now exist; its URLs moved to the `claricle` org in
+  01 and need no further edit. `sig/` stays deleted (01's docs rule).
   Drop `"convert"` from 01's stub-removal spec assertion (a real
   `convert` now exists).
 
@@ -206,6 +207,6 @@ Plumbing first again, then one edge family per commit.
 `lib/claricle/models/conversion.rb`, `lib/claricle/handlers/
 {metafile,postscript,svg}.rb`, `lib/claricle/writer.rb` (write
 lifecycle service), `lib/claricle/registry.rb`, `lib/claricle.rb`,
-`lib/claricle/cli.rb`, `README.adoc`, `claricle.gemspec`, `sig/`,
+`lib/claricle/cli.rb`, `README.adoc`, `claricle.gemspec`,
 `spec/claricle/conversion/*_spec.rb`, `spec/claricle/writer_spec.rb`,
 `spec/claricle/cli_spec.rb`.
