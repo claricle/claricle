@@ -619,26 +619,21 @@ RSpec.describe Claricle::Image do
       expect(image.content).to be(image.content)
     end
 
-    # Passed through, not copied -- but only when it is already FROZEN as
-    # well as binary. Frozen is what makes sharing safe: without it a
-    # caller could still mutate the bytes an image is reading. An earlier
-    # version asserted identity for ANY binary string, which would have
-    # required handing out an unfrozen shared buffer.
-    it "hands back the caller's own object when already frozen and BINARY" do
+    # Ownership is unconditional: even an exact frozen String can carry
+    # singleton behaviour that the image must not retain.
+    it "returns equal content, not the caller's frozen BINARY object" do
       frozen = bytes.b.freeze
       image = described_class.from_content(frozen, format: :emf)
 
-      expect(image.content).to be(frozen)
+      expect(image.content).to eq(frozen)
+      expect(image.content).not_to equal(frozen)
     end
 
-    # Frozen alone is not enough: it also has to be BINARY. Passing a
-    # frozen NON-binary string through untouched would raise later, when
-    # a handler indexes into it -- `String#[]=` indexes by CHARACTER, so
-    # the EMF handler normalising nSize on a frozen UTF-16LE string would
-    # hit Encoding::CompatibilityError on a perfectly good file. Every
-    # other frozen example above is also BINARY, so none of them can
-    # tell the two conditions apart.
-    it "still copies a frozen string that is not already BINARY" do
+    # A fresh owned String is not enough: its encoding tag must also be
+    # normalized. Without that, `String#[]=` indexes by CHARACTER, so the
+    # EMF handler normalising nSize on UTF-16LE-tagged bytes would hit an
+    # Encoding::CompatibilityError on a perfectly good file.
+    it "copies and normalizes a frozen non-BINARY string" do
       frozen = bytes.dup.force_encoding("UTF-16LE").freeze
       image = described_class.from_content(frozen, format: :emf)
 

@@ -707,19 +707,14 @@ RSpec.describe "Claricle metafile handler" do
     # turned a fully framed 209 MB EMF with a readable header into
     # "failed", which is the header-first contract inverted.
     #
-    # Driven through the PUBLIC handler with a stubbed bytesize rather
-    # than a 200 MB fixture: a module-level test leaves the cap free to
-    # come back inside declared_size, where it would fail the header
-    # again. The dimensions are asserted on both sides of the boundary,
-    # which is the half that actually pins the contract.
+    # Driven through the PUBLIC handler with bytesize stubbed on the owned
+    # Image rather than on the caller's String, whose singleton behaviour
+    # Image deliberately strips. This pins the real boundary without a
+    # 200 MB fixture. The dimensions are asserted on both sides of it.
     it "reads the header for a stream at the scan limit" do
       content = File.binread(fixture("emf_plus"))
-      content.define_singleton_method(:bytesize) { 209_715_200 }
-      # Frozen AFTER the singleton is defined: Image hands back the
-      # caller's own object only when it is already frozen and binary,
-      # and a copy would drop the singleton and defeat this test.
-      content.freeze
       image = Claricle::Image.from_content(content, format: :emf)
+      allow(image).to receive(:bytesize).and_return(209_715_200)
 
       result = handler.inspection(image)
 
@@ -735,12 +730,8 @@ RSpec.describe "Claricle metafile handler" do
     # `EMF+` at byte 100 was reported as having none.
     it "reports no EMF+ verdict at all for a stream over the scan limit" do
       content = File.binread(fixture("emf_plus"))
-      content.define_singleton_method(:bytesize) { 209_715_201 }
-      # Frozen AFTER the singleton is defined: Image hands back the
-      # caller's own object only when it is already frozen and binary,
-      # and a copy would drop the singleton and defeat this test.
-      content.freeze
       image = Claricle::Image.from_content(content, format: :emf)
+      allow(image).to receive(:bytesize).and_return(209_715_201)
 
       result = handler.inspection(image)
 
@@ -750,29 +741,20 @@ RSpec.describe "Claricle metafile handler" do
       expect(result.meta).not_to have_key("emf_plus_bytes")
     end
 
-    # The absent keys alone do not prove the walk was SKIPPED: move the
-    # limit check below `walk` and the answer is still nil, while the
-    # CPU bound the limit exists for is gone. Measured, that rearranged
-    # version passed both examples above.
-    #
-    # So the skipped work is made observable by making it fail. This
-    # stream has no EMR_EOF and its real length is 116 bytes, while the
-    # stubbed one is over the limit -- so a walk that ran would read
-    # past the real end, `unpack("VV")` would give nil for the size, and
-    # the comparison would raise NoMethodError. Returning quietly is the
-    # assertion.
+    # The absent keys alone do not prove the walk was SKIPPED: a caller
+    # could run it and discard its answer. Observe the private walk from
+    # the PUBLIC handler instead. This stays meaningful now that an
+    # oversized source is reduced to a bounded header prefix before the
+    # EMF+ decision.
     it "does not walk a stream over the scan limit at all" do
       content = stream_of(carrier(12))
       expect(content.bytesize).to eq(116)
-      content.define_singleton_method(:bytesize) { 209_715_201 }
-      # Frozen AFTER the singleton is defined: Image hands back the
-      # caller's own object only when it is already frozen and binary,
-      # and a copy would drop the singleton and defeat this test.
-      content.freeze
       image = Claricle::Image.from_content(content, format: :emf)
+      allow(image).to receive(:bytesize).and_return(209_715_201)
+      emf_plus = Claricle.const_get(:Handlers).const_get(:EmfPlus)
 
-      result = nil
-      expect { result = handler.inspection(image) }.not_to raise_error
+      expect(emf_plus).not_to receive(:walk)
+      result = handler.inspection(image)
       expect(result.meta).not_to have_key("emf_plus_present")
     end
 
