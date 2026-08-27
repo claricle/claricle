@@ -177,9 +177,16 @@ RSpec.describe "the documentation" do
     # The org moved from `ribose` to `claricle` and these links did not,
     # so every one of them 404'd. Scanned rather than counted, because the
     # wrong org is only visible next to the right one.
+    #
+    # Both link shapes, not just `github.com`: the License badge reads
+    # `img.shields.io/github/license/OWNER/claricle`, so a version keyed
+    # to the host missed it entirely -- measured, reverting that one badge
+    # to `ribose` left this example green. Matching the owner loosely
+    # instead was worse: `lib/claricle/` in the architecture tree and the
+    # ownerless `shields.io/gem/v/claricle` badge both scanned as owners.
     it "links to a repository that exists" do
-      repos = readme.scan(%r{github\.com/[\w.-]+/claricle}).uniq
-      expect(repos).to eq(["github.com/claricle/claricle"])
+      owners = readme.scan(%r{(?:github\.com|shields\.io/github/\w+)/([\w.-]+)/claricle})
+      expect(owners.flatten.uniq).to eq(["claricle"])
     end
 
     it "names only constants that exist" do
@@ -188,15 +195,15 @@ RSpec.describe "the documentation" do
       end
     end
 
-    # const_get bypasses private_constant, so the public-constants list is
-    # the honest question -- and it is the one the README answers.
-    it "describes the internals as internal" do
-      %w[Detector Registry Handlers].each do |name|
-        expect(Claricle.constants).not_to include(name.to_sym), "#{name} is public"
-      end
-      # Nested privacy is not implied by the outer check.
+    # Only what the surface tree below cannot reach. That tree is exact on
+    # every public namespace, so it already proves `Detector`, `Registry`
+    # and `Handlers` are not public constants, and that `Models` exposes
+    # no `Base` -- measured, `Claricle.constants` equals
+    # `Claricle.constants(false)` and the same holds for `Models`.
+    # `Handlers::Base` is the one case left: the walk stops at `Handlers`
+    # because it is private, so nothing else looks inside it.
+    it "keeps the internals of a private namespace private too" do
       expect(Claricle.const_get(:Handlers).constants).not_to include(:Base)
-      expect(Claricle::Models.constants).not_to include(:Base)
     end
 
     # A list of one namespace's constants says nothing about what is
@@ -208,7 +215,7 @@ RSpec.describe "the documentation" do
     # a constant added anywhere under `Claricle`, at any depth, has to be
     # accounted for here.
     #
-    # `constants(false)`, twice deliberately. `constants` omits a private
+    # `constants(false)`, both halves deliberate. `constants` omits a private
     # constant, which is the question being asked, where `const_get` walks
     # straight past `private_constant` and hands the value back. And
     # `false`, because these are mostly classes: inherited would drag in
@@ -293,11 +300,17 @@ RSpec.describe "the documentation" do
 
     # Published metadata, so a wrong URL here is what a user lands on from
     # the gem page rather than something they can correct in a checkout.
+    #
+    # Every value, not three named keys: a `bug_tracker_uri` added later
+    # would have escaped a list that had to be remembered. Measured
+    # against the built spec -- `metadata` is a plain Hash of Strings, and
+    # the grep drops the one non-URL value (`rubygems_mfa_required`).
+    # `start_with`, so a deeper path like `/issues` stays legal while a
+    # wrong owner still fails.
     it "points every public URL at a repository that exists" do
-      urls = [spec.homepage,
-              *spec.metadata.values_at("homepage_uri", "source_code_uri",
-                                       "changelog_uri")]
-      expect(urls).to all(eq("https://github.com/claricle/claricle"))
+      urls = [spec.homepage, *spec.metadata.values].grep(/github\.com/)
+      expect(urls).not_to be_empty
+      expect(urls).to all(start_with("https://github.com/claricle/claricle"))
     end
 
     # Any bare uppercase token, so an added BMP or AVIF fails rather than
