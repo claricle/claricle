@@ -10,7 +10,45 @@ module Claricle
     # assumed: folded back in, RuboCop reports Base at 111 lines against
     # a limit of 100. Dropping the Marshal protocol did not change that.
     module Validation
+      CORE_INSTANCE = ::Object.instance_method(:instance_of?)
+      KIND_OF = ::Object.instance_method(:is_a?)
+      CLASS_OF = ::Object.instance_method(:class)
+      FROZEN = ::Object.instance_method(:frozen?)
+      ARRAY_ELEMENTS = ::Array.instance_method(:each)
+      ARRAY_FIRST = ::Array.instance_method(:first)
+      ARRAY_SIZE = ::Array.instance_method(:size)
+      private_constant :CORE_INSTANCE, :KIND_OF, :CLASS_OF, :FROZEN,
+                       :ARRAY_ELEMENTS, :ARRAY_FIRST, :ARRAY_SIZE
+
       private
+
+      def core_instance?(value, type)
+        CORE_INSTANCE.bind_call(value, type)
+      end
+
+      def inherits_from?(value, type)
+        KIND_OF.bind_call(value, type)
+      end
+
+      def class_of(value)
+        CLASS_OF.bind_call(value)
+      end
+
+      def object_frozen?(value)
+        FROZEN.bind_call(value)
+      end
+
+      def each_array(value, &)
+        ARRAY_ELEMENTS.bind_call(value, &)
+      end
+
+      def array_first(value)
+        ARRAY_FIRST.bind_call(value)
+      end
+
+      def array_size(value)
+        ARRAY_SIZE.bind_call(value)
+      end
 
       # One sentence for every one of these checks, and one place that
       # knows lutaml's ValidationError carries exceptions rather than
@@ -105,9 +143,36 @@ module Claricle
         # proves nothing. Only a second element is evidence that a list
         # was passed, and only that loses data.
         raw = instance_variable_get(:"@#{name}")
-        return unless raw.is_a?(Array) && raw.length > 1
+        return unless inherits_from?(raw, ::Array)
+
+        refuse(name, "a core Array", class_of(raw)) unless core_instance?(raw, ::Array)
+        return unless array_size(raw) > 1
 
         refuse(name, "a single value", raw.inspect)
+      end
+
+      # Lutaml's generated getter consults a scalar enum's backing Array
+      # before `validate_types`. Own a core copy first so virtual `first`
+      # cannot show validation a different value from the one later
+      # frozen and rendered.
+      def own_enum_storage(name, attribute, raw)
+        return raw if attribute.collection? || !attribute.enum?
+        return raw if core_instance?(raw, ::NilClass) ||
+                      Lutaml::Model::Utils.uninitialized?(raw)
+
+        refuse(name, "a core Array", class_of(raw)) unless core_instance?(raw, ::Array)
+
+        copy = []
+        each_array(raw) { |value| copy << own_enum_value(name, attribute, value) }
+        object_frozen?(self) ? raw : copy
+      end
+
+      def own_enum_value(name, attribute, value)
+        return value if Lutaml::Model::Utils.uninitialized?(value)
+        return value unless attribute.type == Lutaml::Model::Type::String
+
+        refuse(name, "a String enum value", class_of(value)) unless inherits_from?(value, ::String)
+        ::String.new(value)
       end
 
       def validate_attribute(name, attribute, type)
@@ -298,7 +363,10 @@ module Claricle
       def clear_uninitialized
         self.class.attributes.each do |name, attribute|
           slot = :"@#{name}"
-          next unless Lutaml::Model::Utils.uninitialized?(stored_value(instance_variable_get(slot), attribute))
+          original = instance_variable_get(slot)
+          raw = own_enum_storage(name, attribute, original)
+          instance_variable_set(slot, raw) unless raw.equal?(original)
+          next unless Lutaml::Model::Utils.uninitialized?(stored_value(raw, attribute))
 
           instance_variable_set(slot, nil)
         end
@@ -320,9 +388,9 @@ module Claricle
       # the member on its own.
       def stored_value(raw, attribute)
         return raw if attribute.collection? || !attribute.enum?
-        return raw unless raw.is_a?(::Array) && raw.size == 1
+        return raw unless core_instance?(raw, ::Array) && array_size(raw) == 1
 
-        raw.first
+        array_first(raw)
       end
 
       # Refused, rather than supported. Ruby's default Marshal writes the
@@ -353,10 +421,7 @@ module Claricle
       end
 
       # Freeze declared attributes only, and freeze them where they lie.
-      # lutaml hands us its own copy of a String or a collection, so that
-      # cannot reach the caller. It does NOT copy what is nested inside a
-      # free-form Hash, so Inspection cannot seal `meta` this way and
-      # overrides it to copy the graph first -- see `Inspection#sealed_copy`.
+      # Inspection owns and freezes its free-form Hash before this pass.
       # Works on the backing storage, not the getters. An enum declared with
       # `values:` is stored as a mutable Array behind a String getter, so
       # freezing what the getter returns leaves that array writable and a
@@ -370,17 +435,25 @@ module Claricle
       def freeze_attributes
         self.class.attributes.each_key do |name|
           slot = :"@#{name}"
-          case (raw = instance_variable_get(slot))
-          when String then instance_variable_set(slot, own_string(raw))
-          when Array then instance_variable_set(slot, raw.map { |e| own_string(e) }.freeze)
+          raw = instance_variable_get(slot)
+          if inherits_from?(raw, ::String)
+            instance_variable_set(slot, own_string(raw))
+          elsif core_instance?(raw, ::Array)
+            instance_variable_set(slot, own_array(raw))
           end
         end
       end
 
-      def own_string(value)
-        return value unless value.is_a?(String)
+      def own_array(value)
+        copy = []
+        each_array(value) { |element| copy << own_string(element) }
+        copy.freeze
+      end
 
-        value.frozen? ? value : value.dup.freeze
+      def own_string(value)
+        return value unless inherits_from?(value, ::String)
+
+        ::String.new(value).freeze
       end
 
       def normalize; end

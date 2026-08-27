@@ -4,7 +4,7 @@ require "lutaml/model"
 
 module Claricle
   module Models
-    # A Hash attribute that stores exactly what it was given.
+    # A Hash attribute for a plain JSON data graph.
     #
     # lutaml-model's own `:hash` type is shaped for XML, and it treats
     # two key names as structure rather than data. Measured on 0.8.19:
@@ -20,14 +20,16 @@ module Claricle
     # legitimately carries `elements` or `text` as an attribute name, and
     # inspecting one crashed the CLI.
     #
-    # So this type does no normalisation in either direction. Every key
-    # and value goes in and comes back untouched. The container itself is
-    # a copy, so a handler that kept its reference cannot rewrite the
-    # container an inspection already reported. That copy is one level
-    # deep and stops there: everything nested inside it is still the
-    # handler's own object, which is why `Inspection` copies the whole
-    # graph again before sealing it.
+    # So this type does no key-name normalisation in either direction.
+    # It accepts only an exact core Hash at the outer boundary and copies
+    # that container without invoking virtual traversal. `Inspection`
+    # owns and validates the complete graph before sealing it.
     class FreeFormHash < Lutaml::Model::Type::Hash
+      CORE_INSTANCE = ::Object.instance_method(:instance_of?)
+      CLASS_OF = ::Object.instance_method(:class)
+      DUPLICATE = ::Object.instance_method(:dup)
+      private_constant :CORE_INSTANCE, :CLASS_OF, :DUPLICATE
+
       # lutaml's `hash_type?` compares the class EXACTLY, so a subclass
       # is not recognised as a hash and the value arrives wrapped in an
       # instance of this type rather than as a bare Hash.
@@ -35,19 +37,10 @@ module Claricle
         return super if Lutaml::Model::Utils.uninitialized?(value)
         return nil if value.nil?
 
-        value = value.value if value.is_a?(Lutaml::Model::Type::Value)
-        # `.dup`, because `Hash#to_h` returns SELF for a Hash. Without it
-        # the model shares the caller's object, and a handler holding a
-        # reference could mutate what an inspection already reported.
-        #
-        # Not frozen here, even though what Inspection ends up storing is:
-        # measured, lutaml runs this same cast on the way OUT, so a freeze
-        # here would also reach the `meta` inside a rendered document and
-        # take the container away from whoever asked for the Hash. This
-        # dup is what keeps that container writable; the values inside it
-        # are the inspection's own sealed ones, shared rather than copied
-        # because nothing can change them.
-        value.to_h.dup
+        value = value.value if CORE_INSTANCE.bind_call(value, self)
+        refuse(value) unless CORE_INSTANCE.bind_call(value, ::Hash)
+
+        copy(value)
       end
 
       # Measured on 0.8.19: the key_value pipeline never reaches this --
@@ -58,9 +51,20 @@ module Claricle
       def self.serialize(value)
         return nil if value.nil?
 
-        value = value.value if value.is_a?(Lutaml::Model::Type::Value)
-        value.to_h
+        cast(value)
       end
+
+      def self.copy(value)
+        DUPLICATE.bind_call(value)
+      end
+      private_class_method :copy
+
+      def self.refuse(value)
+        got = CLASS_OF.bind_call(value)
+        raise Lutaml::Model::ValidationError,
+              [TypeError.new("meta expects core JSON values under String keys, got #{got}")]
+      end
+      private_class_method :refuse
     end
 
     # A workaround for one measured lutaml-model behaviour, not a type a

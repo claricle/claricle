@@ -193,7 +193,7 @@ module Claricle
 
     class << self
       def detect(bytes)
-        content = bytes.b
+        content = ::String.new(bytes).force_encoding(Encoding::BINARY)
         classify(content[0, HEADER_BYTES]) { StringIO.new(content) }
       end
 

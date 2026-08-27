@@ -306,6 +306,14 @@ RSpec.describe "Claricle format detection" do
       content = "\x89PNG\r\n\x1A\n".dup.force_encoding("UTF-8")
       expect(Claricle.detect(content)).to eq(:png)
     end
+
+    it "detects an exact String's bytes instead of its singleton b view" do
+      content = fixture.call("valid.png")
+      content.define_singleton_method(:b) { "not a PNG".b }
+      content.freeze
+
+      expect(Claricle.detect(content)).to eq(:png)
+    end
   end
 
   # Character references and XML's predefined entities are resolved (see

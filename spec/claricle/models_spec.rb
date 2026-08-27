@@ -295,18 +295,15 @@ RSpec.describe Claricle::Models do
           .to raise_error(TypeError, /Claricle models are not marshalable/)
       end
 
-      # The one place a model can reach Marshal without a caller naming
-      # it: `meta` holds whatever a handler attached, and `meta` is
-      # public. Dumped through the Inspection this passes on the OUTER
-      # refusal and says nothing about the Issue inside, so it goes
-      # through the Hash the reader hands back and names the class the
-      # refusal has to come from.
-      it "refuses a model a caller reaches through meta" do
-        held = models::Inspection.new(format: "svg", parse_status: "ok",
-                                      meta: { "held" => issue.call("info") })
-
-        expect { Marshal.dump(held.meta) }
-          .to raise_error(TypeError, /cannot marshal Claricle::Models::Issue/)
+      # Metadata is a JSON data boundary, so a model cannot get as far as
+      # Marshal through it. The plain-container example above remains the
+      # regression for the inherited Marshal hook itself.
+      it "refuses a model nested inside meta" do
+        expect do
+          models::Inspection.new(format: "svg", parse_status: "ok",
+                                 meta: { "held" => issue.call("info") })
+        end.to raise_error(Lutaml::Model::ValidationError,
+                           /meta expects core JSON values under String keys/)
       end
 
       # Ruby prefers `marshal_dump` over `_dump` where both exist, so a
@@ -592,6 +589,13 @@ RSpec.describe Claricle::Models do
         .not_to raise_error
     end
 
+    it "can finalize a sealed Inspection again" do
+      inspection = models::Inspection.new(parse_status: "ok", meta: { "a" => 1 })
+
+      expect(inspection.finalize).to equal(inspection)
+      expect(inspection.meta).to eq({ "a" => 1 })
+    end
+
     # `new` copies a String attribute but from_hash aliases the caller's.
     it "does not freeze a string handed in through from_hash" do
       severity = +"info"
@@ -599,6 +603,25 @@ RSpec.describe Claricle::Models do
       expect { severity << "x" }.not_to raise_error
       expect(loaded.severity).not_to equal(severity)
       expect(loaded.severity).to be_frozen
+    end
+
+    # lutaml keeps a String subclass inside a scalar enum's backing Array.
+    # Trusting its virtual `frozen?`/`dup` left it shared and mutable
+    # inside a frozen model. Ownership normalizes it to a core String.
+    it "owns a core copy of a lying enum String subclass" do
+      liar = Class.new(String) do
+        def dup = self
+        def frozen? = true
+      end
+      supplied = liar.new("info")
+      built = models::Issue.new(message: "m") { |i| i.severity = supplied }
+      before = built.to_json
+
+      supplied.replace("error")
+
+      expect(built.severity).to be_an_instance_of(String)
+      expect(built.severity).to eq("info")
+      expect(built.to_json).to eq(before)
     end
 
     it "applies the same freeze after a round trip" do
@@ -1051,9 +1074,8 @@ RSpec.describe Claricle::Models do
     # ivar, so both doors end on one bare frozen Hash and the second
     # object is gone rather than guarded.
     #
-    # `be_an_instance_of`, not `be_a`: FreeFormHash is a Hash subclass, so
-    # `be_a` would pass on the very wrapper this says is no longer
-    # there.
+    # `be_an_instance_of`, not `be_a`: FreeFormHash is a lutaml value
+    # wrapper, and this pins that neither it nor another wrapper remains.
     it "leaves one bare sealed hash in the ivar, whichever door built it" do
       built = described_class.const_get(:Inspection)
                              .new(format: "svg", parse_status: "ok", meta: { "a" => 1 })
@@ -1108,31 +1130,21 @@ RSpec.describe Claricle::Models do
         .to raise_error(Lutaml::Model::ValidationError, /meta expects values JSON can render/)
     end
 
-    # It refuses what JSON refuses and nothing more, which is why it asks
-    # JSON instead of listing rules. Every one of these tempts a
-    # hand-written check into a wrong answer: `"\xFF".b` is valid
-    # ASCII-8BIT and still unwritable while Latin-1 and UTF-16 are both
-    # fine; the same container held twice side by side is not a cycle;
-    # and an Infinity used as a KEY renders happily as "Infinity" even
-    # though the same value refuses to render as a value.
-    it "still stores everything JSON can write" do
+    # The boundary is the data model JSON actually has, rather than every
+    # Ruby object json happens to stringify. All scalar kinds and both
+    # container kinds remain representable, including repeated references.
+    it "stores every core JSON value" do
       shared = { "n" => 1.0 }
-      kept = models::Inspection.new(
-        parse_status: "ok",
-        meta: { "s" => :sym, "r" => (1..5), "ascii" => "plain".b,
-                "latin" => (+"caf\xE9").force_encoding(Encoding::ISO_8859_1),
-                "wide" => "x".encode(Encoding::UTF_16),
-                Float::INFINITY => "as a key", "a" => shared, "b" => shared }
-      )
+      meta = {
+        "integer" => 1, "float" => 1.5, "string" => "plain".b,
+        "true" => true, "false" => false, "nil" => nil,
+        "array" => [1, "two", false], "hash" => { "nested" => 3 },
+        "a" => shared, "b" => shared
+      }
+      kept = models::Inspection.new(parse_status: "ok", meta: meta)
 
-      expect(kept.meta["s"]).to eq(:sym)
-      expect(kept.meta["r"]).to eq(1..5)
-      # The Infinity key by lookup, not just by the model constructing:
-      # stringifying every key on the way in would otherwise pass here
-      # while quietly breaking the verbatim contract.
-      expect(kept.meta[Float::INFINITY]).to eq("as a key")
-      expect(kept.meta.keys).to include(Float::INFINITY)
-      expect { kept.to_json }.not_to raise_error
+      expect(kept.meta).to eq(meta)
+      expect(models::Inspection.from_json(kept.to_json).meta).to eq(meta)
     end
 
     # The whole point of rendering rather than listing rules: a handler
@@ -1151,6 +1163,17 @@ RSpec.describe Claricle::Models do
         .to raise_error(Lutaml::Model::ValidationError, /meta expects values JSON can render/)
     end
 
+    # Once the graph is already beyond JSON's nesting limit, canonical
+    # copying must stop before traversing and allocating an arbitrarily
+    # large tail that the document is guaranteed to reject.
+    it "stops canonical copying at the JSON depth boundary" do
+      tail = { "unreached" => Object.new }
+      too_deep = (1..100).reduce(tail) { |inner, _| { "n" => inner } }
+
+      expect { models::Inspection.new(parse_status: "ok", meta: too_deep) }
+        .to raise_error(Lutaml::Model::ValidationError, /meta expects values JSON can render/)
+    end
+
     it "still writes meta at the deepest level the document can carry" do
       deepest = models::Inspection.new(parse_status: "ok", meta: nest[99])
 
@@ -1158,24 +1181,70 @@ RSpec.describe Claricle::Models do
       expect(models::Inspection.from_json(deepest.to_json).meta).to eq(nest[99])
     end
 
-    # JSON never descends into a Hash key -- it renders one through
-    # `to_s` -- so neither its depth limit nor its cycle detection ever
-    # sees a key graph, and `refuse_unrenderable` cannot bound one.
-    # Sealing used to walk keys anyway, so a meta that JSON writes
-    # perfectly well took `Inspection.new` down with SystemStackError:
-    # the model refused, by crashing, a document it had just proved it
-    # could render.
-    {
-      "leads back to itself" => [].tap { |a| a << a },
-      "nests 5,000 deep" => (1..5_000).reduce([]) { |inner, _| [inner] }
-    }.each do |label, key|
-      it "seals a meta whose key #{label}, which JSON renders fine" do
-        expect(JSON.generate({ "meta" => { key => 1 } })).to be_a(String)
-
-        inspection = models::Inspection.new(parse_status: "ok", meta: { key => 1 })
-
-        expect { inspection.to_json }.not_to raise_error
+    # JSON stringifies non-String keys, which makes later mutation change
+    # the document and lets distinct Ruby keys collapse to one JSON name.
+    # The model boundary is explicit instead: metadata keys are Strings.
+    { "a Symbol" => :key, "an Integer" => 1, "an Array" => ["key"] }.each do |label, key|
+      it "refuses #{label} as a meta key" do
+        expect { models::Inspection.new(parse_status: "ok", meta: { key => 1 }) }
+          .to raise_error(Lutaml::Model::ValidationError,
+                          /meta expects core JSON values under String keys/)
       end
+    end
+
+    # Exact String keys can still carry singleton equality semantics that
+    # let the source Hash keep two names which collapse after canonical
+    # String copies strip that behavior. Refuse instead of losing an entry.
+    it "refuses String keys that collapse during canonical copying" do
+      first = String.new("same")
+      second = String.new("same")
+      first.define_singleton_method(:hash) { 1 }
+      second.define_singleton_method(:hash) { 2 }
+      first.define_singleton_method(:eql?) { |_other| false }
+      second.define_singleton_method(:eql?) { |_other| false }
+      first.freeze
+      second.freeze
+      supplied = { first => 1, second => 2 }
+
+      expect(supplied.size).to eq(2)
+      expect { models::Inspection.new(parse_status: "ok", meta: supplied) }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /meta expects core JSON values under String keys/)
+    end
+
+    it "refuses differently encoded keys that collapse to one JSON name" do
+      supplied = {
+        "same".encode(Encoding::UTF_8) => 1,
+        "same".encode(Encoding::UTF_16) => 2
+      }
+
+      expect(supplied.size).to eq(2)
+      expect { models::Inspection.new(parse_status: "ok", meta: supplied) }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /meta expects core JSON values under String keys/)
+    end
+
+    it "does not invoke virtual key equality while copying the outer Hash" do
+      calls = {}.compare_by_identity
+      first = String.new("same")
+      second = String.new("same")
+      [first, second].each do |key|
+        key.define_singleton_method(:hash) { 1 }
+        key.define_singleton_method(:eql?) do |_other|
+          calls[self] = calls.fetch(self, 0) + 1
+          raise "virtual equality called again" if calls.fetch(self) > 1
+
+          false
+        end
+      end
+      first.freeze
+      second.freeze
+      supplied = { first => 1, second => 2 }
+
+      expect(supplied.size).to eq(2)
+      expect { models::Inspection.new(parse_status: "ok", meta: supplied) }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /meta expects core JSON values under String keys/)
     end
 
     # The other half of that: bounding the keys must not have loosened
@@ -1188,86 +1257,134 @@ RSpec.describe Claricle::Models do
         .to raise_error(Lutaml::Model::ValidationError, /meta expects values JSON can render/)
     end
 
-    # A Hash comparing by identity keeps keys that are `==` but not the
-    # same object. Rebuilt as an ordinary Hash they merge, and measured,
-    # a handler's two-entry meta sealed as one -- an entry gone with
-    # nothing raised.
-    it "keeps every entry of a meta that compares its keys by identity" do
+    # JSON object names compare by value, so an identity Hash can hold
+    # duplicate names that collapse on a round trip. It is outside the
+    # plain metadata grammar rather than a special Ruby-only exception.
+    it "refuses a meta Hash that compares its keys by identity" do
       supplied = {}.compare_by_identity
       supplied[+"a"] = 1
       supplied[+"a"] = 2
 
-      sealed = models::Inspection.new(parse_status: "ok", meta: supplied).meta
-
-      expect(sealed.size).to eq(2)
-      expect(sealed.values).to contain_exactly(1, 2)
-      expect(sealed).to be_compare_by_identity
+      expect { models::Inspection.new(parse_status: "ok", meta: supplied) }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /meta expects core JSON values under String keys/)
     end
 
-    # meta holds whatever a handler put there, so the copy must not ask
-    # that object how to traverse itself. Measured on an Array whose
-    # `map` returns `self`: the caller's own Array came back frozen AND
-    # still shared, so its mutable String went on changing a sealed
-    # Inspection's JSON -- one override defeating both halves of the
-    # copy.
-    it "copies a metadata container that lies about how to traverse it" do
-      sneaky = Class.new(Array) do
-        def map(&) = self
-        def each(&) = ["substituted"].each(&)
+    # The root check has to precede FreeFormHash.cast: otherwise virtual
+    # `to_h` launders a Hash subclass into an innocent-looking core Hash.
+    it "refuses a lying Hash subclass at the top-level boundary" do
+      liar = Class.new(Hash) do
+        def to_h = { "lie" => 1 }
       end
-      leaf = +"real"
-      supplied = sneaky.new([leaf])
+      supplied = liar.new
+      supplied["real"] = 2
 
-      inspection = models::Inspection.new(parse_status: "ok", meta: { "k" => supplied })
-      before = inspection.to_json
-      leaf << "!"
-
-      expect(supplied).not_to be_frozen
-      expect(inspection.meta["k"]).to be_an_instance_of(Array)
-      expect(inspection.meta["k"]).to eq(["real"])
-      expect(inspection.to_json).to eq(before)
-    end
-
-    # The same for a String, which can lie about being frozen as easily
-    # as an Array can lie about `map`. Asking `frozen?` is why the copy
-    # is unconditional.
-    it "copies a metadata string that lies about being frozen" do
-      sneaky = Class.new(String) do
-        def dup = self
-        def frozen? = true
+      [
+        -> { models::Inspection.new(parse_status: "ok", meta: supplied) },
+        -> { models::Inspection.from_hash({ "parse_status" => "ok", "meta" => supplied }) }
+      ].each do |door|
+        expect { door.call }
+          .to raise_error(Lutaml::Model::ValidationError,
+                          /meta expects core JSON values under String keys/)
       end
-      supplied = sneaky.new("real")
-
-      inspection = models::Inspection.new(parse_status: "ok", meta: { "s" => supplied })
-      before = inspection.to_json
-      supplied.replace("substituted")
-
-      expect(inspection.meta["s"]).to be_an_instance_of(String)
-      expect(inspection.to_json).to eq(before)
     end
 
-    # What carrying keys across gives up, pinned so it is a decision
-    # rather than a gap. JSON reduces every non-String key to text
-    # through `to_s`, which is exactly the case the copy already leaves
-    # to the handler for a value -- so a container key and an arbitrary
-    # object key behave the same, and neither is pinned. A String key
-    # needs no help: Ruby froze and copied it on insert.
-    it "leaves a non-String meta key to the handler, whatever shape it is" do
-      container = [+"a"]
-      object = Object.new
-      object.instance_variable_set(:@shown, +"one")
-      def object.to_s = @shown
-      text = +"key"
+    # Only FreeFormHash is Lutaml's internal wrapper for this attribute.
+    # An unrelated value wrapper must not launder its virtual `value`
+    # through the exact-Hash outer boundary.
+    it "refuses an unrelated lutaml value wrapper at the top level" do
+      liar = Class.new(Lutaml::Model::Type::Value) do
+        def value = { "laundered" => true }
+      end.new("ignored")
 
-      inspection = models::Inspection.new(parse_status: "ok",
-                                          meta: { container => 1, object => 2, text => 3 })
-      container << "b"
-      object.instance_variable_set(:@shown, "two")
-      text << "!"
+      expect { models::Inspection.new(parse_status: "ok", meta: liar) }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /meta expects core JSON values under String keys/)
+    end
 
-      rendered = JSON.parse(inspection.to_json)["meta"]
+    # Nested subclasses must be refused before JSON can ask their virtual
+    # `to_json` for a different graph from the one sealing would copy.
+    it "refuses Hash, Array and String subclasses nested in meta" do
+      hash = Class.new(Hash) do
+        def to_json(*) = "{}"
+      end.new
+      hash["hidden"] = Float::INFINITY
+      array = Class.new(Array).new([1])
+      string = Class.new(String).new("text")
 
-      expect(rendered.keys).to contain_exactly("[\"a\", \"b\"]", "two", "key")
+      [hash, array, string].each do |value|
+        expect { models::Inspection.new(parse_status: "ok", meta: { "value" => value }) }
+          .to raise_error(Lutaml::Model::ValidationError,
+                          /meta expects core JSON values under String keys/)
+      end
+    end
+
+    # Sixth hostile variant: it lies about both introspection methods a
+    # conventional exact-class guard might call. Bound Object semantics
+    # still see the Array subclass and refuse it.
+    it "refuses a subclass that impersonates a core class" do
+      liar = Class.new(Array) do
+        def class = Array
+        def instance_of?(_type) = true
+        def is_a?(_type) = true
+      end.new([1])
+
+      expect { models::Inspection.new(parse_status: "ok", meta: { "value" => liar }) }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /meta expects core JSON values under String keys/)
+    end
+
+    # Exact core objects can still carry singleton traversal methods.
+    # Canonicalization reads their actual core contents rather than those
+    # virtual views.
+    it "copies an exact Array through core traversal" do
+      supplied = [+"real"]
+      def supplied.each(&) = ["substituted"].each(&)
+      def supplied.map(&) = self
+
+      inspection = models::Inspection.new(parse_status: "ok", meta: { "value" => supplied })
+
+      expect(inspection.meta["value"]).to eq(["real"])
+      expect(inspection.meta["value"]).to be_an_instance_of(Array)
+    end
+
+    it "copies exact Hash and String values through core ownership" do
+      text = +"real"
+      def text.dup = self
+      def text.frozen? = true
+      nested = { "text" => text }
+      def nested.dup = { "lie" => true }
+      supplied = { "nested" => nested }
+      def supplied.dup = { "lie" => true }
+
+      inspection = models::Inspection.new(parse_status: "ok", meta: supplied)
+      text.replace("changed")
+
+      expect(inspection.meta).to eq({ "nested" => { "text" => "real" } })
+      expect(inspection.meta["nested"]).to be_an_instance_of(Hash)
+      expect(inspection.meta["nested"]["text"]).to be_an_instance_of(String)
+    end
+
+    # The canonical copy, not a virtual to_json view of the caller's
+    # exact Hash, is what renderability validates.
+    it "refuses hidden unrenderable data in an exact Hash" do
+      supplied = { "hidden" => Float::INFINITY }
+      def supplied.to_json(*) = "{}"
+
+      expect { models::Inspection.new(parse_status: "ok", meta: { "value" => supplied }) }
+        .to raise_error(Lutaml::Model::ValidationError, /meta expects values JSON can render/)
+    end
+
+    {
+      "a Symbol" => :symbol,
+      "a Range" => (1..3),
+      "an arbitrary object" => Object.new
+    }.each do |label, value|
+      it "refuses #{label} as a meta value" do
+        expect { models::Inspection.new(parse_status: "ok", meta: { "value" => value }) }
+          .to raise_error(Lutaml::Model::ValidationError,
+                          /meta expects core JSON values under String keys/)
+      end
     end
 
     # lutaml generates `meta(*args)` and the block form of `new` uses the
@@ -1325,6 +1442,66 @@ RSpec.describe Claricle::Models do
       expect(wrapped.severity).to eq("error")
       expect { described_class.const_get(:Issue).from_json(%({"severity":["error"],"message":"m"})) }
         .to raise_error(Lutaml::Model::CollectionTrueMissingError)
+    end
+
+    # clear_uninitialized and lutaml's getter both used virtual `first`.
+    # A subclass could report a legal value while actually storing the
+    # unset sentinel, then render a required enum as absent.
+    it "refuses an Array subclass backing a scalar enum" do
+      unset = Lutaml::Model::UninitializedClass.instance
+      liar = Class.new(Array) do
+        def first = "error"
+      end.new([unset])
+
+      expect { models::Issue.new(message: "m") { |i| i.severity = liar } }
+        .to raise_error(Lutaml::Model::ValidationError, /severity expects a core Array/)
+    end
+
+    # Lutaml's getter asks the backing object whether it is an Array.
+    # A proxy can answer yes even though bound Object semantics say no,
+    # then keep changing the value a frozen model reports.
+    it "refuses a non-Array object impersonating scalar enum storage" do
+      liar = Class.new do
+        attr_accessor :shown
+
+        def is_a?(type) = type == Array || super
+        def first = shown
+      end.new
+      liar.shown = "info"
+
+      expect { models::Issue.new(message: "m") { |i| i.severity = liar } }
+        .to raise_error(Lutaml::Model::ValidationError, /severity expects a core Array/)
+    end
+
+    # Array#each with no block returns an Enumerator that dispatches back
+    # through a singleton `each`. Copying with a bound block must observe
+    # the actual unset sentinel instead of the virtual legal value.
+    it "copies exact scalar enum storage through core traversal" do
+      unset = Lutaml::Model::UninitializedClass.instance
+      liar = [unset]
+      def liar.each(&) = ["error"].each(&)
+
+      expect { models::Issue.new(message: "m") { |i| i.severity = liar } }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /Missing required attribute: severity/)
+    end
+
+    # The outer storage can be a core Array while its element is a proxy
+    # that compares and stringifies as a legal enum value, then changes
+    # what the frozen model renders later.
+    it "refuses a non-String object impersonating a scalar enum value" do
+      liar = Class.new do
+        attr_accessor :shown
+
+        def ==(_other) = true
+        def to_s = shown
+        def to_str = shown
+      end.new
+      liar.shown = "info"
+
+      expect { models::Issue.new(message: "m") { |i| i.severity = [liar] } }
+        .to raise_error(Lutaml::Model::ValidationError,
+                        /severity expects a String enum value/)
     end
   end
 
