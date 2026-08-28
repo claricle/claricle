@@ -12,7 +12,8 @@ module Claricle
     # DECLARED page count. Dimensions are deliberately absent: reaching
     # the first page's box safely needs a cycle-guarded page-tree walk in
     # both directions, per-element dereferencing and corner
-    # normalisation, none of which pdfrb 0.7.23 offers -- measured,
+    # normalisation, none of which pdfrb offers -- measured on 0.7.23 and
+    # re-verified on 0.7.49, which is what resolves here,
     # `page.media_box` hangs forever on a self-referential `/Parent`, and
     # `[0 0]` reads back as a 0x0 page invented whole.
     class Pdf < Base
@@ -53,10 +54,16 @@ module Claricle
       # would not open, the structure would not resolve, and the clock
       # ran out. Collapsing them reported "PDF structure could not be
       # read" for files whose structure was never reached.
+      # All FOUR, so a reader scanning this sees every failure mode. The
+      # timeout message interpolates `DEADLINE_SECONDS`, which is defined
+      # above, so the number can never drift from the value that produced
+      # it -- and there is only ever one deadline, so building the string
+      # per call bought nothing but a method and a branch.
       MESSAGES = {
         HEADER_CODE => "PDF header is not a valid version declaration",
         OPEN_CODE => "PDF could not be opened",
-        STRUCTURE_CODE => "PDF structure could not be read"
+        STRUCTURE_CODE => "PDF structure could not be read",
+        TIMEOUT_CODE => "PDF could not be read within #{DEADLINE_SECONDS} seconds"
       }.freeze
 
       private_constant :HEADER_SCAN_BYTES, :DEADLINE_SECONDS, :HEADER_CODE,
@@ -159,7 +166,7 @@ module Claricle
       # never an ivar: `image.rb:231` builds a handler per call precisely
       # so it holds no per-call state, and the outer rescue has to tell
       # an expiry BEFORE the structure gate from one after it.
-      Progress = Struct.new(:version, :node, :raw, :code)
+      Progress = Struct.new(:version, :node, :page_count, :code)
       private_constant :Progress
 
       # One deadline over the whole operation, never one per stage: five
@@ -199,9 +206,15 @@ module Claricle
         progress = Progress.new
         require "pdfrb"
         begin
-          Timeout.timeout(DEADLINE_SECONDS) { read(image, progress) }
+          Timeout.timeout(DEADLINE_SECONDS) { run_stages(image, progress) }
         rescue Timeout::Error
-          progress.code = TIMEOUT_CODE unless progress.node
+          # `||=`, because a code already set names a cause the run
+          # actually reached. A structure gate that refused sets
+          # STRUCTURE_CODE with the node still nil, and a deadline
+          # expiring during the unwind after it would otherwise relabel
+          # that refusal `pdf.timeout` -- one code per cause, reporting
+          # the wrong one.
+          progress.code ||= TIMEOUT_CODE unless progress.node
         end
         return failure(image, progress.code) if progress.code
 
@@ -215,7 +228,7 @@ module Claricle
       # content-born image, to write the tempfile pdfrb needs, and that
       # returns the string the image already retains rather than making a
       # second copy. A path-born inspection materialises nothing.
-      def read(image, progress)
+      def run_stages(image, progress)
         image.with_path do |path|
           progress.version = VersionGate.version(path)
           next progress.code = HEADER_CODE unless progress.version
@@ -240,11 +253,29 @@ module Claricle
           progress.node = guarded { structure_gate(document) }
           next progress.code = STRUCTURE_CODE unless progress.node
 
-          progress.raw = guarded { count_read(document, progress.node) }
+          progress.page_count = guarded { count_read(document, progress.node) }
         end
-      rescue ::Pdfrb::Error, NoMethodError, TypeError, RangeError,
-             ArgumentError, SystemStackError, Errno::EINVAL
+      rescue *parse_failures, Errno::EINVAL
         progress.code = OPEN_CODE
+      end
+
+      # One list, named once, because it is one policy. NOT a hoisted
+      # constant: `::Pdfrb::Error` cannot be resolved at class-definition
+      # time while the require is lazy -- measured, a
+      # `PARSE_FAILURES = [::Pdfrb::Error, ...]` constant makes
+      # `require "claricle"` itself die with
+      # `uninitialized constant Pdfrb (NameError)`. The sibling
+      # `metafile.rb:239` can hold its equivalent as a constant only
+      # because `metafile.rb:3` requires `emf` at the top of the file.
+      # A method defers the lookup to call time, when pdfrb is loaded.
+      #
+      # `Errno::EINVAL` is deliberately NOT in the list. It is reachable
+      # only from a negative `/Prev` consumed during `open`, so it
+      # belongs to that rescue alone; adding it to `guarded` would widen
+      # the gates for a class they cannot see.
+      def parse_failures
+        [::Pdfrb::Error, NoMethodError, TypeError, RangeError,
+         ArgumentError, SystemStackError]
       end
 
       # Returns nil when the DELEGATE could not read what was asked for.
@@ -265,8 +296,7 @@ module Claricle
       # distinguishes the two. Crashing on a corrupt PDF is worse.
       def guarded
         yield
-      rescue ::Pdfrb::Error, NoMethodError, TypeError, RangeError,
-             ArgumentError, SystemStackError
+      rescue *parse_failures
         nil
       end
 
@@ -322,15 +352,7 @@ module Claricle
       end
 
       def failure(image, code)
-        failed_inspection(image, code: code, message: message_for(code))
-      end
-
-      # Built rather than looked up, so the number in the message is the
-      # deadline that actually expired.
-      def message_for(code)
-        return MESSAGES.fetch(code) unless code == TIMEOUT_CODE
-
-        "PDF could not be read within #{DEADLINE_SECONDS} seconds"
+        failed_inspection(image, code: code, message: MESSAGES.fetch(code))
       end
 
       # `width`, `height`, `dpi` and `color_space` stay nil, and a nil
@@ -341,12 +363,13 @@ module Claricle
         )
       end
 
-      # `raw` is only ever a non-negative Integer or nil here, and zero is
-      # truthy in Ruby, so a document declaring `/Count 0` still reports
-      # its zero rather than dropping the key.
+      # `count_read` has already validated it down to a non-negative
+      # Integer or nil, so this is a page count and not a raw value. Zero
+      # is truthy in Ruby, so a document declaring `/Count 0` reports its
+      # zero rather than dropping the key.
       def metadata(progress)
         meta = { "version" => progress.version }
-        meta["pages"] = progress.raw if progress.raw
+        meta["pages"] = progress.page_count if progress.page_count
         meta
       end
     end
