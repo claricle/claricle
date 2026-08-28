@@ -25,10 +25,15 @@ module PdfObjstmBuilder
   OBJSTM_OID = 4
   XREF_OID = 5
 
+  # PDF 1.5 is the floor for object and xref streams and no fixture has a
+  # reason to move off it, so it is fixed rather than a knob. Every key
+  # below IS overridden by some example; a parameter nothing drives is a
+  # claim about flexibility nothing checks.
+  HEADER = "%PDF-1.5\n"
+
   DEFAULTS = {
-    header: "%PDF-1.5\n",
     bodies: [PdfBuilder::CATALOG, PdfBuilder::PAGES, PdfBuilder::PAGE],
-    stream_dict: nil, stream_data: nil, omit_stream: false,
+    stream_dict: nil, omit_stream: false,
     entries: {}, widths: [1, 4, 2], root: "1 0 R", xref_extra: "", xref_data: nil
   }.freeze
 
@@ -37,9 +42,9 @@ module PdfObjstmBuilder
   def document(**parts)
     part = DEFAULTS.merge(parts)
     stream = objstm(part)
-    objstm_at = part[:header].bytesize
+    objstm_at = HEADER.bytesize
     xref_at = objstm_at + stream.bytesize
-    "#{part[:header]}#{stream}#{xref(part, objstm_at, xref_at)}" \
+    "#{HEADER}#{stream}#{xref(part, objstm_at, xref_at)}" \
     "startxref\n#{xref_at}\n%%EOF\n".b
   end
 
@@ -54,7 +59,7 @@ module PdfObjstmBuilder
     return "" if part[:omit_stream]
 
     pairs, values = payload(part[:bodies])
-    data = part[:stream_data] || Zlib::Deflate.deflate("#{pairs}#{values}")
+    data = Zlib::Deflate.deflate("#{pairs}#{values}")
     dict = (part[:stream_dict] || default_dict(part[:bodies].size, pairs.bytesize))
            .sub("LENGTH", data.bytesize.to_s)
     "#{OBJSTM_OID} 0 obj\n#{dict}\nstream\n#{data}\nendstream\nendobj\n"
