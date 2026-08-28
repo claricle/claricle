@@ -68,9 +68,10 @@ The name reflects what the library is for:
   nothing walks the page tree to check it, so a document declaring
   `/Count 999` over one page reports 999. Dimensions are deliberately
   not reported: reaching the first page's box safely needs cycle-guarded
-  page-tree walking the parser does not offer. A count that is missing,
-  negative or not a whole number is omitted and the file still inspects
-  as `ok`
+  page-tree walking the parser does not offer. The count is omitted
+  whenever it cannot be read as a non-negative whole number -- including
+  when the reference holding it is refused, and when the deadline
+  expires before it is read -- and the file still inspects as `ok`
 * `formats`, listing each format and what Claricle can do with it
 * `Claricle::Image`, built from a path or from bytes
 * A unified issue and report model, serialising to and from JSON
