@@ -69,11 +69,17 @@ module PdfObjstmBuilder
   # first time ANY compressed object is resolved, so a malformed value
   # anywhere in here poisons the Catalog resolve whatever index it sits
   # at.
+  # Values are SEPARATED by a space, never terminated by one. The
+  # difference decides a fixture: pdfrb's escape reader tests
+  # `esc >= 0` on whatever `advance_byte` returned, and that is nil only
+  # when the backslash is the buffer's LAST byte -- measured, a trailing
+  # space after it turns a `NoMethodError` into a `Pdfrb::LexError`.
   def payload(bodies)
     values = +""
     pairs = bodies.each_with_index.map do |body, index|
+      values << " " unless values.empty?
       offset = values.bytesize
-      values << "#{body} "
+      values << body
       "#{index + 1} #{offset}"
     end
     ["#{pairs.join(" ")} ", values]
@@ -81,7 +87,8 @@ module PdfObjstmBuilder
 
   def xref(part, objstm_at, xref_at)
     data = part[:xref_data] || Zlib::Deflate.deflate(rows(part, objstm_at, xref_at))
-    dict = "<< /Type /XRef /Size #{XREF_OID + 1} /W [#{part[:widths].join(" ")}] " \
+    size = ([XREF_OID] + part[:entries].keys).max + 1
+    dict = "<< /Type /XRef /Size #{size} /W [#{part[:widths].join(" ")}] " \
            "/Root #{part[:root]} /Filter /FlateDecode " \
            "/Length #{data.bytesize}#{part[:xref_extra]} >>"
     "#{XREF_OID} 0 obj\n#{dict}\nstream\n#{data}\nendstream\nendobj\n"
