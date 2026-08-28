@@ -81,9 +81,15 @@ module PdfBuilder
     "xref\n0 #{objects.size + 1}\n0000000000 65535 f \n#{rows.join}"
   end
 
-  # A fresh path per call. pdfrb's typed subscript mutates a node in
-  # place, permanently, so two examples sharing one file would leave the
-  # second reading a node the first already spoiled.
+  # A fresh path per call, so one example can never see another's file.
+  #
+  # NOT because a typed read would spoil the bytes for the next reader:
+  # measured, pdfrb's typed subscript mutates the in-memory Document
+  # only, the file on disk is byte-identical afterwards, and a fresh
+  # `Document.open` re-reads the raw `5.0`. Sharing one path would still
+  # couple examples through mtime, cleanup order and debuggability, and
+  # a fixture named after the case that built it is worth more when a
+  # failure has to be traced.
   def write(bytes, name: "fixture")
     path = File.join(directory, "#{name}-#{@seq = @seq.to_i + 1}.pdf")
     File.binwrite(path, bytes)

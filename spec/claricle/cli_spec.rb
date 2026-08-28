@@ -384,9 +384,10 @@ RSpec.describe Claricle::Cli::Runner do
 
     # And a PDF, for the same reason -- the handler specs pass :pdf
     # explicitly, so nothing else drives the detector's bare `%PDF-`
-    # signature through to a rendered row. Generated into a Tempfile
-    # rather than committed, like the SVG cases below: no PDF byte is
-    # checked into this repo.
+    # signature through to a rendered row. Generated into the builder's
+    # own temporary directory rather than committed -- the same reason
+    # the SVG cases below use a Tempfile: no PDF byte is checked into
+    # this repo.
     it "inspects a PDF through the real detector" do
       pdf = PdfBuilder.path(name: "cli")
 

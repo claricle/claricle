@@ -322,8 +322,16 @@ module Claricle
       # a known cost, not a closed hole. The `&.` on every value the
       # resolver may refuse does NOT move that handling outside this
       # region -- it is inside it. What it does is stop those values
-      # raising here at all, so the classes below stay reachable only
-      # from the delegate.
+      # raising here at all, which NARROWS the region without closing it.
+      #
+      # Stated in that direction because the stronger claim is false.
+      # `typed` ends in `object&.value&.[](:Type)`, and an indirect
+      # `/Root` resolving to a scalar makes that `7.[](:Type)` --
+      # measured, a `TypeError` raised by THIS handler and swallowed
+      # here. The reported outcome is still right (`structure_unreadable`
+      # either way), so this is left as a stated cost rather than closed
+      # with a shape check: that check would add a branch no observable
+      # behaviour could ever distinguish.
       #
       # `NoMethodError` on the list is the real cost. Everywhere else it
       # signals a broken delegate; here pdfrb raises it for ordinary
