@@ -2,6 +2,8 @@
 
 require "English"
 
+require_relative "../support/pdf_builder"
+
 RSpec.describe "Claricle::Registry" do
   registry = Claricle.const_get(:Registry)
   base = Claricle.const_get(:Handlers).const_get(:Base)
@@ -21,12 +23,13 @@ RSpec.describe "Claricle::Registry" do
       handlers = Claricle.const_get(:Handlers)
 
       expect(registry.const_get(:HANDLER_CLASSES))
-        .to eq([handlers.const_get(:Metafile), handlers.const_get(:Png),
-                handlers.const_get(:Postscript), handlers.const_get(:Svg)])
+        .to eq([handlers.const_get(:Metafile), handlers.const_get(:Pdf),
+                handlers.const_get(:Png), handlers.const_get(:Postscript),
+                handlers.const_get(:Svg)])
     end
 
     it "exposes exactly the formats those handlers declare" do
-      expect(registry.formats).to eq(%i[emf eps png ps svg])
+      expect(registry.formats).to eq(%i[emf eps pdf png ps svg])
     end
 
     # Ownership, not membership: a format list alone would pass a handler
@@ -36,6 +39,7 @@ RSpec.describe "Claricle::Registry" do
 
       expect(registry.handler_for(:emf)).to be(handlers.const_get(:Metafile))
       expect(registry.handler_for(:eps)).to be(handlers.const_get(:Postscript))
+      expect(registry.handler_for(:pdf)).to be(handlers.const_get(:Pdf))
       expect(registry.handler_for(:png)).to be(handlers.const_get(:Png))
       expect(registry.handler_for(:ps)).to be(handlers.const_get(:Postscript))
       expect(registry.handler_for(:svg)).to be(handlers.const_get(:Svg))
@@ -45,6 +49,7 @@ RSpec.describe "Claricle::Registry" do
     it "reports only the capabilities each handler has implemented" do
       expect(registry.capabilities_for(:emf)).to eq([:inspect])
       expect(registry.capabilities_for(:eps)).to eq([:inspect])
+      expect(registry.capabilities_for(:pdf)).to eq([:inspect])
       expect(registry.capabilities_for(:png)).to eq([:inspect])
       expect(registry.capabilities_for(:ps)).to eq([:inspect])
       expect(registry.capabilities_for(:svg)).to eq([:inspect])
@@ -169,7 +174,7 @@ RSpec.describe "Claricle::Registry" do
       ok, output = run.call('require "claricle/registry"; ' \
                             "print Claricle.const_get(:Registry).formats.inspect")
       expect(ok).to be(true), "subprocess failed: #{output}"
-      expect(output).to eq("[:emf, :eps, :png, :ps, :svg]")
+      expect(output).to eq("[:emf, :eps, :pdf, :png, :ps, :svg]")
     end
 
     it "loads the PostScript delegate only when an inspection needs it" do
@@ -187,6 +192,30 @@ RSpec.describe "Claricle::Registry" do
 
       expect(ok).to be(true), "subprocess failed: #{output}"
       expect(output).to eq("[false, false, true, 100.0]")
+    end
+
+    # The same shape for pdfrb. `require "pdfrb"` sits inside the
+    # inspection path rather than at the top of the handler file, because
+    # registry.rb requires every handler eagerly -- measured, best of 9
+    # on a monotonic clock, a top-level require costs ~43 ms on every
+    # `claricle version` and every `--help`, for a delegate most
+    # invocations never touch.
+    #
+    # A constant probe rather than $LOADED_FEATURES: a constant cannot be
+    # defined by a require that did not happen.
+    it "loads the pdfrb delegate only when an inspection needs it" do
+      pdf = PdfBuilder.path(name: "lazy")
+      ok, output = run.call(<<~RUBY)
+        require "claricle"
+        before = Object.const_defined?(:Pdfrb, false)
+        image = Claricle::Image.from_path(#{pdf.inspect})
+        after_image = Object.const_defined?(:Pdfrb, false)
+        pages = image.inspection.meta["pages"]
+        print [before, after_image, Object.const_defined?(:Pdfrb, false), pages].inspect
+      RUBY
+
+      expect(ok).to be(true), "subprocess failed: #{output}"
+      expect(output).to eq("[false, false, true, 1]")
     end
 
     it "loads handlers/base.rb without the entry point" do
