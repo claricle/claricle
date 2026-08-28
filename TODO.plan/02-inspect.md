@@ -34,8 +34,9 @@ had drifted there: the slice was built and chose to drop the delegate,
 so the row now records what shipped.
 
 The repo had no PDF fixture, so the PDF slice builds one: a minimal
-structurally valid PDF 1.4 with a catalog, a pages node and a single
-page. **Amended 2026-08-28:** the page carries NO `/MediaBox` -- pdfrb's
+PDF 1.4 with a catalog, a pages node and a single page -- sufficient for
+this handler's structure gate, not structurally valid in the full sense.
+**Amended 2026-08-28:** the page carries NO `/MediaBox` -- pdfrb's
 own validator reports "Page 3 has no /MediaBox" -- because this slice
 reports no dimensions, so there is nothing for a box to feed. The
 earlier "200x100 page" described a fixture that was never built.
