@@ -8,6 +8,15 @@ require_relative "../../support/pdf_builder"
 require_relative "../../support/pdf_objstm_builder"
 
 RSpec.describe "Claricle PDF handler" do
+  # Nesting depth is a PLATFORM property, not a constant of PDF. 60,000
+  # exhausts the stack on Ruby 3.4 with the default thread stack size,
+  # and a larger RUBY_THREAD_VM_STACK_SIZE, another platform or a future
+  # Ruby could raise the threshold. Both deep fixtures build their depth
+  # from here, and both assert the raise as a PRECONDITION -- so a
+  # machine where this no longer suffices fails saying "this fixture
+  # stopped raising" rather than passing while testing nothing.
+  def nesting = 60_000
+
   # A method rather than a block-local, so the nested groups' own helper
   # methods can reach it too.
   def pdf_class = Claricle.const_get(:Handlers).const_get(:Pdf)
@@ -466,7 +475,7 @@ RSpec.describe "Claricle PDF handler" do
     # CATALOG, so a poisoned value anywhere in the stream body fails the
     # structure gate whatever index it sits at.
     it "fails the structure gate on a poisoned stream body, before any count read" do
-      { NoMethodError => "(abc\\", SystemStackError => "#{"[" * 60_000}#{"]" * 60_000}" }
+      { NoMethodError => "(abc\\", SystemStackError => nested_array }
         .each do |klass, body|
           path = objstm(bodies: [PdfBuilder::CATALOG, PdfBuilder::PAGES, body])
           expect(raised_by(path)).to be(klass)
@@ -792,8 +801,10 @@ RSpec.describe "Claricle PDF handler" do
 
   def trailer_with(extra) = "<< /Size 4 /Root 1 0 R #{extra} >>"
 
+  def nested_array = "#{"[" * nesting}#{"]" * nesting}"
+
   def deep_trailer_pdf
-    pdf(trailer: trailer_with("/D #{"[" * 60_000}#{"]" * 60_000}"))
+    pdf(trailer: trailer_with("/D #{nested_array}"))
   end
 
   # The offset is read from a document built with the default trailer.
