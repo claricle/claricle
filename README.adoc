@@ -59,10 +59,12 @@ The name reflects what the library is for:
   reported: the parser fills it in only for the two-argument
   `%%Pages: n m` form, so it would be present for some files and absent
   for others with nothing in `meta` to tell the cases apart
-* `inspect` for PDF -- the version declared in the header and the
-  **declared** page count from the page tree's `/Count`. The version
-  comes from the file's own bytes rather than the parser, which
-  fabricates `1.4` for an empty file. The count is a declaration and
+* `inspect` for PDF -- the document's version and the **declared** page
+  count from the page tree's `/Count`. The version is the higher of the
+  two the file states, compared as numbers: the `%PDF-` header, and the
+  catalog's `/Version` where one is present and well formed. It comes
+  from the file's own bytes rather than the parser, which fabricates
+  `1.4` for an empty file. The count is a declaration and
   nothing walks the page tree to check it, so a document declaring
   `/Count 999` over one page reports 999. Dimensions are deliberately
   not reported: reaching the first page's box safely needs cycle-guarded
