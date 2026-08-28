@@ -88,6 +88,10 @@ The name reflects what the library is for:
 * **CR-only line endings for EPS and PS.** The parser reads no DSC
   comments from them, so those files inspect as `ok` with no dimensions
   and no metadata
+* **CR-only line endings for PDF.** A lone `\r` in the xref and trailer
+  region leaves the parser reading no trailer at all, so those files
+  inspect as `failed` with `pdf.structure_unreadable` rather than `ok`.
+  Most common in PDFs produced by macOS and Quartz
 * `conform` and `convert` for every format. No handler implements
   either yet, so both raise `Claricle::UnsupportedFormat`. `claricle
   formats` reports this per format, and it reads the handlers rather
