@@ -4,6 +4,18 @@ require "fileutils"
 require "json"
 require "timeout"
 
+# 24 examples below name `Pdfrb::...` in their own body, as a
+# precondition, before any inspection has triggered the handler's lazy
+# `require "pdfrb"`. Without this they pass only when some earlier
+# example happened to load it, so running one alone -- which
+# `spec_helper.rb`'s `--only-failures` makes the normal workflow -- or
+# running under `--order random` failed spuriously.
+#
+# This cannot mask the lazy-load guarantee. That guarantee is pinned in
+# `registry_spec.rb` by a bare SUBPROCESS, where this process's requires
+# do not reach. Do not "fix" this line back out.
+require "pdfrb"
+
 require_relative "../../support/pdf_builder"
 require_relative "../../support/pdf_objstm_builder"
 
@@ -143,9 +155,17 @@ RSpec.describe "Claricle PDF handler" do
 
     # No document behind them to build, so they stay inline byte strings
     # exactly as detector_spec.rb writes its own PDF cases.
+    #
+    # The ISSUE CODE, not the status. All three are bodiless, so they
+    # report "failed" from the STRUCTURE gate whether or not the header
+    # was anchored -- measured, deleting `\A` from the gate left all 63
+    # examples green while `x%PDF-1.4` silently reported version "1.4".
+    # Only the code says which gate refused them.
     it "anchors the declaration at offset zero" do
       ["x%PDF-1.4", "%PDF", " %PDF-1.4"].each do |bytes|
-        expect(inspect_pdf(raw_pdf(bytes)).parse_status).to eq("failed"), bytes
+        inspection = inspect_pdf(raw_pdf(bytes))
+        expect(inspection.parse_status).to eq("failed"), bytes
+        expect(inspection.issues.first.code).to eq("pdf.header_unreadable"), bytes
       end
     end
 
@@ -238,6 +258,19 @@ RSpec.describe "Claricle PDF handler" do
       end
     end
 
+    # The other disjunct of the read bound. Every `PdfBuilder` document
+    # carries an `eol`, so nothing else here has an UNTERMINATED first
+    # line -- and without one, dropping `prefix.bytesize <=
+    # HEADER_SCAN_BYTES ||` left all 63 examples green. A short read is a
+    # real end of file, so `\z` means what it says and the version is
+    # read; only the missing document then refuses it.
+    it "accepts a first line that ends at EOF with no terminator" do
+      inspection = inspect_pdf(raw_pdf("%PDF-1.4"))
+
+      expect(inspection.parse_status).to eq("failed")
+      expect(inspection.issues.first.code).to eq("pdf.structure_unreadable")
+    end
+
     it "refuses a first line far past the bound" do
       expect(inspect_pdf(pdf(first_line: PdfBuilder.padded_version_line(4096))).parse_status)
         .to eq("failed")
@@ -274,13 +307,20 @@ RSpec.describe "Claricle PDF handler" do
     # The non-block branch of Document.open is a `File.binread` into a
     # StringIO held for the document's life. Measured on 1 MB: its
     # `doc.io.string` is exactly the file.
+    # What the HANDLER passed, not what this wrapper did. Recording only
+    # `doc.io` proves nothing: the wrapper below calls the block form
+    # itself, so `seen` is a File however the handler asked -- measured,
+    # rewriting `open_document` to the non-block form left this green.
     it "takes the block form, so no whole-file buffer is retained" do
       seen = nil
+      gave_block = nil
       allow(Pdfrb::Document).to receive(:open).and_wrap_original do |original, *args, &block|
+        gave_block = !block.nil?
         original.call(*args) { |doc| seen = doc.io and block.call(doc) }
       end
 
-      inspect_pdf(pdf)
+      expect(inspect_pdf(pdf).parse_status).to eq("ok")
+      expect(gave_block).to be(true)
       expect(seen).to be_a(File)
       expect(seen).not_to respond_to(:string)
     end
@@ -638,17 +678,19 @@ RSpec.describe "Claricle PDF handler" do
       end
     end
 
-    # Three preconditions, because this fixture raises only while BOTH
-    # bracketing conditions hold: the keyword must begin within the final
-    # 1,024 bytes, and the file must be at most 999999 - 2048 bytes. The
-    # third stops a regeneration quietly ballooning it toward that edge.
-    it "keeps far_startxref inside both conditions that make it raise" do
+    # ONE size bound and the raise itself, not three "preconditions".
+    # The fixture raises only while both bracketing conditions hold --
+    # the keyword must begin within the final 1,024 bytes, and the file
+    # must be at most 999999 - 2048 = 997,951 bytes. At 308 bytes BOTH
+    # follow arithmetically from the bound below, so asserting them
+    # separately was asserting two things that cannot fail. This is the
+    # one that can: it stops a regeneration quietly growing the fixture
+    # toward either edge, and the raise says the fixture still works.
+    it "keeps far_startxref small enough to satisfy both conditions" do
       path = pdf(startxref: 999_999)
-      bytes = File.binread(path)
 
-      expect(bytes.bytesize - bytes.rindex("startxref")).to be <= 1024
-      expect(bytes.bytesize).to be <= 997_951
-      expect(bytes.bytesize).to be < 1024
+      expect(File.size(path)).to be < 1024
+      expect(open_raised_by(path)).to be(NoMethodError)
     end
 
     # Depth is a platform property, not a constant: 60,000 exhausts the
@@ -712,16 +754,25 @@ RSpec.describe "Claricle PDF handler" do
     # escaping `inspection` entirely rather than reporting anything. The
     # deadline is there to bound reading an untrusted FILE, and loading
     # our own dependency is fixed work that no input controls.
-    it "does not let the deadline fire inside the delegate's require" do
-      with_deadline(0.05)
-      handler.singleton_class.prepend(Module.new do
-        define_method(:require) do |name|
-          sleep 0.3 if name == "pdfrb"
-          super(name)
-        end
-      end)
+    #
+    # Asserted as ORDER, not by racing a slow require against a short
+    # clock. That race is what this file's own comment below warns
+    # against, and it was passing only because ~40 earlier examples had
+    # already warmed pdfrb: a cold first inspection costs 201 ms against
+    # the 50 ms deadline it used.
+    it "loads the delegate before the deadline starts, not inside it" do
+      order = []
+      allow(handler).to receive(:require).and_wrap_original do |original, name|
+        order << :require if name == "pdfrb"
+        original.call(name)
+      end
+      allow(Timeout).to receive(:timeout).and_wrap_original do |original, *args, &block|
+        order << :timeout
+        original.call(*args, &block)
+      end
 
-      expect(inspect_pdf(pdf).meta).to eq("version" => "1.4", "pages" => 1)
+      expect(inspect_pdf(pdf).parse_status).to eq("ok")
+      expect(order).to eq(%i[require timeout])
     end
 
     # The node local is the flag: non-nil means the deadline expired
@@ -746,7 +797,8 @@ RSpec.describe "Claricle PDF handler" do
   # `constants`, so an empty list is the assertion -- and each is fetched
   # first, so the example cannot pass by their having been deleted.
   it "keeps its helpers and its tuning constants private" do
-    %i[VersionGate Resolver Progress DEADLINE_SECONDS HEADER_SCAN_BYTES MESSAGES]
+    %i[VersionGate Resolver Progress DEADLINE_SECONDS HEADER_SCAN_BYTES MESSAGES
+       HEADER_CODE OPEN_CODE STRUCTURE_CODE TIMEOUT_CODE]
       .each { |name| expect(pdf_class.const_get(name, false)).not_to be_nil, name.to_s }
 
     expect(pdf_class.constants(false)).to be_empty
@@ -759,7 +811,6 @@ RSpec.describe "Claricle PDF handler" do
     # pins the allowlist as not too BROAD.
     it "propagates an off-allowlist StandardError raised inside the gate" do
       klass = Class.new(StandardError)
-      stub_const("OffAllowlistError", klass)
       allow(handler).to receive(:structure_gate).and_raise(klass, "not ours")
 
       expect { inspect_pdf(pdf) }.to raise_error(klass, "not ours")
@@ -803,12 +854,30 @@ RSpec.describe "Claricle PDF handler" do
       end
     end
 
-    it "interpolates the deadline that actually expired into its message" do
-      with_deadline(0.25)
+    # The message carries the deadline it was built from, so the two
+    # cannot drift. It is interpolated where the table is defined rather
+    # than per call, so this asserts the PRODUCTION number -- changing
+    # DEADLINE_SECONDS turns this red, which is the point.
+    it "names the deadline in the timeout message" do
+      with_deadline(0.2)
       allow(handler).to receive(:structure_gate) { sleep 5 }
 
       expect(inspect_pdf(pdf).issues.first.message)
-        .to eq("PDF could not be read within 0.25 seconds")
+        .to eq("PDF could not be read within 5 seconds")
+    end
+
+    # An expiry must not relabel a cause the run already reached. The
+    # structure gate refuses here and the deadline then fires while
+    # `with_path` is unwinding, with the node still nil.
+    it "keeps a cause it already found when the deadline expires after it" do
+      with_deadline(0.2)
+      allow(handler).to receive(:structure_gate).and_return(nil)
+      allow_any_instance_of(Claricle::Image).to receive(:with_path)
+        .and_wrap_original do |original, *args, &block|
+          original.call(*args, &block).tap { sleep 5 }
+        end
+
+      expect(inspect_pdf(pdf).issues.first.code).to eq("pdf.structure_unreadable")
     end
 
     it "round-trips through to_json on both branches" do
