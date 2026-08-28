@@ -66,8 +66,18 @@ module Claricle
         TIMEOUT_CODE => "PDF could not be read within #{DEADLINE_SECONDS} seconds"
       }.freeze
 
+      # What a `/Version` Name must look like to be believed. Measured,
+      # `catalog.value[:Version]` comes back as a Symbol for a Name, but
+      # also as a String, a Float, an Array, a Reference or nil depending
+      # on what the file wrote -- and as `:"1.7.2"`, `:X` or `:""` for a
+      # Name that is not a version. Only a Symbol matching this is taken,
+      # so both readings of the version are exactly as strict as the
+      # header gate, which refuses `%PDF-1.7.2` for the same reason.
+      VERSION_TOKEN = /\A\d+\.\d+\z/
+
       private_constant :HEADER_SCAN_BYTES, :DEADLINE_SECONDS, :HEADER_CODE,
-                       :OPEN_CODE, :STRUCTURE_CODE, :TIMEOUT_CODE, :MESSAGES
+                       :OPEN_CODE, :STRUCTURE_CODE, :TIMEOUT_CODE, :MESSAGES,
+                       :VERSION_TOKEN
 
       # The file's own bytes decide the version, never the delegate.
       # `Document.open` succeeds on an empty file and the document it
@@ -75,6 +85,10 @@ module Claricle
       # for garbage and for a `%PDF-x.y` header alike. A fabricated
       # default is worse than no answer, so the gate reads the
       # declaration itself and reports the token it captured.
+      #
+      # The header is only HALF the answer. A PDF may raise its version
+      # in the Catalog's `/Version`, and the reported version is the
+      # NUMERIC MAXIMUM of the two -- see `highest_version`.
       module VersionGate
         # A COMPLETE declaration, terminated. `\A%PDF-(\d+\.\d+)` alone
         # validates a numeric PREFIX: measured, it captures "1.7" for
@@ -250,10 +264,10 @@ module Claricle
       # is unreadable when it is simply gone.
       def open_document(path, progress)
         ::Pdfrb::Document.open(path) do |document|
-          progress.node = guarded { structure_gate(document) }
+          catalog, progress.node = guarded { structure_gate(document) }
           next progress.code = STRUCTURE_CODE unless progress.node
 
-          progress.page_count = guarded { count_read(document, progress.node) }
+          read_optional_fields(document, catalog, progress)
         end
       rescue *parse_failures, Errno::EINVAL
         progress.code = OPEN_CODE
@@ -310,13 +324,65 @@ module Claricle
       # `trailer[:Root]` raises `NoMethodError` before any check runs.
       # Resting the refusal on that would rest it on this handler's own
       # missing nil check rather than on pdfrb's error handling.
+      # Everything the gate did NOT have to prove. Each is guarded on its
+      # own, so a Catalog that will not give up its `/Version` still
+      # reports the header's, and a `/Count` that raises still leaves the
+      # version intact.
+      def read_optional_fields(document, catalog, progress)
+        progress.version = highest_version(progress.version,
+                                           guarded { catalog_version(document, catalog) })
+        progress.page_count = guarded { count_read(document, progress.node) }
+      end
+
+      # Returns BOTH checked objects, so the Catalog survives to be asked
+      # for its `/Version` instead of being resolved a second time.
+      #
+      # The node stays the flag, and the DESTRUCTURE at the call site is
+      # what keeps it so: `catalog, progress.node =` reads nil out of a
+      # nil return and out of `[catalog, nil]` alike, so a Catalog that
+      # resolves while its `/Pages` does not still leaves `progress.node`
+      # nil and reports "failed". Guarding this method's own return on
+      # the node as well was tried and measured to change nothing -- a
+      # branch that cannot alter an outcome, so it is not here.
       def structure_gate(document)
         return unless document.trailer
 
         catalog = typed(Resolver.resolve(document, document.trailer[:Root]), :Catalog)
         return unless catalog
 
-        typed(Resolver.resolve(document, catalog.value[:Pages]), :Pages)
+        [catalog, typed(Resolver.resolve(document, catalog.value[:Pages]), :Pages)]
+      end
+
+      # The Catalog's own claim, believed only when it is a well-formed
+      # Name. Read RAW through `.value`, like every other key here: the
+      # typed `Dictionary#[]` coerces and mutates the node in place.
+      #
+      # A Reference goes through `Resolver.resolve`, never
+      # `document.object`, or the generation guard is bypassed for this
+      # key alone -- pdfrb resolves by object number and would hand back
+      # an object the file never authorised.
+      #
+      # `Document#version` and `Catalog#version_override` are both
+      # refused: the first fabricates "1.4" for an unreadable header,
+      # which is the whole reason this handler reads the bytes itself.
+      def catalog_version(document, catalog)
+        raw = catalog.value[:Version]
+        raw = Resolver.resolve(document, raw)&.value if raw.is_a?(::Pdfrb::Model::Reference)
+        raw.to_s if raw.is_a?(::Symbol) && raw.match?(VERSION_TOKEN)
+      end
+
+      # The NUMERIC MAXIMUM, and every word of that is load-bearing.
+      #
+      # Not "prefer the Catalog": a real file can declare a LOWER
+      # `/Version` than its header, and 1.7 is then the true version --
+      # poppler agrees. Not a string compare: `"1.10" > "1.9"` is FALSE.
+      # Not a float: `1.10 == 1.1`, so 1.10 and 1.1 collide. Comparing
+      # integer pairs split on the dot is the only one of the three that
+      # gets both directions right.
+      def highest_version(header, catalog)
+        return header unless catalog
+
+        [header, catalog].max_by { |version| version.split(".").map(&:to_i) }
       end
 
       # The `&.` is load-bearing, not defensive noise: `Resolver.resolve`

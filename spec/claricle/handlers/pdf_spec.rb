@@ -233,6 +233,97 @@ RSpec.describe "Claricle PDF handler" do
     end
   end
 
+  describe "the version the Catalog claims" do
+    # A Catalog carrying `/Version`, with the header spelled by the
+    # caller. Object 4 exists so a Reference has something to point at.
+    def versioned(header, fragment, target: "/1.7")
+      pdf(first_line: header,
+          objects: objects(cat: "<< /Type /Catalog /Pages 2 0 R #{fragment} >>",
+                           extra: [[4, 0, target]]),
+          trailer: "<< /Size 5 /Root 1 0 R >>")
+    end
+
+    def version_of(header, fragment, **rest)
+      inspect_pdf(versioned(header, fragment, **rest)).meta["version"]
+    end
+
+    it "takes the Catalog's version when it is the later one" do
+      expect(version_of("%PDF-1.4", "/Version /1.7")).to eq("1.7")
+    end
+
+    # MANDATORY, and the only fixture that can catch a "prefer the
+    # Catalog" implementation. No real PDF measured here is in this
+    # direction, so a corpus-driven spec passes against the wrong rule;
+    # only a synthetic file in the earlier direction fails it. A real
+    # file like this has true version 1.7, and poppler agrees.
+    it "keeps the header's version when the Catalog claims an EARLIER one" do
+      expect(version_of("%PDF-1.7", "/Version /1.3")).to eq("1.7")
+    end
+
+    # Integer pairs, not strings and not floats. Measured: `"1.10" >
+    # "1.9"` is FALSE, and `1.10 == 1.1` collides. Driven in BOTH
+    # directions so neither operand can be the one that happens to win.
+    it "compares the two numerically, not as strings" do
+      expect(version_of("%PDF-1.9", "/Version /1.10")).to eq("1.10")
+      expect(version_of("%PDF-1.10", "/Version /1.9")).to eq("1.10")
+    end
+
+    # `/Version` arrives as a Symbol for a Name, but as a String, Float,
+    # Array or Reference for anything else -- all measured. Only a Symbol
+    # that is a well-formed version is believed, so this reading is
+    # exactly as strict as the header gate, which refuses `%PDF-1.7.2`.
+    it "believes only a well-formed Name, and falls back to the header" do
+      { "/Version /1.7.2" => "a three-part Name",
+        "/Version /X" => "a non-numeric Name",
+        "/Version /" => "an empty Name",
+        "/Version (1.7)" => "a String",
+        "/Version 1.7" => "a Float",
+        "/Version [1 7]" => "an Array",
+        "" => "no /Version at all" }.each do |fragment, label|
+        expect(version_of("%PDF-1.4", fragment)).to eq("1.4"), label
+      end
+    end
+
+    it "follows an indirect /Version through the checked resolver" do
+      expect(version_of("%PDF-1.4", "/Version 4 0 R")).to eq("1.7")
+    end
+
+    # Through `Resolver.resolve`, never `document.object` -- otherwise
+    # this one key bypasses the generation guard every other reference
+    # here goes through. Bare pdfrb resolves it anyway, which is the
+    # whole reason the guard exists.
+    it "refuses an indirect /Version whose generation does not match" do
+      path = versioned("%PDF-1.4", "/Version 4 9 R")
+      Pdfrb::Document.open(path) do |doc|
+        expect(doc.xref[4].gen).to eq(0)
+        expect(doc.object(Pdfrb::Model::Reference.new(4, 9)).value).to eq(:"1.7")
+      end
+
+      expect(inspect_pdf(path).meta["version"]).to eq("1.4")
+    end
+
+    # The structure gate hands back the Catalog now. The node stays the
+    # flag: a Catalog that resolves while its /Pages does not must still
+    # report "failed", not a truthy pair whose second half is nil.
+    it "still fails the structure gate when only the Catalog resolves" do
+      path = pdf(objects: objects(cat: "<< /Type /Catalog /Version /1.7 >>"))
+
+      inspection = inspect_pdf(path)
+      expect(inspection.parse_status).to eq("failed")
+      expect(inspection.issues.first.code).to eq("pdf.structure_unreadable")
+    end
+
+    # Guarded on its own, so a Catalog whose /Version cannot be read
+    # costs the version raise and nothing else.
+    it "still reports the header version and the count when /Version raises" do
+      path = versioned("%PDF-1.4", "/Version 4 0 R", target: "<< /V 1")
+
+      inspection = inspect_pdf(path)
+      expect(inspection.parse_status).to eq("ok")
+      expect(inspection.meta).to eq("version" => "1.4", "pages" => 1)
+    end
+  end
+
   describe "how far the header read goes" do
     # 1024 is read, 1025 is refused, and each is driven twice -- once
     # ending at EOF and once with further input -- because `\z` and a line
