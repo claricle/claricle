@@ -4,9 +4,10 @@ require "fileutils"
 require "json"
 require "timeout"
 
-# 24 examples below name `Pdfrb::...` in their own body, as a
+# Many examples below name `Pdfrb::...` in their own body, as a
 # precondition, before any inspection has triggered the handler's lazy
-# `require "pdfrb"`. Without this they pass only when some earlier
+# `require "pdfrb"`. Counted rather than listed here on purpose: a
+# number would go stale the next time one is added. Without this they pass only when some earlier
 # example happened to load it, so running one alone -- which
 # `spec_helper.rb`'s `--only-failures` makes the normal workflow -- or
 # running under `--order random` failed spuriously.
@@ -158,9 +159,10 @@ RSpec.describe "Claricle PDF handler" do
     #
     # The ISSUE CODE, not the status. All three are bodiless, so they
     # report "failed" from the STRUCTURE gate whether or not the header
-    # was anchored -- measured, deleting `\A` from the gate left all 63
-    # examples green while `x%PDF-1.4` silently reported version "1.4".
-    # Only the code says which gate refused them.
+    # was anchored. Re-measured against the CURRENT gate: deleting `\A`
+    # and weakening this example back to `parse_status` alone leaves the
+    # whole file green, while `x%PDF-1.4` captures version "1.4". Only
+    # the code says which gate refused them.
     it "anchors the declaration at offset zero" do
       ["x%PDF-1.4", "%PDF", " %PDF-1.4"].each do |bytes|
         inspection = inspect_pdf(raw_pdf(bytes))
@@ -387,12 +389,17 @@ RSpec.describe "Claricle PDF handler" do
       end
     end
 
-    # The other disjunct of the read bound. Every `PdfBuilder` document
-    # carries an `eol`, so nothing else here has an UNTERMINATED first
-    # line -- and without one, dropping `prefix.bytesize <=
-    # HEADER_SCAN_BYTES ||` left all 63 examples green. A short read is a
-    # real end of file, so `\z` means what it says and the version is
-    # read; only the missing document then refuses it.
+    # The other disjunct of the read bound. A short read is a real end of
+    # file, so `\z` means what it says and the version is read; only the
+    # missing document then refuses it.
+    #
+    # This example was added because every `PdfBuilder` document carries
+    # an `eol`, so at the time nothing had an UNTERMINATED first line and
+    # dropping `prefix.bytesize <= HEADER_SCAN_BYTES ||` left the suite
+    # green. That is NO LONGER the only cover: the trailing-whitespace
+    # fix added "accepts trailing whitespace that runs to EOF", which
+    # also has no terminator and also turns red. Re-measured -- removing
+    # both this example and the disjunct is what goes green now.
     it "accepts a first line that ends at EOF with no terminator" do
       inspection = inspect_pdf(raw_pdf("%PDF-1.4"))
 
@@ -923,11 +930,17 @@ RSpec.describe "Claricle PDF handler" do
   # every one of these PUBLIC; `const_get` ignores privacy outright; and
   # `module_eval` runs inside the module, where a private constant is
   # legitimately visible. `private_constant` removes the name from
-  # `constants`, so an empty list is the assertion -- and each is fetched
-  # first, so the example cannot pass by their having been deleted.
+  # `constants`, so an empty list is the assertion.
+  #
+  # The fetch above is a SECOND, narrower guarantee, and the difference
+  # matters: `constants(false)` catches ANY constant going public,
+  # named here or not, but only the names actually listed are protected
+  # from being deleted outright. So the list has to be maintained -- it
+  # has been missed twice already, once for the four `*_CODE` constants
+  # and once for `VERSION_TOKEN` when the version comparison landed.
   it "keeps its helpers and its tuning constants private" do
     %i[VersionGate Resolver Progress DEADLINE_SECONDS HEADER_SCAN_BYTES MESSAGES
-       HEADER_CODE OPEN_CODE STRUCTURE_CODE TIMEOUT_CODE]
+       VERSION_TOKEN HEADER_CODE OPEN_CODE STRUCTURE_CODE TIMEOUT_CODE]
       .each { |name| expect(pdf_class.const_get(name, false)).not_to be_nil, name.to_s }
 
     expect(pdf_class.constants(false)).to be_empty
