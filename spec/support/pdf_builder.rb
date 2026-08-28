@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "fileutils"
 require "tmpdir"
 
 # Builds classic-xref PDF fixtures from named parts, so no PDF byte is
@@ -84,9 +85,25 @@ module PdfBuilder
   # place, permanently, so two examples sharing one file would leave the
   # second reading a node the first already spoiled.
   def write(bytes, name: "fixture")
-    path = File.join(@dir ||= Dir.mktmpdir("claricle-pdf"), "#{name}-#{@seq = @seq.to_i + 1}.pdf")
+    path = File.join(directory, "#{name}-#{@seq = @seq.to_i + 1}.pdf")
     File.binwrite(path, bytes)
     path
+  end
+
+  # One directory for the whole run, removed when the process ends --
+  # which for the suite is when the suite ends. `Dir.mktmpdir` in its
+  # non-block form leaves the directory behind forever: measured, 226
+  # `claricle-pdf*` directories in TMPDIR, one more every `rspec` run.
+  #
+  # `at_exit` rather than an RSpec `after(:suite)` hook, because this
+  # file is also required directly by scripts that never load RSpec and
+  # the directory has to go away for those too. It is registered once,
+  # on first use, so a run that builds no fixture creates nothing to
+  # remove.
+  def directory
+    @directory ||= Dir.mktmpdir("claricle-pdf").tap do |dir|
+      at_exit { FileUtils.remove_entry(dir) }
+    end
   end
 
   def path(name: "fixture", **parts)
