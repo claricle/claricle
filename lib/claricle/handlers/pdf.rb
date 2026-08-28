@@ -175,6 +175,21 @@ module Claricle
       # makes a real `Timeout::Error` fly inside the block, where the
       # inner rescue swallows it and the outer one sees nothing.
       #
+      # `require "pdfrb"` sits in this method rather than at the top of
+      # the file because `registry.rb` requires every handler eagerly.
+      # Measured, best of 9 on a monotonic clock: bare `ruby -e ""` is
+      # 33.1 ms and `ruby -e 'require "pdfrb"'` is 76.8 ms, so a
+      # top-level require would put ~43 ms on every `claricle version`
+      # and every `--help`, for a delegate most invocations never touch.
+      #
+      # It sits OUTSIDE the Timeout block, and that is not cosmetic.
+      # Measured: with the require inside, a deadline expiring during it
+      # left `Pdfrb` undefined and the next line raised a bare
+      # `NameError` -- which is not on any rescue list here, so it
+      # escaped `inspection` instead of reporting `"failed"`. The
+      # deadline exists to bound reading an untrusted FILE; loading our
+      # own dependency is fixed work that no input controls.
+      #
       # The node is the flag. Nil means the deadline expired before the
       # structure gate passed, which is "failed"; non-nil means it
       # expired reading an optional field, which is "ok" with the count
@@ -182,6 +197,7 @@ module Claricle
       # carries the same information.
       def inspection(image)
         progress = Progress.new
+        require "pdfrb"
         begin
           Timeout.timeout(DEADLINE_SECONDS) { read(image, progress) }
         rescue Timeout::Error
@@ -214,19 +230,12 @@ module Claricle
       # form's `doc.io` is a `File` handle that does not respond to
       # `string` at all.
       #
-      # `require "pdfrb"` sits here rather than at the top of the file
-      # because `registry.rb` requires every handler eagerly. Measured,
-      # best of 9 on a monotonic clock: bare `ruby -e ''` is 33.1 ms and
-      # `ruby -e 'require "pdfrb"'` is 76.8 ms, so a top-level require
-      # would put ~43 ms on every `claricle version` and every `--help`.
-      #
       # `Errno::ENOENT` is deliberately NOT rescued. pdfrb opens the file
       # itself and `with_path` re-yields a path-born image's path without
       # holding the handle, so a file deleted between the header read and
       # this call raises it -- and reporting "failed" would claim the PDF
       # is unreadable when it is simply gone.
       def open_document(path, progress)
-        require "pdfrb"
         ::Pdfrb::Document.open(path) do |document|
           progress.node = guarded { structure_gate(document) }
           next progress.code = STRUCTURE_CODE unless progress.node

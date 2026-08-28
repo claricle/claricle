@@ -706,6 +706,24 @@ RSpec.describe "Claricle PDF handler" do
       expect(inspect_pdf(path).issues.first.code).to eq("pdf.timeout")
     end
 
+    # The delegate is loaded BEFORE the clock starts. With the require
+    # inside the block, a deadline expiring during it left `Pdfrb`
+    # undefined and the next line raised a raw `NameError` -- measured,
+    # escaping `inspection` entirely rather than reporting anything. The
+    # deadline is there to bound reading an untrusted FILE, and loading
+    # our own dependency is fixed work that no input controls.
+    it "does not let the deadline fire inside the delegate's require" do
+      with_deadline(0.05)
+      handler.singleton_class.prepend(Module.new do
+        define_method(:require) do |name|
+          sleep 0.3 if name == "pdfrb"
+          super(name)
+        end
+      end)
+
+      expect(inspect_pdf(pdf).meta).to eq("version" => "1.4", "pages" => 1)
+    end
+
     # The node local is the flag: non-nil means the deadline expired
     # reading an OPTIONAL field, so the answer stays "ok" with the count
     # omitted rather than discarding a structure that was read.
