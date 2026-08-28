@@ -6,11 +6,13 @@ require "timeout"
 
 # Many examples below name `Pdfrb::...` in their own body, as a
 # precondition, before any inspection has triggered the handler's lazy
-# `require "pdfrb"`. Counted rather than listed here on purpose: a
-# number would go stale the next time one is added. Without this they pass only when some earlier
+# `require "pdfrb"`. Without this they pass only when some earlier
 # example happened to load it, so running one alone -- which
 # `spec_helper.rb`'s `--only-failures` makes the normal workflow -- or
 # running under `--order random` failed spuriously.
+#
+# No count here on purpose: it would go stale the next time one is
+# added, and this file has already carried three stale ones.
 #
 # This cannot mask the lazy-load guarantee. That guarantee is pinned in
 # `registry_spec.rb` by a bare SUBPROCESS, where this process's requires
@@ -56,7 +58,8 @@ RSpec.describe "Claricle PDF handler" do
   def pages_node(count) = "<< /Type /Pages /Kids [3 0 R]#{count} >>"
 
   # A page tree whose `/Count` is the indirect object 4, with that object
-  # spelled by the caller. Five objects, so the trailer's `/Size` grows.
+  # spelled by the caller. That is a fourth object on top of the
+  # baseline's three, so the trailer's `/Size` grows to cover oid 4.
   def indirect_count_pdf(body, **parts)
     pdf(objects: objects(pages: pages_node(" /Count 4 0 R"), extra: [[4, 0, body]]),
         trailer: "<< /Size 5 /Root 1 0 R >>", **parts)
@@ -73,8 +76,10 @@ RSpec.describe "Claricle PDF handler" do
     end
   end
 
-  # `SystemStackError` is not a `StandardError`, and two fixtures raise
-  # it, so both are named rather than reaching for a bare `Exception`.
+  # `SystemStackError` is not a `StandardError`, and fixtures here do
+  # raise it -- a deeply nested trailer, a deeply nested object-stream
+  # body, and a self-cycling `/Kids` tree -- so it is named alongside
+  # `StandardError` rather than reaching for a bare `Exception`.
   def raised_by(path)
     bare_walk(path)
     nil
@@ -291,11 +296,16 @@ RSpec.describe "Claricle PDF handler" do
       expect(version_of("%PDF-1.4", "/Version /1.7")).to eq("1.7")
     end
 
-    # MANDATORY, and the only fixture that can catch a "prefer the
-    # Catalog" implementation. No real PDF measured here is in this
-    # direction, so a corpus-driven spec passes against the wrong rule;
+    # MANDATORY. No real PDF measured here runs in this direction, so a
+    # corpus-driven spec passes against a "prefer the Catalog" rule;
     # only a synthetic file in the earlier direction fails it. A real
     # file like this has true version 1.7, and poppler agrees.
+    #
+    # Not the ONLY example that catches that rule -- measured, mutating
+    # `highest_version` to return the Catalog's turns this AND the
+    # numeric-comparison example below red, because its 1.10-vs-1.9 row
+    # runs in this direction too. This one is the direct statement of
+    # the property; that one catches it as a side effect.
     it "keeps the header's version when the Catalog claims an EARLIER one" do
       expect(version_of("%PDF-1.7", "/Version /1.3")).to eq("1.7")
     end
@@ -407,6 +417,41 @@ RSpec.describe "Claricle PDF handler" do
       expect(inspection.issues.first.code).to eq("pdf.structure_unreadable")
     end
 
+    # The `<=` in `terminated?` is a boundary, and exactly ONE input in
+    # the world discriminates it: a first line of exactly
+    # HEADER_SCAN_BYTES bytes ending at PHYSICAL EOF with no terminator.
+    # Measured, mutating `<=` to `<`:
+    #
+    #   1023 at EOF   structure_unreadable  both ways
+    #   1024 at EOF   structure_unreadable -> header_unreadable  <- moves
+    #   1025 at EOF   header_unreadable     both ways
+    #
+    # The terminated rows above cannot cover it. `PdfBuilder.document`
+    # always appends `eol`, so every one of them carries a terminator
+    # inside the read and leaves by the terminator exit; only a raw file
+    # that IS its own first line leaves by `\z`. Both shapes are kept --
+    # these are the only cover for the `\z` exit, those for the other.
+    #
+    # The ISSUE CODE, not the status. All three rows report "failed",
+    # because a file that is nothing but a header line has no document
+    # behind it. Only the code says whether the GATE accepted the line
+    # and the structure then refused the document, or the gate refused
+    # the line outright.
+    it "accepts a first line of exactly HEADER_SCAN_BYTES ending at EOF" do
+      line = PdfBuilder.padded_version_line(1024)
+      expect(line.bytesize).to eq(1024)
+
+      inspection = inspect_pdf(raw_pdf(line))
+      expect(inspection.parse_status).to eq("failed")
+      expect(inspection.issues.first.code).to eq("pdf.structure_unreadable")
+    end
+
+    it "refuses a first line one byte longer ending at EOF" do
+      inspection = inspect_pdf(raw_pdf(PdfBuilder.padded_version_line(1025)))
+
+      expect(inspection.issues.first.code).to eq("pdf.header_unreadable")
+    end
+
     it "refuses a first line far past the bound" do
       expect(inspect_pdf(pdf(first_line: PdfBuilder.padded_version_line(4096))).parse_status)
         .to eq("failed")
@@ -463,7 +508,7 @@ RSpec.describe "Claricle PDF handler" do
   end
 
   describe "reading a key raw, and the mutation that makes it necessary" do
-    # All three rows, not just the spoiling one: pinning only the last
+    # Every row, not just the spoiling one: pinning only the last
     # would let a later draft re-forbid the safe reads and make this
     # design impossible again. Each row opens its OWN document, because
     # the typed subscript mutates permanently.
