@@ -719,6 +719,21 @@ RSpec.describe "Claricle PDF handler" do
     end
   end
 
+  # Through `constants`, which is the one check that discriminates.
+  # Writing out `Claricle::Handlers::Pdf::VersionGate` raises on
+  # `Handlers`, which is private itself, so that spelling passes with
+  # every one of these PUBLIC; `const_get` ignores privacy outright; and
+  # `module_eval` runs inside the module, where a private constant is
+  # legitimately visible. `private_constant` removes the name from
+  # `constants`, so an empty list is the assertion -- and each is fetched
+  # first, so the example cannot pass by their having been deleted.
+  it "keeps its helpers and its tuning constants private" do
+    %i[VersionGate Resolver Progress DEADLINE_SECONDS HEADER_SCAN_BYTES MESSAGES]
+      .each { |name| expect(pdf_class.const_get(name, false)).not_to be_nil, name.to_s }
+
+    expect(pdf_class.constants(false)).to be_empty
+  end
+
   describe "what it refuses to swallow" do
     # Stage B, not stage A. A handler that wrote `rescue StandardError`
     # inside `guarded` would still pass an Interrupt-from-open example,
