@@ -201,6 +201,44 @@ RSpec.describe "Claricle PDF handler" do
       expect(Claricle::Image.from_path(path).inspection.parse_status).to eq("failed")
     end
 
+    # A MEASURED CONCESSION, not a loosened guard. `duck-small.pdf` on
+    # this machine -- ImageMagick 4.2.8, 2001 -- writes `%PDF-1.1` then a
+    # SPACE then LF. pdfrb reads it, poppler reads it and calls it 1.1,
+    # and this handler used to report `pdf.header_unreadable`: a false
+    # refusal of a readable document, found by running the gate over the
+    # real PDFs on the filesystem.
+    it "accepts trailing horizontal whitespace after the declaration" do
+      { "a space" => "%PDF-1.1 ", "a tab" => "%PDF-1.1\t",
+        "several" => "%PDF-1.1 \t " }.each do |label, line|
+        inspection = inspect_pdf(pdf(first_line: line))
+
+        expect(inspection.parse_status).to eq("ok"), label
+        expect(inspection.meta["version"]).to eq("1.1"), label
+      end
+    end
+
+    it "accepts trailing whitespace that runs to EOF with no terminator" do
+      inspection = inspect_pdf(raw_pdf("%PDF-1.1  "))
+
+      expect(inspection.parse_status).to eq("failed")
+      expect(inspection.issues.first.code).to eq("pdf.structure_unreadable")
+    end
+
+    # The SAME guard proven in the other direction, and it is what stops
+    # a later reader collapsing the lookahead to the one-character class
+    # `[ \t\r\n]`. Measured, that shorter form accepts BOTH of these and
+    # reports "1.4", because it only has to match the single byte after
+    # the digits. Requiring the LINE to end is the whole difference.
+    it "still refuses junk behind that whitespace" do
+      { "space then junk" => "%PDF-1.4 junk", "tab then junk" => "%PDF-1.4\tjunk" }
+        .each do |label, line|
+          inspection = inspect_pdf(pdf(first_line: line))
+
+          expect(inspection.parse_status).to eq("failed"), label
+          expect(inspection.issues.first.code).to eq("pdf.header_unreadable"), label
+        end
+    end
+
     it "keeps both version components unbounded" do
       expect(inspect_pdf(pdf(first_line: "%PDF-12.345")).meta["version"]).to eq("12.345")
     end

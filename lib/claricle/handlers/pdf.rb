@@ -90,11 +90,33 @@ module Claricle
       # in the Catalog's `/Version`, and the reported version is the
       # NUMERIC MAXIMUM of the two -- see `highest_version`.
       module VersionGate
-        # A COMPLETE declaration, terminated. `\A%PDF-(\d+\.\d+)` alone
-        # validates a numeric PREFIX: measured, it captures "1.7" for
-        # both `%PDF-1.7junk` and `%PDF-1.7.2`, neither of which is
-        # version 1.7. The lookahead is what refuses them.
-        GATE = /\A%PDF-(\d+\.\d+)(?=[\r\n]|\z)/
+        # A COMPLETE declaration: the first line carries the version and
+        # nothing after it but optional spaces or tabs.
+        #
+        # WHAT IT REFUSES. `\A%PDF-(\d+\.\d+)` alone validates a numeric
+        # PREFIX -- measured, it captures "1.7" for both `%PDF-1.7junk`
+        # and `%PDF-1.7.2`, neither of which is version 1.7.
+        #
+        # WHAT IT TOLERATES, and this is a MEASURED CONCESSION rather
+        # than a loosened guard. A real file on this machine --
+        # `duck-small.pdf`, written by ImageMagick 4.2.8 in 2001 --
+        # begins `%PDF-1.1` then a SPACE then LF. pdfrb reads it, poppler
+        # reads it and calls it version 1.1, and this handler used to
+        # report `pdf.header_unreadable` for it: a false refusal of a
+        # perfectly readable document. Trailing horizontal whitespace is
+        # therefore accepted.
+        #
+        # `[ \t]*(?:[\r\n]|\z)` and NOT the one-character class
+        # `[ \t\r\n]`, because the shorter form only has to match the
+        # single byte after the digits. Measured, it accepts BOTH
+        # `%PDF-1.4 junk` and `%PDF-1.4\tjunk` and reports "1.4" -- the
+        # general junk relaxation this gate exists to prevent. Requiring
+        # the LINE to end is what keeps the two apart.
+        #
+        # Space and tab only. PDF's whitespace table also lists NUL and
+        # FF; no measured real file needs them here, and generalising
+        # past the evidence is the defect this handler keeps paying for.
+        GATE = /\A%PDF-(\d+\.\d+)(?=[ \t]*(?:[\r\n]|\z))/
         TERMINATOR = /[\r\n]/
         private_constant :GATE, :TERMINATOR
 
@@ -314,16 +336,6 @@ module Claricle
         nil
       end
 
-      # What proves a document exists at all. A header-only `%PDF-1.4\n`
-      # passes the version gate -- the version is genuinely readable --
-      # and opens without complaint; only this refuses it.
-      #
-      # The trailer nil check is part of the gate, not a rescue.
-      # Measured: `document.trailer` is nil on a header-only file, on an
-      # empty one, on garbage and on one truncated mid-body, so
-      # `trailer[:Root]` raises `NoMethodError` before any check runs.
-      # Resting the refusal on that would rest it on this handler's own
-      # missing nil check rather than on pdfrb's error handling.
       # Everything the gate did NOT have to prove. Each is guarded on its
       # own, so a Catalog that will not give up its `/Version` still
       # reports the header's, and a `/Count` that raises still leaves the
@@ -334,6 +346,17 @@ module Claricle
         progress.page_count = guarded { count_read(document, progress.node) }
       end
 
+      # What proves a document exists at all. A header-only `%PDF-1.4\n`
+      # passes the version gate -- the version is genuinely readable --
+      # and opens without complaint; only this refuses it.
+      #
+      # The trailer nil check is part of the gate, not a rescue.
+      # Measured: `document.trailer` is nil on a header-only file, on an
+      # empty one, on garbage and on one truncated mid-body, so
+      # `trailer[:Root]` raises `NoMethodError` before any check runs.
+      # Resting the refusal on that would rest it on this handler's own
+      # missing nil check rather than on pdfrb's error handling.
+      #
       # Returns BOTH checked objects, so the Catalog survives to be asked
       # for its `/Version` instead of being resolved a second time.
       #
