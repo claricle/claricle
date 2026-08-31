@@ -19,7 +19,7 @@ delegates are path- or content-oriented as noted):
 | `Handlers::Svg` (`:svg`) | **Amended 2026-08-21: the slice shipped with no delegate at all.** `Detector.read_root(source)`, with the source handed over by `image.with_source` — the detector already owns the 8192-byte bound, the ATTLIST precedence and the reference resolution, so a second reader would have to agree with all three forever. vectory is not in the gemspec. The original row's `Vectory::Svg.from_content(image.content)` was measured, then not taken: a heavyweight dependency and the whole file in memory to reach the root's attributes. What that measurement settled still holds — dimensions are nullable, and `parse_status` comes from Claricle's own structural check (D23), here an affirmative root start event, never from a delegate staying quiet. **Scope is the root prefix**: nothing past the root start tag is parsed — the 8192-byte bound is read either way — so a document malformed only after that tag reports `ok`. Whole-document well-formedness is conformance (D16, item 03), and it would cost the bounded read — 64.0 MiB SVG, +0.8 MiB against +64.5 MiB. Values get XML's **CDATA** attribute normalization and only that: a literal tab, CR or LF becomes a space, a character reference keeps its character. The non-CDATA trim-and-collapse is deliberately skipped — the type lives in the DTD, SVG's DTD is external, and a bounded reader can neither fetch it nor should, so implementing the internal-subset half would be right for a locally declared `NMTOKENS` and wrong for the same attribute declared externally | width/height (nullable); root attributes into `meta` |
 | `Handlers::Metafile` (`:emf` only) | `::Emf.parse(image.content)` | header `bounds` and `frame`, both `Emf::Model::Geometry::Rect` with `width`/`height` helpers, **plus `device_pixels` and `device_mm`**, both `Emf::Model::Geometry::Size` (`cx`/`cy`). Measured on our fixture: bounds 100x50, frame 2645x1322, device_pixels 100x50, device_mm 26x13. **Amended twice on 2026-08-20** — an earlier amendment claimed there was no device accessor, which was my own false contract: I probed `device`/`millimeters` and concluded from the wrong names. The original row was right. Also available: `n_records`, `n_handles`, `description` (nil on our fixture). `metafile.emf_plus` was nil on our fixture, and when present it is packed binary — putting it straight into `meta` risks `JSON::GeneratorError`, so expose presence, byte size and optionally Base64, never the raw bytes ⚙ confirm against a real EMF+ file before writing the spec |
 | `Handlers::Postscript` (`:eps, :ps`) | **Amended 2026-08-20: vectory is not needed here.** `::Postscript.parse(src).header` exposes `bounding_box` directly, returning `[0.0, 0.0, 100.0, 50.0]` — the same Floats vectory gave, from a delegate already required for the DSC data. Taking vectory would add a heavyweight dependency for a number we already have, which is the reasoning the SVG slice settled. The header also carries `hires_bounding_box`, `title`, `creator`, `creation_date`, `epsf`, `language_level`, `page_count` and `custom`. D22 is untouched: a successful parse still says nothing about conformance. **Amended again 2026-08-21, after building it:** `epsf` is never populated even for a genuine EPSF header; the page fields are populated only by the two-argument `%%Pages: n m` form; and `custom` is the bucket of comments 0.2.0 could NOT read, so all three stay out of `meta`. 0.2.0 is also last-wins on repeated header comments where DSC gives the FIRST one precedence, so every published value is checked against the first declaration's own text | dims from `hires_bounding_box`, falling back to `bounding_box`; the header comments 0.2.0 populates reliably into `meta` |
-| `Handlers::Pdf` (`:pdf`) | `Pdfrb::Document.open(path)` via `image.with_path`. **Amended 2026-08-20, two corrections on pdfrb 0.7.23:** `version` holds (`"1.4"`), but there is **no `page_count` method** — `pages` returns a `Pdfrb::Document::Pages` and the count is `pages.count`, so a handler written from the original row raises `NoMethodError`. **Amended again 2026-08-21: the MediaBox claim above was wrong, and it is what pulled dimensions into this row.** `page[:MediaBox]` is a `Rectangle`, but a `Rectangle` is not evidence a rectangle was declared — pdfrb coerces every element with `to_f` and pads what is missing, so `[0 0]` reads back as a 0x0 page and `[0 0 null 100]` fabricates a coordinate. `page.media_box`, the accessor that resolves inheritance, **hangs forever** on a self-referential `/Parent`; `pages.first` walks `/Kids` with no cycle guard and resolves references by object number alone; and `pages.count` reports the DECLARED `/Count` verbatim, so one leaf page declaring `/Count 999` reports 999. **Dimensions are therefore deferred** — see `docs/plans/inspect-pdf.md` for the eleven rounds of measurements and what a future pdfrb must offer before they are revisited. It **opens a structurally broken PDF without complaint**, so a successful `open` cannot by itself yield `parse_status: "ok"`; the status comes from Claricle's structural pre-pass (D23), consistent with 01 | version; **declared** page count via `pages.count`. Dimensions deferred |
+| `Handlers::Pdf` (`:pdf`) | `Pdfrb::Document.open(path)` via `image.with_path`. **Amended 2026-08-20, two corrections on pdfrb 0.7.23:** `version` holds (`"1.4"`), but there is **no `page_count` method** — `pages` returns a `Pdfrb::Document::Pages` and the count is `pages.count`, so a handler written from the original row raises `NoMethodError`. **Amended again 2026-08-21: the MediaBox claim above was wrong, and it is what pulled dimensions into this row.** `page[:MediaBox]` is a `Rectangle`, but a `Rectangle` is not evidence a rectangle was declared — pdfrb coerces every element with `to_f` and pads what is missing, so `[0 0]` reads back as a 0x0 page and `[0 0 null 100]` fabricates a coordinate. `page.media_box`, the accessor that resolves inheritance, **hangs forever** on a self-referential `/Parent`; `pages.first` walks `/Kids` with no cycle guard and resolves references by object number alone; and `pages.count` reports the DECLARED `/Count` verbatim, so one leaf page declaring `/Count 999` reports 999. **Dimensions are therefore deferred** — see `docs/plans/inspect-pdf.md` for the eleven rounds of measurements and what a future pdfrb must offer before they are revisited. It **opens a structurally broken PDF without complaint**, so a successful `open` cannot by itself yield `parse_status: "ok"`; the status comes from Claricle's structural pre-pass (D23), consistent with 01 | version; **declared** page count. **Amended 2026-08-28:** `pages.count` is unusable for it -- measured, it is sometimes the declared `/Count`, sometimes computed by walking `/Kids`, and it raises `SystemStackError` on a self-cycling `/Kids` tree whose `/Count` is absent. The handler reads `/Count` RAW off the page-tree node instead, through `.value[:Count]`, because the typed subscript coerces and mutates the node in place. Dimensions deferred |
 
 Every row above was executed against a real fixture on 2026-08-13, and
 **re-measured on 2026-08-20 against emf 0.1.0, postscript 0.2.0, pdfrb
@@ -34,8 +34,12 @@ had drifted there: the slice was built and chose to drop the delegate,
 so the row now records what shipped.
 
 The repo had no PDF fixture, so the PDF slice builds one: a minimal
-structurally valid PDF 1.4 with a catalog, a pages node and a single
-200x100 page.
+PDF 1.4 with a catalog, a pages node and a single page -- sufficient for
+this handler's structure gate, not structurally valid in the full sense.
+**Amended 2026-08-28:** the page carries NO `/MediaBox` -- pdfrb's
+own validator reports "Page 3 has no /MediaBox" -- because this slice
+reports no dimensions, so there is nothing for a box to feed. The
+earlier "200x100 page" described a fixture that was never built.
 
 - **WMF is out (D14).** Released `emf` 0.1.0 raises `WMF parser not yet
   implemented`, so `Handlers::Metafile` claims `:emf` alone. The
@@ -67,7 +71,8 @@ structurally valid PDF 1.4 with a catalog, a pages node and a single
 - New deps in gemspec as item 02's handlers land: `png_conform`,
   `postscript`, `pdfrb` — three-segment constraints on the reviewed line
   (D13), not a floating `~> 0.x`. Locally installed and reviewed:
-  png_conform 0.1.4, postscript 0.2.0, pdfrb 0.7.10. The earlier plan's
+  png_conform 0.1.4, postscript 0.2.0 and pdfrb 0.7.23, with PDF behavior
+  re-verified on 0.7.49, which resolves here. The earlier plan's
   `png_conform ~> 0.7` figure was wrong and contradicted this list.
   `svg_conform` belongs to item 03 and `vectory` to item 04; neither is
   introduced here. Item 04's `vectory → emfsvg` chain will bring
@@ -117,7 +122,12 @@ it, and after that every handler arrives as a complete slice.
    that is still `Base`'s raising stub), its `require` in
    `registry.rb`, its `HANDLER_CLASSES` entry, its
    spec against a real fixture, and the `formats` expected-output
-   update. No commit ever advertises an operation it didn't ship.
+   update. **Amended 2026-08-28, PDF only:** its fixtures are
+   GENERATED by `spec/support/pdf_builder.rb` rather than committed. A
+   PDF's xref offsets depend on every byte before them, so a committed
+   corpus is 60-odd opaque blobs no reviewer can check, and one of them
+   would be a 120 KB file whose whole purpose is to assert a
+   `SystemStackError`. No commit ever advertises an operation it didn't ship.
 5. Replace 01's "no handler registered" spec example.
 6. README section for `inspect` and `formats` (D1) — real commands
    only, no forward promises.
@@ -125,7 +135,8 @@ it, and after that every handler arrives as a complete slice.
 ## Done when
 
 - `Claricle::Image.from_path(f).inspection` returns a populated
-  `Inspection` for a real PNG, SVG, EMF, EPS, PS, and PDF fixture.
+  `Inspection` for a real PNG, SVG, EMF, EPS, PS, and PDF fixture --
+  the PDF one generated rather than committed, per the amendment above.
 - A real WMF fixture is detected as `:wmf` and refused with exit 3.
 - `claricle inspect`/`claricle formats` work in human and JSON modes;
   exit codes verified (0 / 2 missing file / 3 unknown format).
@@ -141,4 +152,6 @@ it, and after that every handler arrives as a complete slice.
 `lib/claricle/registry.rb` (handler requires + class list),
 `lib/claricle/cli.rb`,
 `README.adoc`, `spec/claricle/handlers/*_spec.rb`,
-`spec/claricle/cli_spec.rb`, `spec/fixtures/`.
+`spec/claricle/cli_spec.rb`, `spec/fixtures/`,
+`spec/support/pdf_builder.rb` and `spec/support/pdf_objstm_builder.rb`
+(the generated PDF corpus).

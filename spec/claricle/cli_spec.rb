@@ -3,6 +3,8 @@
 require "English"
 require "stringio"
 
+require_relative "../support/pdf_builder"
+
 RSpec.describe Claricle::Cli::Runner do
   status = described_class::Status
 
@@ -380,6 +382,20 @@ RSpec.describe Claricle::Cli::Runner do
         .to_stdout
     end
 
+    # And a PDF, for the same reason -- the handler specs pass :pdf
+    # explicitly, so nothing else drives the detector's bare `%PDF-`
+    # signature through to a rendered row. Generated into the builder's
+    # own temporary directory rather than committed -- the same reason
+    # the SVG cases below use a Tempfile: no PDF byte is checked into
+    # this repo.
+    it "inspects a PDF through the real detector" do
+      pdf = PdfBuilder.path(name: "cli")
+
+      expect { expect(described_class.run(["inspect", pdf])).to eq(0) }
+        .to output(/format: pdf.*meta\.pages: 1.*meta\.version: 1\.4.*parse status: ok/m)
+        .to_stdout
+    end
+
     # The fields a PNG inspection can fill, or dropping one from the
     # renderer leaves the assertions above green. The single-axis rows
     # are the presenter's other branch and no PNG reaches them, so both
@@ -587,12 +603,12 @@ RSpec.describe Claricle::Cli::Runner do
     # pass if the command printed nothing at all.
     it "does not claim conform or convert yet" do
       expect { described_class.run(["formats"]) }
-        .to output("emf\tinspect\neps\tinspect\npng\tinspect\n" \
-                   "ps\tinspect\nsvg\tinspect\n").to_stdout
+        .to output("emf\tinspect\neps\tinspect\npdf\tinspect\n" \
+                   "png\tinspect\nps\tinspect\nsvg\tinspect\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
-      rows = %w[emf eps png ps svg].map do |format|
+      rows = %w[emf eps pdf png ps svg].map do |format|
         %({"format":"#{format}","inspect":true,"conform":false,"convert":false,"convert_to":[]})
       end
       expected = "[#{rows.join(",")}]\n"

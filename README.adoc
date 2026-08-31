@@ -59,6 +59,24 @@ The name reflects what the library is for:
   reported: the parser fills it in only for the two-argument
   `%%Pages: n m` form, so it would be present for some files and absent
   for others with nothing in `meta` to tell the cases apart
+* `inspect` for PDF -- the document's version and the **declared** page
+  count from the page tree's `/Count`. The version is the higher of the
+  two the file states, compared as numbers: the `%PDF-` header, and the
+  catalog's `/Version` where one is present, well formed and no more than
+  1,024 bytes long. It comes
+  from the file's own bytes rather than the parser, which fabricates
+  `1.4` for an empty file. The count is a declaration and
+  nothing walks the page tree to check it, so a document declaring
+  `/Count 999` over one page reports 999. Dimensions are deliberately
+  not reported: reaching the first page's box safely needs cycle-guarded
+  page-tree walking the parser does not offer. The count is omitted
+  whenever it cannot be read as a non-negative whole number of at most
+  1,024 decimal digits -- including when the reference holding it is
+  refused. A deadline expiry after the page-tree structure is read leaves
+  the file inspecting as `ok` with the count omitted. An earlier expiry
+  with no failure cause already established reports `parse_status:
+  "failed"` with code `pdf.timeout`; an established failure keeps its own
+  code
 * `formats`, listing each format and what Claricle can do with it
 * `Claricle::Image`, built from a path or from bytes
 * A unified issue and report model, serialising to and from JSON
@@ -66,8 +84,8 @@ The name reflects what the library is for:
 
 == What does not work yet
 
-* `inspect` for WMF and PDF -- EMF, PNG, SVG, EPS and PS have handlers
-  so far, so the rest raise `Claricle::UnsupportedFormat`
+* `inspect` for WMF -- every other format has a handler, so WMF is the
+  one that still raises `Claricle::UnsupportedFormat`
 * **`(atend)` bounding boxes for EPS and PS.** The value lives in the
   trailer, and resolving it needs the nested-document and data-section
   handling that reading only the header exists to avoid. Such a file
@@ -76,6 +94,10 @@ The name reflects what the library is for:
 * **CR-only line endings for EPS and PS.** The parser reads no DSC
   comments from them, so those files inspect as `ok` with no dimensions
   and no metadata
+* **CR-only line endings for PDF.** A lone `\r` in the xref and trailer
+  region leaves the parser reading no trailer at all, so those files
+  inspect as `failed` with `pdf.structure_unreadable` rather than `ok`.
+  Most common in PDFs produced by macOS and Quartz
 * `conform` and `convert` for every format. No handler implements
   either yet, so both raise `Claricle::UnsupportedFormat`. `claricle
   formats` reports this per format, and it reads the handlers rather
@@ -219,6 +241,7 @@ lib/claricle/
   registry.rb          # frozen format -> handler map
   handlers/base.rb     # what a handler subclasses
   handlers/metafile.rb # EMF header metadata
+  handlers/pdf.rb      # PDF version and declared page count
   handlers/png.rb      # PNG metadata
   handlers/postscript.rb # EPS and PS DSC header metadata
   handlers/svg.rb      # SVG root metadata
