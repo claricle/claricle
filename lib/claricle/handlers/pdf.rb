@@ -26,6 +26,18 @@ module Claricle
       # a 1024-byte EOF and 1025 otherwise.
       HEADER_SCAN_BYTES = 1024
 
+      # Body-derived values get the same order-of-magnitude publication
+      # bound as the header read. The page-count comparison is numeric so
+      # refusing an attacker-sized Integer never converts it back to an
+      # attacker-sized String.
+      #
+      # This bounds publication, not parsing. pdfrb has already
+      # materialised the Integer or Symbol before this handler sees it;
+      # bounding those source tokens would require replacing its tokenizer
+      # and compressed-object-stream path rather than enforcing our output
+      # contract here.
+      MAX_PAGE_COUNT = (10**HEADER_SCAN_BYTES) - 1
+
       # An interactive budget, NOT a safe upper bound, and the difference
       # is the whole of the tradeoff.
       #
@@ -54,7 +66,9 @@ module Claricle
       # would not open, the structure would not resolve, and the clock
       # ran out. Collapsing them reported "PDF structure could not be
       # read" for files whose structure was never reached.
-      # All FOUR, so a reader scanning this sees every failure mode. The
+      #
+      # All FOUR are listed here, so a reader scanning this sees every
+      # failure mode. The
       # timeout message interpolates `DEADLINE_SECONDS`, which is defined
       # above, so the number can never drift from the value that produced
       # it -- and there is only ever one deadline, so building the string
@@ -70,14 +84,14 @@ module Claricle
       # `catalog.value[:Version]` comes back as a Symbol for a Name, but
       # also as a String, a Float, an Array, a Reference or nil depending
       # on what the file wrote -- and as `:"1.7.2"`, `:X` or `:""` for a
-      # Name that is not a version. Only a Symbol matching this is taken,
-      # so both readings of the version are exactly as strict as the
-      # header gate, which refuses `%PDF-1.7.2` for the same reason.
+      # Name that is not a version. Only a Symbol within the publication
+      # bound and matching this is taken, so both readings of the version
+      # refuse `%PDF-1.7.2` for the same reason.
       VERSION_TOKEN = /\A\d+\.\d+\z/
 
-      private_constant :HEADER_SCAN_BYTES, :DEADLINE_SECONDS, :HEADER_CODE,
-                       :OPEN_CODE, :STRUCTURE_CODE, :TIMEOUT_CODE, :MESSAGES,
-                       :VERSION_TOKEN
+      private_constant :HEADER_SCAN_BYTES, :MAX_PAGE_COUNT, :DEADLINE_SECONDS,
+                       :HEADER_CODE, :OPEN_CODE, :STRUCTURE_CODE, :TIMEOUT_CODE,
+                       :MESSAGES, :VERSION_TOKEN
 
       # The file's own bytes decide the version, never the delegate.
       # `Document.open` succeeds on an empty file and the document it
@@ -198,16 +212,78 @@ module Claricle
       end
       private_constant :Resolver
 
+      # The publication boundary for both body-derived metadata values.
+      # Kept as private instance methods so each delegate read stays inside
+      # its existing `guarded` call and can still fail independently.
+      module MetadataGate
+        private
+
+        # The Catalog's own claim, believed only when it is a well-formed
+        # Name. Read RAW through `.value`, like every other key here: the
+        # typed `Dictionary#[]` coerces and mutates the node in place.
+        #
+        # A Reference goes through `Resolver.resolve`, never
+        # `document.object`, or the generation guard is bypassed for this
+        # key alone -- pdfrb resolves by object number and would hand back
+        # an object the file never authorised.
+        #
+        # `Document#version` and `Catalog#version_override` are both
+        # refused: the first fabricates "1.4" for an unreadable header,
+        # which is the whole reason this handler reads the bytes itself.
+        def catalog_version(document, catalog)
+          raw = catalog.value[:Version]
+          raw = Resolver.resolve(document, raw)&.value if raw.is_a?(::Pdfrb::Model::Reference)
+          return unless raw.is_a?(::Symbol)
+
+          token = raw.name
+          token if token.bytesize <= HEADER_SCAN_BYTES && token.match?(VERSION_TOKEN)
+        end
+
+        # `pages.count` is never called. Measured, it is not a declaration:
+        # sometimes the declared `/Count`, sometimes computed by walking
+        # `/Kids`, sometimes fabricated -- and on a self-cycling `/Kids`
+        # tree with `/Count` missing it raises `SystemStackError`.
+        # `Catalog#page_count` is forbidden too, because calling it MUTATES
+        # the Catalog: measured, `catalog.value[:Pages]` is a `Reference`
+        # before and a resolved `PageTreeNode` after, which leaves the
+        # generation guard with nothing to check.
+        #
+        # THE DECLARED COUNT, which can disagree with the real one without
+        # bound: a document with one leaf page declaring `/Count 999`
+        # reports 999. Nothing traverses the page tree to check it.
+        #
+        # `Integer` is a correctness requirement, not taste. Measured,
+        # `Models::Inspection` refuses a non-core leaf in `meta` with
+        # `Lutaml::Model::ValidationError`, and a Name arrives as a Symbol
+        # -- so putting a raw `:Bad` in `meta["pages"]` would not report a
+        # bad count, it would raise out of the model. The magnitude check is
+        # the publication bound: at most HEADER_SCAN_BYTES decimal digits.
+        def count_read(document, node)
+          raw = node.value[:Count]
+          raw = Resolver.resolve(document, raw)&.value if raw.is_a?(::Pdfrb::Model::Reference)
+          raw if raw.is_a?(::Integer) && !raw.negative? && raw <= MAX_PAGE_COUNT
+        end
+      end
+      include MetadataGate
+
+      private_constant :MetadataGate
+
       # What the timeout block managed to establish. A local carrier and
-      # never an ivar: `image.rb:231` builds a handler per call precisely
+      # never an ivar: `image.rb:233` builds a handler per call precisely
       # so it holds no per-call state, and the outer rescue has to tell
       # an expiry BEFORE the structure gate from one after it.
       Progress = Struct.new(:version, :node, :page_count, :code)
       private_constant :Progress
 
-      # One deadline over the whole operation, never one per stage: five
-      # stages each granted five seconds is a twenty-five second worst
-      # case wearing a five-second label.
+      # One deadline over every potentially unbounded step in the normal
+      # operation, including construction of its successful result, never
+      # one per stage: five stages each granted five seconds is a
+      # twenty-five second worst case wearing a five-second label.
+      #
+      # A post-structure expiry still returns `ok`. That recovery result is
+      # necessarily built after the clock has fired, but only after its
+      # page count is cleared; the remaining published strings are capped
+      # at HEADER_SCAN_BYTES, so the recovery has bounded input size.
       #
       # The expiry is caught OUTSIDE the block, and the default form is
       # not a style choice. Measured on Ruby 3.4.8: `Timeout.timeout(n)`
@@ -234,14 +310,14 @@ module Claricle
       # own dependency is fixed work that no input controls.
       #
       # The node is the flag. Nil means the deadline expired before the
-      # structure gate passed, which is "failed"; non-nil means it
-      # expired reading an optional field, which is "ok" with the count
-      # omitted. A separate boolean would shadow a value that already
-      # carries the same information.
+      # structure gate passed, which is "failed"; non-nil means it expired
+      # afterwards, while reading an optional field or constructing the
+      # result, which is "ok" with the count omitted. A separate boolean
+      # would shadow a value that already carries the same information.
       def inspection(image)
         progress = Progress.new
         require "pdfrb"
-        begin
+        result = begin
           Timeout.timeout(DEADLINE_SECONDS) { run_stages(image, progress) }
         rescue Timeout::Error
           # `||=`, because a code already set names a cause the run
@@ -251,10 +327,11 @@ module Claricle
           # that refusal `pdf.timeout` -- one code per cause, reporting
           # the wrong one.
           progress.code ||= TIMEOUT_CODE unless progress.node
+          progress.page_count = nil
         end
         return failure(image, progress.code) if progress.code
 
-        readable(image, progress)
+        result || readable(image, progress)
       end
 
       private
@@ -271,6 +348,7 @@ module Claricle
 
           open_document(path, progress)
         end
+        readable(image, progress) unless progress.code
       end
 
       # The BLOCK form, always. Measured on a 1 MB file: the non-block
@@ -384,24 +462,6 @@ module Claricle
         [catalog, typed(Resolver.resolve(document, catalog.value[:Pages]), :Pages)]
       end
 
-      # The Catalog's own claim, believed only when it is a well-formed
-      # Name. Read RAW through `.value`, like every other key here: the
-      # typed `Dictionary#[]` coerces and mutates the node in place.
-      #
-      # A Reference goes through `Resolver.resolve`, never
-      # `document.object`, or the generation guard is bypassed for this
-      # key alone -- pdfrb resolves by object number and would hand back
-      # an object the file never authorised.
-      #
-      # `Document#version` and `Catalog#version_override` are both
-      # refused: the first fabricates "1.4" for an unreadable header,
-      # which is the whole reason this handler reads the bytes itself.
-      def catalog_version(document, catalog)
-        raw = catalog.value[:Version]
-        raw = Resolver.resolve(document, raw)&.value if raw.is_a?(::Pdfrb::Model::Reference)
-        raw.to_s if raw.is_a?(::Symbol) && raw.match?(VERSION_TOKEN)
-      end
-
       # The NUMERIC MAXIMUM, and every word of that is load-bearing.
       #
       # Not "prefer the Catalog": a real file can declare a LOWER
@@ -422,30 +482,6 @@ module Claricle
       # rescued delegate failure -- right by accident.
       def typed(object, name)
         object if object&.value&.[](:Type) == name
-      end
-
-      # `pages.count` is never called. Measured, it is not a declaration:
-      # sometimes the declared `/Count`, sometimes computed by walking
-      # `/Kids`, sometimes fabricated -- and on a self-cycling `/Kids`
-      # tree with `/Count` missing it raises `SystemStackError`.
-      # `Catalog#page_count` is forbidden too, because calling it MUTATES
-      # the Catalog: measured, `catalog.value[:Pages]` is a `Reference`
-      # before and a resolved `PageTreeNode` after, which leaves the
-      # generation guard with nothing to check.
-      #
-      # THE DECLARED COUNT, which can disagree with the real one without
-      # bound: a document with one leaf page declaring `/Count 999`
-      # reports 999. Nothing traverses the page tree to check it.
-      #
-      # `Integer` is a correctness requirement, not taste. Measured,
-      # `Models::Inspection` refuses a non-core leaf in `meta` with
-      # `Lutaml::Model::ValidationError`, and a Name arrives as a Symbol
-      # -- so putting a raw `:Bad` in `meta["pages"]` would not report a
-      # bad count, it would raise out of the model.
-      def count_read(document, node)
-        raw = node.value[:Count]
-        raw = Resolver.resolve(document, raw)&.value if raw.is_a?(::Pdfrb::Model::Reference)
-        raw if raw.is_a?(::Integer) && !raw.negative?
       end
 
       def failure(image, code)

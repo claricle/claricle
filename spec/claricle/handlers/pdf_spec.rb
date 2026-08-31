@@ -55,7 +55,7 @@ RSpec.describe "Claricle PDF handler" do
     [[1, gens[0], cat], [2, gens[1], pages], [3, gens[2], PdfBuilder::PAGE]] + extra
   end
 
-  def pages_node(count) = "<< /Type /Pages /Kids [3 0 R]#{count} >>"
+  def pages_node(fragment) = "<< /Type /Pages /Kids [3 0 R]#{fragment} >>"
 
   # A page tree whose `/Count` is the indirect object 4, with that object
   # spelled by the caller. That is a fourth object on top of the
@@ -294,6 +294,16 @@ RSpec.describe "Claricle PDF handler" do
 
     it "takes the Catalog's version when it is the later one" do
       expect(version_of("%PDF-1.4", "/Version /1.7")).to eq("1.7")
+    end
+
+    it "publishes only Catalog versions within the metadata size limit" do
+      at_limit = "1.#{"9" * 1022}"
+      over_limit = "#{at_limit}9"
+
+      published = [at_limit, over_limit].map do |token|
+        version_of("%PDF-1.4", "/Version /#{token}")
+      end
+      expect(published).to eq([at_limit, "1.4"])
     end
 
     # MANDATORY. No real PDF measured here runs in this direction, so a
@@ -849,6 +859,18 @@ RSpec.describe "Claricle PDF handler" do
       path = pdf(objects: objects(pages: "<< /Type /Pages /Kids [] /Count 0 >>"))
       expect(inspect_pdf(path).meta).to eq("version" => "1.4", "pages" => 0)
     end
+
+    it "publishes only counts within the metadata size limit" do
+      at_limit = "9" * 1024
+      over_limit = "1#{"0" * 1024}"
+      published = [at_limit, over_limit].map do |digits|
+        path = objstm(bodies: [PdfBuilder::CATALOG, pages_node(" /Count #{digits}"),
+                               PdfBuilder::PAGE])
+        inspect_pdf(path).meta["pages"]&.to_s
+      end
+
+      expect(published).to eq([at_limit, nil])
+    end
   end
 
   describe "failures at open" do
@@ -896,6 +918,27 @@ RSpec.describe "Claricle PDF handler" do
       inspect_pdf(pdf)
 
       expect(Timeout).to have_received(:timeout).once
+    end
+
+    it "bounds successful result construction and recovers without the count" do
+      with_deadline(0.5)
+      inside_deadline = false
+      allow(Timeout).to receive(:timeout).and_wrap_original do |original, *args, &block|
+        original.call(*args) do
+          inside_deadline = true
+          block.call
+        ensure
+          inside_deadline = false
+        end
+      end
+      allow(handler).to receive(:readable).and_wrap_original do |original, *args|
+        sleep 5 if inside_deadline
+        original.call(*args)
+      end
+
+      inspection = inspect_pdf(pdf)
+      expect([inspection.parse_status, inspection.meta])
+        .to eq(["ok", { "version" => "1.4" }])
     end
 
     # A `/Prev` pointing at its own xref offset never returns at all, so
@@ -984,8 +1027,8 @@ RSpec.describe "Claricle PDF handler" do
   # has been missed twice already, once for the four `*_CODE` constants
   # and once for `VERSION_TOKEN` when the version comparison landed.
   it "keeps its helpers and its tuning constants private" do
-    %i[VersionGate Resolver Progress DEADLINE_SECONDS HEADER_SCAN_BYTES MESSAGES
-       VERSION_TOKEN HEADER_CODE OPEN_CODE STRUCTURE_CODE TIMEOUT_CODE]
+    %i[VersionGate Resolver MetadataGate Progress DEADLINE_SECONDS HEADER_SCAN_BYTES
+       MAX_PAGE_COUNT MESSAGES VERSION_TOKEN HEADER_CODE OPEN_CODE STRUCTURE_CODE TIMEOUT_CODE]
       .each { |name| expect(pdf_class.const_get(name, false)).not_to be_nil, name.to_s }
 
     expect(pdf_class.constants(false)).to be_empty

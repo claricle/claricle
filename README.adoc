@@ -62,16 +62,21 @@ The name reflects what the library is for:
 * `inspect` for PDF -- the document's version and the **declared** page
   count from the page tree's `/Count`. The version is the higher of the
   two the file states, compared as numbers: the `%PDF-` header, and the
-  catalog's `/Version` where one is present and well formed. It comes
+  catalog's `/Version` where one is present, well formed and no more than
+  1,024 bytes long. It comes
   from the file's own bytes rather than the parser, which fabricates
   `1.4` for an empty file. The count is a declaration and
   nothing walks the page tree to check it, so a document declaring
   `/Count 999` over one page reports 999. Dimensions are deliberately
   not reported: reaching the first page's box safely needs cycle-guarded
   page-tree walking the parser does not offer. The count is omitted
-  whenever it cannot be read as a non-negative whole number -- including
-  when the reference holding it is refused, and when the deadline
-  expires before it is read -- and the file still inspects as `ok`
+  whenever it cannot be read as a non-negative whole number of at most
+  1,024 decimal digits -- including when the reference holding it is
+  refused. A deadline expiry after the page-tree structure is read leaves
+  the file inspecting as `ok` with the count omitted. An earlier expiry
+  with no failure cause already established reports `parse_status:
+  "failed"` with code `pdf.timeout`; an established failure keeps its own
+  code
 * `formats`, listing each format and what Claricle can do with it
 * `Claricle::Image`, built from a path or from bytes
 * A unified issue and report model, serialising to and from JSON

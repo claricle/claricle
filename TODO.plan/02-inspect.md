@@ -71,7 +71,8 @@ earlier "200x100 page" described a fixture that was never built.
 - New deps in gemspec as item 02's handlers land: `png_conform`,
   `postscript`, `pdfrb` — three-segment constraints on the reviewed line
   (D13), not a floating `~> 0.x`. Locally installed and reviewed:
-  png_conform 0.1.4, postscript 0.2.0, pdfrb 0.7.23. The earlier plan's
+  png_conform 0.1.4, postscript 0.2.0 and pdfrb 0.7.23, with PDF behavior
+  re-verified on 0.7.49, which resolves here. The earlier plan's
   `png_conform ~> 0.7` figure was wrong and contradicted this list.
   `svg_conform` belongs to item 03 and `vectory` to item 04; neither is
   introduced here. Item 04's `vectory → emfsvg` chain will bring
