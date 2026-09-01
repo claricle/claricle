@@ -126,6 +126,12 @@ RSpec.describe Claricle::Cli::Runner do
       writer&.close
     end
 
+    def shell_factory(shell)
+      Class.new do
+        define_singleton_method(:new) { shell }
+      end
+    end
+
     it "returns 0 for version and prints it" do
       expect { expect(described_class.run(["version"])).to eq(0) }
         .to output("Claricle version #{Claricle::VERSION}\n").to_stdout
@@ -275,6 +281,189 @@ RSpec.describe Claricle::Cli::Runner do
       allow(JSON).to receive(:generate).with([]).and_raise(Errno::EPIPE)
 
       expect(described_class.run(%w[formats --json], output: StringIO.new)).to eq(4)
+    end
+
+    # General help runs `printable_commands` before output. Command help
+    # queues "Usage:" first, then calls `banner` to generate its next line.
+    # Neither generation failure is an output-stream EPIPE, so both must
+    # remain outside the closed-output rescue.
+    it "maps help generation's broken pipe to 4" do
+      allow(Claricle::Cli).to receive(:printable_commands).and_raise(Errno::EPIPE)
+
+      expect(described_class.run(["help"], output: StringIO.new)).to eq(4)
+    end
+
+    it "maps command help generation's broken pipe to 4" do
+      allow(Claricle::Cli).to receive(:banner).and_raise(Errno::EPIPE)
+
+      expect(described_class.run(%w[help version], output: StringIO.new)).to eq(4)
+    end
+
+    # The stored writer stays OPEN; it is the pipe's READER that is gone,
+    # so the first write raises EPIPE. Closing the writer itself would
+    # raise IOError instead and exit 4, which is a different contract and
+    # deliberately not what this pins.
+    it "returns 0 when a custom shell's stored output has lost its reader" do
+      reader, writer = IO.pipe
+      reader.close
+      custom_shell = Class.new(Thor::Shell::Basic) do
+        attr_reader :calls
+
+        def initialize(output)
+          super()
+          @output = output
+          @pending = []
+          @calls = []
+        end
+
+        def say(message = "", *)
+          @calls << :say
+          @pending << message
+        end
+
+        def print_table(*)
+          @calls << :print_table
+          @output.puts(*@pending)
+        end
+      end.new(writer)
+      allow(Thor::Base).to receive(:shell).and_return(shell_factory(custom_shell))
+
+      expect(described_class.run(["help"], output: StringIO.new)).to eq(0)
+      expect(custom_shell.calls).to eq(%i[say print_table])
+    ensure
+      writer&.close
+    end
+
+    # Runner asks the settable `Thor::Base.shell` factory for each
+    # invocation's shell. Returning this exact instance exercises the real
+    # Runner path while proving its singleton output behaviour is preserved.
+    it "preserves a caller-supplied shell's singleton help behaviour" do
+      sink = StringIO.new
+      injected = Thor::Base.shell.new
+      injected.define_singleton_method(:say) do |message = "", *|
+        sink.puts("custom:#{message}")
+      end
+      injected.define_singleton_method(:print_table) do |rows, **|
+        sink.puts("custom-table:#{rows.length}")
+      end
+      allow(Thor::Base).to receive(:shell).and_return(shell_factory(injected))
+
+      expect do
+        expect(described_class.run(["help"], output: StringIO.new)).to eq(0)
+      end.to output("").to_stdout
+
+      # Deliberately NOT an equality check on the row count. The command
+      # inventory is pinned once, on its own example further down; matching
+      # it here as well would make adding a command look like a
+      # singleton-replay regression -- the same trap the terminator
+      # example's comment warns about.
+      expect(sink.string).to match(/\Acustom:Commands:\ncustom-table:\d+\ncustom:\n\z/)
+    end
+
+    # `help` is public, so whatever the replay returns becomes its return
+    # value on the success path. Returning the recorder's `@calls` would
+    # hand a library caller this class's internals -- a list of recorded
+    # method names and argument arrays -- as if it were an answer.
+    it "returns nil from help rather than the recorded calls" do
+      sink = StringIO.new
+      shell = Thor::Base.shell.new
+      shell.define_singleton_method(:stdout) { sink }
+      cli = Claricle::Cli.new([], {}, shell: shell)
+
+      expect(cli.help("version")).to be_nil
+      expect(sink.string).to include("Display Claricle version")
+    end
+
+    # Thor calls `shell.say` / `print_table` / `print_wrapped` and nothing
+    # else, so replay must not require any method beyond those three. A
+    # `BasicObject` shell inherits only the eight methods BasicObject
+    # defines; `public_send` is an Object method and is NOT among them.
+    # Thor's own help path drives such a shell happily, so dispatching
+    # replay through `public_send` would narrow the set of shells this CLI
+    # accepts below what Thor itself accepts.
+    it "replays onto a shell that does not inherit Object's methods" do
+      reached = []
+      bare = Class.new(BasicObject) do
+        define_method(:respond_to?) { |*| false }
+        define_method(:say) { |*, **, &_block| reached << :say }
+        define_method(:print_table) { |*, **, &_block| reached << :print_table }
+        define_method(:print_wrapped) { |*, **, &_block| reached << :print_wrapped }
+      end.new
+      allow(Thor::Base).to receive(:shell).and_return(shell_factory(bare))
+
+      expect(described_class.run(["help"], output: StringIO.new)).to eq(0)
+      expect(reached).to eq(%i[say print_table say])
+    end
+
+    # `recorded_help` swaps `self.shell` for a recorder and restores it in
+    # an `ensure`. This example and the one after it are the only two that
+    # cover that restore, and the only two anywhere in this file that keep a
+    # `Claricle::Cli` instance and call `help` on it. (One later example
+    # constructs a Cli too, to prove `Object#inspect` survives, but it
+    # discards the instance immediately.) Every other example goes through
+    # `Runner`, which constructs a fresh Cli per invocation, so a shell left
+    # behind is never observed there. `help` is public, so a library caller
+    # CAN hold one instance across two calls -- and without the restore the
+    # second call finds the dead recorder still installed and records into
+    # it instead of printing.
+    it "restores the caller's shell so a second help still reaches it" do
+      sink = StringIO.new
+      shell = Thor::Base.shell.new
+      shell.define_singleton_method(:stdout) { sink }
+      cli = Claricle::Cli.new([], {}, shell: shell)
+
+      cli.help("version")
+      first = sink.string.bytesize
+      cli.help("version")
+
+      expect(cli.shell).to be(shell)
+      expect(sink.string.bytesize).to eq(first * 2)
+    end
+
+    # The restore is an `ensure` rather than a plain trailing line
+    # precisely so a FAILED generation cannot strand the recorder on the
+    # instance. Moving it out of the `ensure` keeps every other example in
+    # this file green, so without this one nothing distinguishes the two.
+    it "restores the caller's shell even when generation raises" do
+      sink = StringIO.new
+      shell = Thor::Base.shell.new
+      shell.define_singleton_method(:stdout) { sink }
+      cli = Claricle::Cli.new([], {}, shell: shell)
+
+      # Raise on the FIRST call only, then fall through to the real
+      # `banner`. `and_wrap_original` is a public API and survives an RSpec
+      # upgrade; reaching into `RSpec::Mocks.space` to undo the stub does
+      # neither, and the point of the example is the second call, not how
+      # the stub was retired.
+      raised = false
+      allow(Claricle::Cli).to receive(:banner).and_wrap_original do |original, *arguments|
+        next original.call(*arguments) if raised
+
+        raised = true
+        raise Errno::EPIPE
+      end
+
+      expect { cli.help("version") }.to raise_error(Errno::EPIPE)
+      expect(cli.shell).to be(shell)
+
+      cli.help("version")
+
+      expect(sink.string).to include("Display Claricle version")
+    end
+
+    it "writes help through a print/puts/flush-only stream" do
+      contents = +""
+      sink = Object.new
+      sink.define_singleton_method(:print) { |text| contents << text }
+      sink.define_singleton_method(:puts) { |text = ""| contents << text << "\n" }
+      sink.define_singleton_method(:flush) { nil }
+      injected = Thor::Base.shell.new
+      injected.define_singleton_method(:stdout) { sink }
+      allow(Thor::Base).to receive(:shell).and_return(shell_factory(injected))
+
+      expect(sink).not_to respond_to(:write)
+      expect(described_class.run(["help"], output: StringIO.new)).to eq(0)
+      expect(contents).to match(/\ACommands:\n(?:\s+\S+ .+\n)+\n\z/)
     end
 
     it "does not hide a non-output error from help" do
