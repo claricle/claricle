@@ -952,23 +952,48 @@ RSpec.describe "Claricle SVG handler" do
         source = %(<?xml version="1.0" encoding="#{char * 100_000}"?><svg/>)
 
         issues = scan(source.b)
+        message = issues.first.message
+
         expect(pairs(issues)).to eq([["error", "svg.encoding_unusable"]]), "for #{script}"
-        expect(issues.first.message.length).to eq(200), "for #{script}"
-        expect(issues.first.message).to be_valid_encoding, "for #{script}"
+        expect(message.length).to eq(200), "for #{script}"
+        expect(message).to start_with("Bad encoding name "), "for #{script}"
+        expect(message).to be_valid_encoding, "for #{script}"
       end
     end
 
-    # REXML's "first line" bounds LINES, not bytes -- measured at 100,027
-    # bytes for one long token. The cap counts CHARACTERS, so the byte
-    # ceiling is script-dependent: a fixed multiplier would be wrong.
-    # byteslice is deliberately not used; it split a CJK codepoint and
-    # Models::Issue then refused the value outright.
+    # REXML's "first line" bounds LINES, not bytes. For these 50,000
+    # character rows the untruncated diagnostic measures 50,027 bytes in
+    # ASCII, 150,027 in CJK and 200,026 in astral. The cap counts
+    # CHARACTERS, so the surviving byte count stays script-dependent --
+    # 200, 548 and 725 respectively -- and a fixed multiplier would be
+    # wrong. byteslice is deliberately not used; it split a CJK
+    # codepoint and Models::Issue then refused the value outright.
+    #
+    # The exact length is asserted TOGETHER WITH the diagnostic prefix,
+    # and both are needed. Every diagnostic here runs past 200
+    # characters, so `== 200` is the stronger bound and it alone kills a
+    # byteslice truncation (fewer than 200 CHARACTERS in CJK) and a
+    # wrong limit. But it passes a truncation keeping the LAST 200
+    # characters, which leaves a message that is entirely
+    # attacker-supplied with the diagnostic gone -- measured, that
+    # mutant survives the length assertion and dies on the prefix.
+    #
+    # Length is the symptom; the surviving prefix is the property.
+    # Relaxing this to `<= 200` was tried and reverted: it revived both
+    # mutants the exact length was catching. The prefix is REXML's own
+    # wording, so this pins a dependency claim too -- it goes red if
+    # that wording changes under us.
     it "bounds the message in characters, keeping it valid in every script" do
-      { "ASCII" => "a", "CJK" => "漢", "astral" => "\u{1F600}" }.each do |script, char|
+      {
+        "ASCII" => ["a", "Missing attribute equal: <"],
+        "CJK" => ["漢", "Missing attribute equal: <"],
+        "astral" => ["\u{1F600}", "Invalid attribute name: <"]
+      }.each do |script, (char, anchor)|
         source = %(<svg xmlns="#{svg_ns}"><rect #{char * 50_000})
 
         message = scan(source.b).first.message
         expect(message.length).to eq(200), "for #{script}"
+        expect(message).to start_with(anchor), "for #{script}"
         expect(message).to be_valid_encoding, "for #{script}"
         expect(message.bytesize).to be <= 800, "for #{script}"
       end
@@ -998,13 +1023,24 @@ RSpec.describe "Claricle SVG handler" do
     # fetch through Net::HTTP, Socket, IO.popen or any helper nobody
     # thought to name would sail past an enumerated hook list.
     #
-    # So every hostile document here declares an entity whose
-    # replacement text is MARKUP that would break well-formedness. A
-    # scan that resolved it -- by any route, from a file, over a socket,
-    # or from the internal subset -- reports a different verdict. A scan
-    # that never parsed at all fails the ordinary rows below. Only a
-    # parser that reads the document and resolves nothing returns [] for
-    # every row. The hooks stay as a supplement, not as the assertion.
+    # So every hostile row would report a DIFFERENT verdict if the scan
+    # resolved what it points at -- by any route, from a file, over a
+    # socket, or from the internal subset. Most rows get there by
+    # declaring an entity whose replacement text is MARKUP that breaks
+    # well-formedness.
+    #
+    # The external-DTD row is the exception and earns its place by
+    # working differently. Measured: neither the document nor the canary
+    # file contains an `<!ENTITY` declaration, and `&x;` is referenced
+    # undeclared. So what this row pins is that the subset is never
+    # FETCHED -- witnessed by the canary never reaching the message and
+    # by the File/IO wrappers below staying unhit -- rather than that a
+    # declared entity is never expanded.
+    #
+    # A scan that never parsed at all fails the ordinary rows below.
+    # Only a parser that reads the document and resolves nothing returns
+    # [] for every row. The hooks stay as a supplement, not the
+    # assertion.
     it "never fetches an external entity and never expands one" do
       canary = "#{Dir.tmpdir}/claricle-canary-#{Process.pid}.txt"
       # Markup, so inlining it is observable, plus a canary string so a

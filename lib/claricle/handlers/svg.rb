@@ -132,6 +132,21 @@ module Claricle
         #     malformed SVG there is, `<svg>Tom & Jerry</svg>`, and in
         #     `id="a<b"`.
         #
+        # Every gap named here -- the two families above and the third
+        # below -- is a false NEGATIVE: input this scan calls clean that
+        # a validator rejects. That direction is the one card 03 needs
+        # stated, and it is not interchangeable with the opposite risk
+        # of flagging valid input.
+        #
+        # A THIRD family is unrelated to `Text.check`: a CDATA section
+        # at top level AFTER the root element. `count_roots` sees a
+        # :cdata event, which it ignores, so `<svg/><![CDATA[x]]>` scans
+        # clean while xmllint calls it "Extra content at the end of the
+        # document". The boundary is narrow and was measured: a comment,
+        # a PI or whitespace after the root are LEGAL and correctly
+        # clean; text after the root, and a CDATA section BEFORE it, are
+        # both already caught as not-well-formed.
+        #
         # The second family is NOT a Char-production case: `&` and `<`
         # are perfectly legal XML Chars, which is why naming only the
         # Char production described half the gap. Every shape measured
@@ -173,8 +188,11 @@ module Claricle
             [issue(MULTIPLE_ROOTS_CODE, "document has #{roots} root elements")]
           rescue REXML::ParseException => e
             [parse_failure(e)]
-          # Its own clause: EncodingError is unrelated to ArgumentError,
-          # so neither rescue above reaches it. REXML transcodes lazily
+          # Its own clause, sitting between the ParseException rescue
+          # above and the ArgumentError rescue below. All three classes
+          # are pairwise non-subtypes in both directions -- measured --
+          # so no clause can shadow another and the order is free.
+          # REXML transcodes lazily
           # while parsing, so a source whose bytes are truncated
           # mid-character raises from inside the pull loop rather than
           # arriving as a ParseException -- measured on 13 bytes, a
@@ -202,9 +220,18 @@ module Claricle
             bytes.force_encoding(Encoding::UTF_8)
           end
 
-          # Loops to :end_document rather than on `has_next?`: measured,
-          # a `has_next?` loop never sees the closing events, so `<svg/>`
-          # reads back as depth 1 and a second root goes unnoticed.
+          # Loops to :end_document rather than on `has_next?` because
+          # the final pull is what runs REXML's end-of-input check.
+          # Parsing `<svg>` both ways:
+          #
+          #   has_next?      -> no raise
+          #   :end_document  -> REXML::ParseException
+          #
+          # Root COUNTING is not what buys this. Collecting the events
+          # of `<svg/><g/>` under `has_next?` gives
+          # [:start_element, :end_element, :start_element], which the
+          # depth walk below counts as 2 roots -- the same answer. The
+          # EOF check is the whole difference.
           #
           # The root count is Claricle's own. REXML accepts four of the
           # five second-root shapes measured -- only `<svg/><g></g>`
@@ -221,10 +248,13 @@ module Claricle
             roots
           end
 
-          # Undecodable bytes reach us as an ArgumentError wrapped in a
-          # ParseException, and that is an ENCODING failure rather than
-          # a well-formedness one. Routing on the exception class alone
-          # would file it under svg.not_well_formed.
+          # Undecodable bytes reach us wrapped in a ParseException, and
+          # the wrapped class is either an ArgumentError or an
+          # Encoding::InvalidByteSequenceError -- both are ENCODING
+          # failures rather than well-formedness ones, and
+          # UNDECODABLE_CAUSES names both. Routing on the OUTER
+          # exception class alone would file them under
+          # svg.not_well_formed.
           #
           # Which binary files land here is REXML's decision, not ours:
           # measured across nine shapes, seven carry the wrapped
