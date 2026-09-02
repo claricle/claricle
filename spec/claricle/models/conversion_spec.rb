@@ -45,10 +45,10 @@ RSpec.describe "conversion lossiness" do
   # discipline spec/fixtures/convert/README.md states for the fixtures
   # themselves. Two examples below assert it reproduces that file byte for
   # byte, so the two controls cannot drift apart.
-  def control_document(body = "", root_attrs: "")
+  def control_document(body = "", root_attrs: "", rect_attrs: "", line_attrs: "")
     root = %(<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"#{root_attrs}>)
-    rect = %(<rect width="10" height="10" fill="#ff0000"/>)
-    line = %(<line x1="0" y1="0" x2="10" y2="10" stroke="#000000"/>)
+    rect = %(<rect width="10" height="10" fill="#ff0000"#{rect_attrs}/>)
+    line = %(<line x1="0" y1="0" x2="10" y2="10" stroke="#000000"#{line_attrs}/>)
     "#{root}#{rect}#{body}#{line}</svg>"
   end
 
@@ -372,6 +372,22 @@ RSpec.describe "conversion lossiness" do
       expect(lossiness::IGNORED).to eq(%w[svg defs])
       expect(lossiness::ATTR_FEATURES).to eq("clip-path" => :clip_path)
       expect(lossiness::KEPT_FEATURES).to eq(lossiness::RULES.values.flat_map { _1[:kept] }.uniq)
+
+      # "EVERY rule table" named five and left four unpinned, which is the
+      # expensive kind of miss: the next reader checks the name and stops
+      # looking. Adding `transform` to ATTR_HARMLESS kept the whole suite green
+      # while `<rect transform="scale(99)"/>` went `unknown` -> `lossless`.
+      expect(lossiness::ATTR_HARMLESS).to eq(%w[version id])
+      expect(lossiness::ATTR_ALLOWED_PREFIXED).to eq("xml" => %w[space lang])
+      expect(lossiness::SUBSET_DECLARATIONS)
+        .to eq(%i[entitydecl attlistdecl elementdecl notationdecl])
+      expect(lossiness::VALUE_RULES.keys)
+        .to eq(%w[fill stroke width height x y x1 y1 x2 y2 viewBox])
+
+      # Derived, not spelled twice. Listed separately the two could drift, and
+      # that drift fails OPEN -- a declaration type in KNOWN_EVENTS but not in
+      # SUBSET_DECLARATIONS is a recognised event nobody notes.
+      expect(lossiness::KNOWN_EVENTS).to include(*lossiness::SUBSET_DECLARATIONS)
     end
 
     it "reads the whole document rather than a bounded prefix" do
@@ -398,6 +414,24 @@ RSpec.describe "conversion lossiness" do
       expect(classify("opacity_rect", to: :emf)).to eq("unknown")
     end
 
+    # ATTR_HARMLESS was exercised in NEITHER direction, and the reason is not
+    # visible by reading: `id=` appears in six fixtures and every one of them
+    # is a gradient or a clipPath, whose verdict is already settled by the
+    # lossy step before the harmless table is ever consulted. So no `lossless`
+    # document in the corpus reached the table at all -- a property the whole
+    # corpus shared that nobody chose.
+    #
+    # Both directions here. Adding `transform` to the table keeps the suite
+    # green without the last row.
+    it "admits the harmless attribute names and only those" do
+      %w[id version].each do |name|
+        expect(classify_source(control_document(rect_attrs: %( #{name}="a"))))
+          .to eq("lossless"), "#{name} is on the harmless list and should be admitted"
+      end
+      expect(classify_source(control_document(rect_attrs: %( transform="scale(99)"))))
+        .to eq("unknown")
+    end
+
     it "reads attributes on elements whose own contribution is ignored" do
       expect(classify("root_style_rect")).to eq("unknown")
     end
@@ -420,6 +454,16 @@ RSpec.describe "conversion lossiness" do
         expect(classify(name)).to eq("unknown"), "#{name} should be unknown"
       end
       expect(classify("bare_doctype_rect")).to eq("lossless")
+
+      # SUBSET_DECLARATIONS names four types and the fixtures reached two of
+      # them. Dropping `elementdecl` or `notationdecl` from the table left the
+      # suite green while these two documents went `unknown` -> `lossless`,
+      # and both are reachable input.
+      { "<!ELEMENT rect EMPTY>" => :elementdecl,
+        %(<!NOTATION gif SYSTEM "g">) => :notationdecl }.each do |declaration, type|
+        document = "<!DOCTYPE svg [#{declaration}]>#{control_document}"
+        expect(classify_source(document)).to eq("unknown"), "#{type} should be unknown"
+      end
     end
 
     it "never waves through a processing instruction" do
@@ -431,6 +475,13 @@ RSpec.describe "conversion lossiness" do
     it "allows xml:space only because a text-bearing element is separately unclassified" do
       expect(classify("xml_space_rect")).to eq("lossless")
       expect(classify("xml_space_text")).to eq("unknown")
+
+      # `xml:lang` is the other half of the allowance and had nothing
+      # exercising it; `xml:base` is the control, so adding a name to the
+      # allowlist cannot stay green.
+      expect(classify_source(control_document(rect_attrs: %( xml:lang="en")))).to eq("lossless")
+      expect(classify_source(control_document(rect_attrs: %( xml:base="http://e/"))))
+        .to eq("unknown")
     end
 
     it "does not let a non-xml prefixed attribute through the xml: allowance" do
@@ -452,8 +503,25 @@ RSpec.describe "conversion lossiness" do
          paint_stroke_url_rect].each do |name|
         expect(classify(name)).to eq("unknown"), "#{name} should be unknown"
       end
+
+      # HEX_COLOUR's three-digit branch had nothing exercising it, and the
+      # over-long form is its control: widened to `/\A#\h+\z/`, both of these
+      # stay green without the second line.
+      expect(classify_source(control_document.sub(%(fill="#ff0000"), %(fill="#f00"))))
+        .to eq("lossless")
+      expect(classify_source(control_document.sub(%(fill="#ff0000"), %(fill="#ff00000000"))))
+        .to eq("unknown")
     end
 
+    # "the whole geometry-name set" is nine names, and the fixtures reach three
+    # of them -- `width`, `height`, `y1`. Making the pattern permissive one name
+    # at a time left the other six green, each with a wrong-`lossless`
+    # counterexample, so the name promised more than the example delivered.
+    #
+    # The six are inline rather than six more near-duplicate fixtures: they
+    # differ from `rect_and_line.svg` by exactly one attribute, which is the
+    # discipline the fixture corpus exists to keep, and `control_document`
+    # above is asserted equal to that file.
     it "proves geometry by value, across the whole geometry-name set" do
       expect(classify("geom_px_rect")).to eq("lossless")
       expect(classify("geom_viewbox_rect")).to eq("lossless")
@@ -461,6 +529,34 @@ RSpec.describe "conversion lossiness" do
          geom_height_percent geom_y1_percent].each do |name|
         expect(classify(name)).to eq("unknown"), "#{name} should be unknown"
       end
+
+      expect(control_document).to eq(File.binread(path_for("rect_and_line")))
+
+      # `x1`, `x2` and `y2` are SUBSTITUTED into the line, never appended.
+      # Appending them a second time made all three examples pass for the
+      # wrong reason: REXML rejects a duplicate attribute outright, so the
+      # verdict was `unknown` before any value rule was consulted, and the
+      # rows would have stayed green with the geometry pattern deleted.
+      %w[x1 x2 y2].each do |name|
+        document = control_document.sub(%(#{name}="0"), %(#{name}="50%"))
+                                   .sub(%(#{name}="10"), %(#{name}="50%"))
+        expect(document).not_to eq(control_document), "#{name} substitution did not apply"
+        expect(classify_source(document)).to eq("unknown"), "a relative #{name} should be unknown"
+      end
+
+      # `x`, `y` and `viewBox` are absent from the control, so these add rather
+      # than replace.
+      expect(classify_source(control_document(rect_attrs: %( x="50%")))).to eq("unknown")
+      expect(classify_source(control_document(rect_attrs: %( y="50%")))).to eq("unknown")
+      expect(classify_source(control_document(root_attrs: %( viewBox="a b c d"))))
+        .to eq("unknown")
+
+      # The other direction, so a rule that simply refuses these names cannot
+      # pass the rows above. `x1`/`y1`/`x2`/`y2` carry absolute values in the
+      # control document itself, which is asserted `lossless` throughout.
+      expect(classify_source(control_document(rect_attrs: %( x="1" y="2")))).to eq("lossless")
+      expect(classify_source(control_document(root_attrs: %( viewBox="0 0 10 10"))))
+        .to eq("lossless")
     end
 
     it "never waves through an event type it does not recognise" do
@@ -479,6 +575,14 @@ RSpec.describe "conversion lossiness" do
       expect(lossiness::KNOWN_EVENTS - predicates)
         .to contain_exactly(:start_doctype, :end_doctype,
                             :processing_instruction, :end_document)
+
+      # `:end_document` looks dead and is not. No fixture delivers it, because
+      # all 62 were written with no trailing newline -- a property the whole
+      # corpus shares that nobody chose. Any trailing whitespace produces it,
+      # which is every SVG file an editor has ever saved, so dropping it from
+      # KNOWN_EVENTS would send every real-world document to `unknown`.
+      expect(classify_source("#{control_document}\n")).to eq("lossless")
+      expect(classify_source("#{control_document}\r\n  ")).to eq("lossless")
     end
 
     # PullParser does not report an unclosed stack at EOF, so "REXML raised"
@@ -503,9 +607,20 @@ RSpec.describe "conversion lossiness" do
       expect(classify("epilog_content")).to eq("unknown")
     end
 
+    # `no_root_dimensions.svg` omits BOTH, so it cannot tell an `&&` from
+    # either half on its own: dropping the `height` test keeps the suite green
+    # while `<svg width="100">` goes from `unknown` to `lossless`. The two
+    # single-dimension roots below are what discriminate.
     it "treats absent root dimensions as it treats a relative one" do
       expect(classify("no_root_dimensions")).to eq("unknown")
       expect(classify("rect_and_line")).to eq("lossless")
+
+      shape = %(<rect width="10" height="10" fill="#ff0000"/></svg>)
+      %w[width="100" height="50"].each do |only|
+        document = %(<svg xmlns="http://www.w3.org/2000/svg" #{only}>#{shape})
+        expect(classify_source(document)).to eq("unknown"),
+                                             "a root carrying only #{only} should be unknown"
+      end
     end
 
     it "refuses a source whose position cannot be observed" do
@@ -603,7 +718,20 @@ RSpec.describe "conversion lossiness" do
         # wrap the source in a StringIO). This pins the realistic slurp shape
         # -- one call returning the whole document -- rather than cumulative
         # bytes, which a streaming parse legitimately reads in full.
-        expect(wrapper.largest_read).to be < File.size(path_for("large_trailing_gradient"))
+        #
+        # The bound is DERIVED, not a constant. `< File.size` left 17,925
+        # bytes of slack: measured, the largest single read is 61 bytes, so a
+        # reader slurping 17,985 of the 17,986 would have passed. What the
+        # property actually says is that the largest read does not grow with
+        # the file, and that is what is asserted -- against a document 106
+        # times smaller, whose own largest read is the same 61. A slurp cannot
+        # satisfy it at any file size, and REXML's buffer size stays REXML's
+        # to change.
+        small = restricted.new(File.open(path_for("rect_and_line"), "rb"))
+        expect(lossiness.classify(source_format: :svg, target_format: :eps, source: small))
+          .to eq("lossless")
+        expect(wrapper.largest_read).to eq(small.largest_read)
+        expect(wrapper.largest_read).to be < File.size(path_for("rect_and_line"))
       end
     end
   end

@@ -93,10 +93,16 @@ module Claricle
       end
 
       # Unwraps the stored BinaryContent. The `*args` form, because lutaml
-      # defines attribute readers with `define_method` on this class and the
-      # generated reader doubles as the builder-block setter -- a zero-arity
-      # reader would make `content` the one attribute that form cannot set.
-      # Same shape as Inspection#meta (inspection.rb:160).
+      # defines this attribute's reader with `define_method` on this class and
+      # the generated reader doubles as the builder-block setter, so overriding
+      # it with a zero-arity reader would break `content "..."` in a builder
+      # block.
+      #
+      # NOT because every attribute here takes that form. `lossiness`, declared
+      # four lines above, is a zero-arity reader -- lutaml's enum path defines
+      # it elsewhere. Measured: `instance_method(:lossiness).arity` is 0 against
+      # -1 for `content`, and `conversion.lossiness("lossy")` raises
+      # ArgumentError. Same shape as Inspection#meta (inspection.rb:160).
       def content(*args)
         unless args.empty?
           self.content = args.first

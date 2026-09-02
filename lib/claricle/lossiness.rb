@@ -92,11 +92,18 @@ module Claricle
     # never emitted at all. Compare the two sets, never their sizes:
     #   ruby -rrexml/parsers/pullparser -e 'p REXML::Parsers::PullEvent
     #     .instance_methods(false).grep(/\?\z/).map { |m| m.to_s.chomp("?").to_sym }'
-    KNOWN_EVENTS = %i[
+    # The four declaration types come from SUBSET_DECLARATIONS rather than
+    # being spelled a second time, and the direction is why. Listed twice, the
+    # two could drift, and that drift FAILS OPEN: dropping `:entitydecl` from
+    # SUBSET_DECLARATIONS while this list still carried it turned an ENTITY
+    # document from `unknown` into `lossless`. Derived, the same edit drops the
+    # name from both, the event stops being recognised, and it falls to the
+    # `:unclassified` catch-all -- the safe direction. Same route KEPT_FEATURES
+    # takes above.
+    KNOWN_EVENTS = (%i[
       start_element end_element text cdata comment xmldecl
-      start_doctype end_doctype entitydecl attlistdecl elementdecl
-      notationdecl processing_instruction end_document
-    ].freeze
+      start_doctype end_doctype processing_instruction end_document
+    ] + SUBSET_DECLARATIONS).freeze
 
     # Opaque solid colour only. ARGUED from the card's measurement that SVG->EPS
     # renders a gradient as solid black, so an opaque solid colour is
