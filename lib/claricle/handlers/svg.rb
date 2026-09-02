@@ -73,35 +73,57 @@ module Claricle
                        :ISSUE_CODE, :ISSUE_MESSAGE
 
       # Claricle's own structural verdict on a WHOLE SVG (D23), as
-      # against `inspection` above, which is scoped to the root prefix
+      # against `inspection` below, which is scoped to the root prefix
       # and stays that way. No delegate is consulted: svg_conform's
       # `base` profile returns zero errors for raw binary, and UTF-32
-      # was measured passing every profile silently, so encoding has to
-      # be settled here before any profile validation runs.
+      # was measured passing every profile silently, so both have to be
+      # REFUSED here before any profile validation runs.
       #
-      # It reads the entire document and holds it. The cost is the file
-      # size plus a parser overhead that depends on CONTENT, not a fixed
-      # band -- measured on 64.0 MiB inputs, peak resident was 85.2 MiB
-      # for many small elements, 103.6 MiB malformed, 147-169 MiB for
-      # UTF-16, and 276.0 MiB for one 64 MiB attribute value, against
-      # 84.0 MiB for the bare read. So the worst measured case is about
-      # 4.3x the file size. That is conformance's cost to pay: item 02
-      # puts the bounded 8192-byte read in `inspect` and says
-      # whole-document well-formedness belongs here.
+      # "Refused", not "diagnosed as an encoding problem". Only the
+      # shapes REXML itself fails to decode carry an ArgumentError and
+      # so reach `svg.encoding_unusable`; the rest surface as
+      # `svg.not_well_formed`. Measured on UTF-32, only big-endian WITH
+      # a BOM lands on the encoding code -- the other three describe
+      # stray null bytes instead. Across nine raw-binary shapes it is
+      # seven against two. Both codes are a refusal, which is what D23
+      # needs; neither is a promise about which one a given file gets.
+      #
+      # It reads the entire document and holds it. The overhead on top
+      # of that tracks the largest single construct the parser holds --
+      # one attribute value, or one element's attribute set -- and NOT
+      # the file size, so there is no meaningful multiplier to quote.
+      # Measured on 64.0 MiB inputs against a 64 MiB bare read:
+      # ordinary documents (deep nesting, 40 attributes an element,
+      # many small elements) cost 1.7x the file, while one valid
+      # document carrying millions of attributes on a single element
+      # cost 12.0x, and a single 64 MiB attribute value 4.6x. The
+      # blow-up needs an adversarial document, which is exactly what a
+      # conformance checker is handed. That is conformance's cost to
+      # pay: item 02 puts the bounded 8192-byte read in `inspect` and
+      # says whole-document well-formedness belongs here.
       #
       # What it never does, on any input, is build a document tree --
       # measured at zero REXML::Element objects where REXML's DOM builds
       # one per element and peaked at 1.0-1.4 GiB on the same files.
-      # That is a structural property, not a memory bound: the 276 MiB
-      # run above also built zero.
+      # That is a structural property, not a memory bound: the
+      # many-attribute run above also built zero.
       module Structure
+        # Narrower than XML's full well-formedness: the Char production
+        # is NOT checked. REXML enforces it in `REXML::Text.check`,
+        # which only runs when the DOM builds Text nodes, and this route
+        # builds none. Measured, eight shapes REXML's DOM rejects are
+        # called sound here -- a NUL or FF or BEL in text or in an
+        # attribute, and the references `&#xD800;`, `&#0;`, `&#1;`,
+        # `&#xFFFE;`. Inherent to the no-tree route; item 03 documents
+        # per format exactly what `conform` checks.
         NOT_WELL_FORMED_CODE = "svg.not_well_formed"
         ENCODING_UNUSABLE_CODE = "svg.encoding_unusable"
         MULTIPLE_ROOTS_CODE = "svg.multiple_root_elements"
         UNDECODABLE_MESSAGE = "SVG source is not decodable text"
         # CHARACTERS, not bytes. REXML's first message line bounds lines
-        # and not bytes -- measured at 100,027 bytes for one long token
-        # -- and an issue has to stay printable as one line. So the real
+        # and not bytes -- the spec's 50,000-character token yields a
+        # 50,028-byte first line -- and an issue has to stay printable
+        # as one line. So the real
         # bound is 200 characters, hence at most 800 bytes; the byte
         # count is script-dependent and there is no fixed multiplier.
         # `byteslice` is deliberately not used: it split a CJK codepoint
@@ -162,10 +184,16 @@ module Claricle
             roots
           end
 
-          # Raw binary reaches us as an ArgumentError wrapped in a
-          # ParseException, and it is an ENCODING failure rather than a
-          # well-formedness one. Routing on the exception class alone
+          # Undecodable bytes reach us as an ArgumentError wrapped in a
+          # ParseException, and that is an ENCODING failure rather than
+          # a well-formedness one. Routing on the exception class alone
           # would file it under svg.not_well_formed.
+          #
+          # Which binary files land here is REXML's decision, not ours:
+          # measured across nine shapes, seven carry the wrapped
+          # ArgumentError and two -- a run of NULs, and every byte value
+          # 0-255 in order -- decode cleanly enough to fail as markup
+          # instead. Both outcomes refuse the file.
           def parse_failure(error)
             return issue(ENCODING_UNUSABLE_CODE, UNDECODABLE_MESSAGE) if undecodable?(error)
 
