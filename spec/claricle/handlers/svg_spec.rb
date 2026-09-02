@@ -895,11 +895,26 @@ RSpec.describe "Claricle SVG handler" do
       end
     end
 
+    # A regex anchor, not REXML's exact prose: the gemspec pins rexml at
+    # `~> 3.4.4`, which admits 3.4.5+, and a consumer resolves fresh.
     it "names an unusable declared encoding separately from a malformed document" do
       source = %(<?xml version="1.0" encoding="not-a-charset"?><svg/>)
 
-      expect(triples(scan(source.b)))
-        .to eq([["error", "svg.encoding_unusable", "Bad encoding name not-a-charset"]])
+      issues = scan(source.b)
+      expect(pairs(issues)).to eq([["error", "svg.encoding_unusable"]])
+      expect(issues.first.message).to match(/not-a-charset/)
+    end
+
+    # The declared encoding NAME is document content, so it is
+    # attacker-controlled, and it reaches `issue` by a different route
+    # than a parse failure does. Without the bound at the funnel this
+    # message measured 100,018 characters.
+    it "bounds the message on the encoding route too, not just the parse route" do
+      source = %(<?xml version="1.0" encoding="#{"x" * 100_000}"?><svg/>)
+
+      issues = scan(source.b)
+      expect(pairs(issues)).to eq([["error", "svg.encoding_unusable"]])
+      expect(issues.first.message.length).to eq(200)
     end
 
     # REXML's "first line" bounds LINES, not bytes -- measured at 100,027
