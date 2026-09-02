@@ -849,6 +849,14 @@ RSpec.describe "Claricle SVG handler" do
       end
     end
 
+    # The count itself, not merely the fact of a second root: with only
+    # the two-root rows above, hardcoding "2" in the message leaves
+    # every example green.
+    it "counts the roots it found rather than reporting a fixed number" do
+      expect(triples(scan(%(<svg xmlns="#{svg_ns}"/><g/><g/>).b)))
+        .to eq([["error", "svg.multiple_root_elements", "document has 3 root elements"]])
+    end
+
     # The one second-root shape REXML does catch, so the counter above
     # cannot be the only thing keeping that example green.
     it "reports the second-root shape REXML rejects as malformed instead" do
@@ -873,15 +881,21 @@ RSpec.describe "Claricle SVG handler" do
         "random bytes" => Random.new(7).bytes(512)
       }
       refused.each do |label, source|
+        # Either code is a refusal; which one a given file gets is
+        # REXML's decision, pinned per shape in the examples below.
         expect(pairs(scan(source))).to eq([["error", "svg.encoding_unusable"]])
           .or(eq([["error", "svg.not_well_formed"]])), "expected #{label} refused"
-        expect(scan(source)).not_to be_empty, "expected #{label} refused"
       end
       sound_documents.each_value { |source| expect(scan(source.b)).to eq([]) }
     end
 
-    # Raw binary is an ENCODING failure, not a well-formedness one, and
-    # REXML delivers it as an ArgumentError wrapped in a ParseException.
+    # Binary REXML cannot decode is an ENCODING failure, not a
+    # well-formedness one, and it arrives as an ArgumentError wrapped in
+    # a ParseException. Not every binary file takes this route -- across
+    # nine shapes, seven do and two decode far enough to fail as markup
+    # instead -- so these two fixtures are pinned by name rather than
+    # "raw binary" as a class.
+    #
     # Three wrong implementations fail this: `.lines.first` yields
     # "#<ArgumentError: ...>", the bare `to_s` yields "Exception
     # parsing", and routing on the exception class alone yields
@@ -977,8 +991,13 @@ RSpec.describe "Claricle SVG handler" do
           issues = scan(source.b)
           # Resolving the entity by ANY route inlines `</svg><g/>` and
           # the verdict changes. This is the assertion.
-          expect(issues).to eq([]), "expected #{label} left unresolved, got #{triples(issues).inspect}"
+          # Canary first: with the emptiness assertion ahead of it the
+          # example aborts on failure and this line never runs, so it
+          # would only ever test the string "[]", which cannot contain
+          # the canary. Proven by a mutant that leaks the fetched file
+          # into the message -- reordered, this line names the leak.
           expect(triples(issues).to_s).not_to include("TOP-SECRET-CANARY")
+          expect(issues).to eq([]), "expected #{label} left unresolved, got #{triples(issues).inspect}"
         end
         # The other direction: a scan that simply never parses would also
         # return [] above, so ordinary content must still be judged.
