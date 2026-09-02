@@ -2,6 +2,7 @@
 
 require "png_conform"
 require "stringio"
+require "tmpdir"
 require "zlib"
 
 # A StringIO that logs every #read and #seek call (method, argument,
@@ -686,6 +687,495 @@ RSpec.describe "Claricle PNG handler" do
         expect(into.map { |kept| [kept.type, kept.data] }).to eq([["pHYs", square_phys]])
         expect(io.read).to eq("#{[Zlib.crc32("IEND")].pack("N")}TAIL")
       end
+    end
+  end
+end
+
+# Byte-stream builders for the structural scanner's table. At file scope
+# because the table is enumerated when the example group is DEFINED, and
+# an instance method is not available there.
+#
+# Every stream is built from `.b` literals: a `"\xFF"` literal in this
+# UTF-8 source is a UTF-8 string carrying invalid bytes, and joining one
+# to packed binary raises `Encoding::CompatibilityError`.
+# Not an IO, deliberately. `each_byte`, `readpartial`, `gets` and the
+# rest raise NoMethodError here rather than consuming the file
+# unrecorded -- measured: a StringIO subclass intercepting only `read`
+# watched an `each_byte` consumer swallow a whole file and logged zero
+# calls, so the assertion was about the recorder, not the code.
+class CapabilityIO
+  attr_reader :reads
+
+  def initialize(file)
+    @file = file
+    @reads = []
+  end
+
+  def read(length = nil)
+    @file.read(length).tap { |bytes| @reads << bytes.to_s.bytesize }
+  end
+
+  def seek(*) = @file.seek(*)
+  def size = @file.size
+  def close = @file.close
+end
+
+module PngStreams
+  module_function
+
+  SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10].pack("C*")
+  IHDR_13 = [4, 3, 8, 6, 0, 0, 0].pack("NNC5")
+
+  def chunk(type, data)
+    [data.bytesize].pack("N") + type + data.b + [Zlib.crc32(type + data)].pack("N")
+  end
+
+  # A chunk header alone: a declared length and a type with no record
+  # behind them, which is how every truncation row is built.
+  def header(length, type)
+    [length].pack("N") + type.b
+  end
+
+  def png(*parts) = SIGNATURE + parts.join.b
+  def ihdr(payload = IHDR_13) = chunk("IHDR", payload)
+  def ihdr_chunk = ihdr
+  def iend = chunk("IEND", "")
+  def idat(payload) = chunk("IDAT", payload)
+  def payload_10_mib = "x" * 10_485_760
+end
+
+# The scanner's row tables, kept apart from the byte builders above so
+# neither module has to grow past what one concern needs.
+module PngRows
+  extend PngStreams
+
+  module_function
+
+  def built
+    trailing_rows.merge(duplicate_rows).merge(repeat_placement_rows).merge(truncation_rows)
+                 .merge(type_code_rows).merge(short_file_rows)
+  end
+
+  # Everything past IEND is outside the datastream and gets exactly one
+  # issue over the whole remainder. Which issue turns on whether that
+  # remainder opens with a COMPLETE IEND record, not merely the type.
+  # Every remainder starts at 45, so the rows differ only in what sits
+  # there and in how much of it there is.
+  def after_iend(tail, code, length, chunk_name)
+    [png(ihdr, iend) + tail.b, [["png.#{code}", "error", 45, length, chunk_name]]]
+  end
+
+  def trailing_rows = plain_trailing_rows.merge(second_iend_rows)
+
+  def plain_trailing_rows
+    {
+      "IEND first, no IHDR" => [png(iend), []],
+      "trailing IHDR after IEND" => after_iend(ihdr_chunk, "trailing_data", 25, nil),
+      "one trailing byte" => after_iend("x", "trailing_data", 1, nil)
+    }
+  end
+
+  # Which issue the remainder gets turns on whether it opens with a
+  # COMPLETE IEND record, not merely on the type bytes.
+  def second_iend_rows
+    {
+      # The SAME 20-byte remainder either way: only the declared span
+      # differs, so neither a `declared.zero?` nor a `remaining >= 12`
+      # shortcut can tell these two apart.
+      "complete second IEND, 20 declaring 8" =>
+        after_iend(header(8, "IEND") + ("z" * 12), "duplicate_iend", 20, "IEND"),
+      "incomplete second IEND, 20 declaring 13" =>
+        after_iend(header(13, "IEND") + ("z" * 12), "trailing_data", 20, nil),
+      # 42 bytes of remainder behind a 20-byte IEND record, so the range
+      # cannot be the record's span -- the two coincide at exactly 20 in
+      # the row above, which is the shape that hid this twice before.
+      "complete second IEND with 30 bytes behind it" =>
+        after_iend(header(8, "IEND") + ("z" * 12) + ("t" * 22), "duplicate_iend", 42, "IEND")
+    }
+  end
+
+  # Declared lengths 0, 6, 13 and 20 so no row's header-derived span can
+  # coincide with the ubiquitous 13 or with what is left in the file.
+  def repeat_row(payload, span)
+    [png(ihdr, ihdr(payload), iend), [["png.duplicate_ihdr", "error", 33, span, "IHDR"]]]
+  end
+
+  def duplicate_rows
+    {
+      "duplicate IHDR, 13" => repeat_row(PngStreams::IHDR_13, 25),
+      "duplicate IHDR, 20" => repeat_row("x" * 20, 32),
+      "duplicate IHDR, 0" => repeat_row("", 12),
+      "duplicate IHDR, 6" => repeat_row("x" * 6, 18)
+    }
+  end
+
+  # One issue per repeat, and a repeat is recognised wherever it sits --
+  # not only immediately after the first, which an adjacency-only
+  # detector would satisfy.
+  def repeat_placement_rows
+    {
+      "third IHDR emits a second issue" =>
+        [png(ihdr, ihdr, ihdr, iend),
+         [["png.duplicate_ihdr", "error", 33, 25, "IHDR"],
+          ["png.duplicate_ihdr", "error", 58, 25, "IHDR"]]],
+      "repeat separated by a complete chunk" =>
+        [png(ihdr, chunk("pHYs", [1, 1, 1].pack("NNC")), ihdr, iend),
+         [["png.duplicate_ihdr", "error", 54, 25, "IHDR"]]]
+    }
+  end
+
+  # The range is always the bytes really present, never the declared span.
+  def truncation_rows
+    {
+      "duplicate IHDR then truncated IDAT" =>
+        [png(ihdr, ihdr, header(13, "IDAT"), "z"),
+         [["png.duplicate_ihdr", "error", 33, 25, "IHDR"],
+          ["png.chunk_truncated", "error", 58, 9, "IDAT"]]],
+      "IEND one byte short" =>
+        [png(ihdr, iend)[0..-2], [["png.chunk_truncated", "error", 33, 11, "IEND"]]],
+      "seven stray bytes" =>
+        [png(ihdr, "1234567"), [["png.chunk_truncated", "error", 33, 7, nil]]]
+    }
+  end
+
+  # `chunk` is set only for four ASCII LETTERS, and only on the one code
+  # that derives it from bytes read off the file. "pHYs" is mixed case,
+  # so an uppercase-only predicate drops it; "1HDR" is ASCII but not
+  # letters, which an `ascii_only?` predicate would wrongly accept.
+  def type_code_rows
+    {
+      "exactly eight bytes remain" =>
+        [png(ihdr, header(0, "pHYs")), [["png.chunk_truncated", "error", 33, 8, "pHYs"]]],
+      "ASCII non-letter type" =>
+        [png(ihdr, header(65_535, "1HDR"), "z" * 8), [["png.chunk_truncated", "error", 33, 16, nil]]],
+      "high-byte type" =>
+        [png(ihdr, header(65_535, "\xFF\xFEab".b), "z" * 8),
+         [["png.chunk_truncated", "error", 33, 16, nil]]]
+    }
+  end
+
+  # Shorter than the signature, so there is no chunk stream at all and no
+  # range that could name one.
+  def short_file_rows
+    {
+      "seven-byte file" => ["abcdefg", [["png.chunk_truncated", "error", nil, nil, nil]]],
+      "empty file" => ["", [["png.chunk_truncated", "error", nil, nil, nil]]]
+    }
+  end
+
+  def fixtures
+    {
+      "doubled.png" => [["png.trailing_data", "error", 75, 75, nil]],
+      "phys_after_iend.png" => [["png.trailing_data", "error", 75, 21, nil]],
+      "truncated_ihdr.png" => [["png.chunk_truncated", "error", 8, 17, "IHDR"]],
+      "truncated_after_ihdr.png" => [["png.missing_iend", "error", nil, nil, "IEND"]],
+      "signature_only.png" => [["png.missing_iend", "error", nil, nil, "IEND"]]
+    }
+  end
+end
+
+# Inputs for the read-volume property, kept apart from the fault rows:
+# these vary by SIZE, and every one of them is well-formed enough that
+# what is being measured is the reading, not the reporting.
+module PngBounded
+  extend PngStreams
+
+  module_function
+
+  # Bytes read = 8 x headers examined. Rows 2 to 4 are what make that
+  # non-trivial: one CARRIES 10 MiB it never reads, one DECLARES 10 MiB
+  # it never reads, and one has a 10 MiB tail past IEND. Row 5 is the
+  # only one reaching the clean-end exit.
+  def bounded = bounded_clean.merge(bounded_edge)
+
+  def bounded_clean
+    {
+      "clean, small" => [png(ihdr, idat("x" * 18), iend), 24],
+      "clean, 10 MiB payload" => [png(ihdr, idat(payload_10_mib), iend), 24]
+    }
+  end
+
+  def bounded_edge
+    {
+      "truncated, declares 10 MiB" => [png(ihdr, header(10_485_760, "IDAT"), "zzzz"), 16],
+      "clean plus a 10 MiB tail" => [png(ihdr, idat("x" * 18), iend) + payload_10_mib, 32],
+      "ends cleanly with no IEND" => [png(ihdr, idat("x" * 18)), 16]
+    }
+  end
+end
+
+# The structural pre-pass (D23). Nothing calls `structural_issues` yet --
+# the conform wiring is item 03 -- so these drive it directly, the same
+# way the `read_chunks` examples above do.
+RSpec.describe "Claricle PNG structural scanner" do
+  let(:handler) { Claricle.const_get(:Handlers).const_get(:Png).new }
+
+  def fixture(name)
+    File.join(__dir__, "..", "..", "fixtures", "inspect", name)
+  end
+
+  def scanner_class
+    Claricle.const_get(:Handlers).const_get(:Png).const_get(:StructureScanner)
+  end
+
+  # Short names for the file-scope builders, so an example reads as the
+  # stream it builds rather than as a chain of module calls.
+  def ihdr = PngStreams::IHDR_13
+  def png(*parts) = PngStreams.png(*parts)
+  def chunk(type, data) = PngStreams.chunk(type, data)
+  def header(length, type) = PngStreams.header(length, type)
+
+  def scan(bytes)
+    scanner_class.new(StringIO.new(bytes.b)).issues
+  end
+
+  def tuples(bytes)
+    scan(bytes).map do |issue|
+      location = issue.location
+      [issue.code, issue.severity, location&.byte_offset, location&.byte_length, location&.chunk]
+    end
+  end
+
+  def scan_path(name)
+    handler.send(:structural_issues, Claricle::Image.from_path(fixture(name)))
+  end
+
+  # --- the boundedness harness ------------------------------------------
+  #
+  # Three layers, because two were not enough twice over. The allowlist
+  # ADDS size and seek to svg_spec.rb:49's list: this walk needs both, and
+  # without them the harness fails a CORRECT implementation, which is the
+  # worst way for a gate to be wrong.
+  # The scanner is measured to reach the filesystem through exactly ONE
+  # class method: File.open. So this is an ALLOWLIST -- every other way
+  # File or IO can hand back bytes is refused by name derived from the
+  # class, not by a list someone has to remember to extend.
+  #
+  # A denylist was tried and leaked three times: first `each_byte` past a
+  # read-only recorder, then `IO.binread` and the non-block `File.open`
+  # past a four-name list, then `File.new`, `File.foreach` and
+  # `File.readlines` past a six-name one. Each leak read the whole file
+  # while the example stayed green.
+  # MEASURED, not guessed: these are every File class method the example
+  # actually uses -- `open` for the scanner, the rest for the temporary
+  # file and its cleanup. None of the others returns file CONTENT.
+  def permitted_class_calls
+    %i[open join binwrite dirname expand_path lstat stat path unlink writable?]
+  end
+
+  def refused_class_calls
+    (File.singleton_methods | IO.singleton_methods).uniq - permitted_class_calls
+  end
+
+  # Wraps File.open in BOTH forms. The non-block form was measured
+  # handing back an unwrapped handle, which is a hole svg_spec.rb:82 has.
+  # Wraps File.open in BOTH forms -- the non-block form was measured
+  # handing back an unwrapped handle, which is a hole svg_spec.rb:82 has.
+  # EVERY handle is kept, not just the latest. Keeping one let a mutant
+  # slurp through a first File.open and then run the real scan through a
+  # second, overwriting the record and passing clean -- the record was
+  # single-valued where the behaviour is plural.
+  def watch_reads(events)
+    events[:wrappers] = []
+    allow(File).to receive(:open).and_wrap_original do |original, *args, &block|
+      next track(events, original.call(*args)) unless block
+
+      original.call(*args) { |file| block.call(track(events, file)) }
+    end
+  end
+
+  def track(events, file)
+    CapabilityIO.new(file).tap { |wrapper| events[:wrappers] << wrapper }
+  end
+
+  def bytes_read(events) = events[:wrappers].sum { |wrapper| wrapper.reads.sum }
+  def largest_read(events) = events[:wrappers].flat_map(&:reads).max
+
+  # `IO.binread` is NOT `File.binread` -- measured, the two Method objects
+  # are unequal -- so an expectation on File alone lets it through, and it
+  # never touches the instrumented handle either way.
+  # Refuse every class-level reader that is not File.open, on BOTH
+  # receivers: `IO.binread` is not `File.binread` -- measured, the two
+  # Method objects are unequal -- so guarding File alone lets it through.
+  def forbid_slurps
+    refused_class_calls.each do |name|
+      expect(File).not_to receive(name)
+      expect(IO).not_to receive(name) if IO.respond_to?(name)
+    end
+  end
+
+  def with_png_file(bytes)
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "probe.png")
+      File.binwrite(path, bytes.b)
+      yield path
+    end
+  end
+
+  describe "a well-formed datastream" do
+    # short_ihdr.png is the one that keeps this from drifting into content
+    # validation: its ihdr declares 9 bytes, which frames correctly.
+    %w[valid.png phys.png grayscale.png short_ihdr.png].each do |name|
+      it "reports nothing for #{name}" do
+        expect(scan_path(name)).to eq([])
+      end
+    end
+  end
+
+  describe "each fault's code, severity, range and chunk" do
+    it "reports nothing for a stream that ends at IEND with nothing after it" do
+      expect(tuples(PngRows.built.fetch("IEND first, no IHDR").first)).to eq([])
+    end
+
+    PngRows.built.except("IEND first, no IHDR").each do |label, (bytes, expected)|
+      it "reports #{label}" do
+        expect(tuples(bytes)).to eq(expected)
+      end
+    end
+
+    PngRows.fixtures.each do |name, expected|
+      it "reports #{name}" do
+        issues = scan_path(name).map do |issue|
+          location = issue.location
+          [issue.code, issue.severity, location&.byte_offset, location&.byte_length, location&.chunk]
+        end
+        expect(issues).to eq(expected)
+      end
+    end
+  end
+
+  # A forward guard for codes added later, not proof of anything about
+  # byte_length: a zero-length mutant satisfies it while failing ten
+  # other examples.
+  it "never names bytes the file does not contain" do
+    checked = 0
+
+    PngRows.built.each_value do |bytes, _expected|
+      scan(bytes).filter_map(&:location).each do |location|
+        next if location.byte_offset.nil?
+
+        checked += 1
+        expect(location.byte_offset + location.byte_length).to be <= bytes.bytesize
+      end
+    end
+
+    # Without this the example is vacuous: a scanner returning [] offers
+    # no location to inspect and every assertion above is skipped.
+    expect(checked).to eq(19)
+  end
+
+  # Documents the degeneracy directly: for each declared length the
+  # header-derived span differs from what is left in the file. NOT
+  # load-bearing on its own -- the four `duplicate_rows` examples run on
+  # byte-identical streams and a remainder-derived mutant fails all of
+  # them too, so this catches no mutant they miss.
+  it "derives byte_length from the chunk header, not from the remainder" do
+    {
+      20 => [77, 32], 0 => [57, 12], 13 => [70, 25], 6 => [63, 18]
+    }.each do |declared, (size, header_derived)|
+      bytes = png(chunk("IHDR", ihdr), chunk("IHDR", "x" * declared), chunk("IEND", ""))
+      expect(bytes.bytesize).to eq(size)
+      expect(header_derived).not_to eq(size - 33)
+      expect(tuples(bytes).first[3]).to eq(header_derived)
+    end
+  end
+
+  # LOAD-BEARING. Bytes read = 8 x headers examined, never a function of
+  # file size or declared length. Rows 2 to 4 are what make that
+  # non-trivial: one carries 10 MiB it never reads, one DECLARES 10 MiB
+  # it never reads, and one has a 10 MiB tail past IEND.
+  describe "bounded reads" do
+    PngBounded.bounded.each do |label, (bytes, expected_volume)|
+      it "reads #{expected_volume} bytes when the stream #{label}" do
+        events = {}
+
+        # The temporary file is written BEFORE the guards are armed:
+        # `Dir.mktmpdir` and `File.binwrite` are the test's own plumbing,
+        # not the scanner's reads, and arming first refuses them.
+        with_png_file(bytes) do |path|
+          watch_reads(events)
+          forbid_slurps
+
+          handler.send(:structural_issues, Claricle::Image.new(format: :png, path: path))
+        end
+
+        expect(bytes_read(events)).to eq(expected_volume)
+        expect(largest_read(events)).to eq(8)
+      end
+    end
+  end
+
+  # Invisible without this: replacing `issues` with a bare `scan` left
+  # all 45 scanner examples green while a second call appended a false
+  # duplicate-IHDR issue.
+  it "scans once however often issues is asked for" do
+    scanner = scanner_class.new(StringIO.new(png(chunk("IHDR", ihdr), chunk("IHDR", ihdr), chunk("IEND", ""))))
+
+    expect(scanner.issues.map(&:code)).to eq(["png.duplicate_ihdr"])
+    expect(scanner.issues.map(&:code)).to eq(["png.duplicate_ihdr"])
+    expect(scanner.issues).to equal(scanner.issues)
+  end
+
+  it "returns issues in byte order, with the rangeless terminal issue last" do
+    bytes = png(chunk("IHDR", ihdr), chunk("IHDR", ihdr))
+
+    expect(tuples(bytes)).to eq([["png.duplicate_ihdr", "error", 33, 25, "IHDR"],
+                                 ["png.missing_iend", "error", nil, nil, "IEND"]])
+  end
+
+  it "scans a content-born image identically, and to the expected value" do
+    bytes = File.binread(fixture("doubled.png"))
+    expected = [["png.trailing_data", "error", 75, 75, nil]]
+    issues = handler.send(:structural_issues, Claricle::Image.from_content(bytes, format: :png))
+
+    expect(issues.map { |i| [i.code, i.severity, i.location.byte_offset, i.location.byte_length, i.location.chunk] })
+      .to eq(expected)
+    expect(tuples(bytes)).to eq(expected)
+  end
+
+  # `message` is required, and nothing else here reads it. Asserting the
+  # text is what stops MESSAGES's seven strings being invented unreviewed.
+  describe "messages" do
+    it "states the record span against the bytes really left" do
+      expect(scan_path("truncated_ihdr.png").first.message)
+        .to eq("chunk needs 25 bytes but only 17 remain in the file")
+    end
+
+    # A residue runs 1 to 7 bytes, so both sides of the plural are
+    # reachable and both are asserted -- the singular alone is what a
+    # `"#{count} bytes"` shortcut gets wrong, and nothing else here reads it.
+    { 1 => "1 byte left", 7 => "7 bytes left" }.each do |residue, phrase|
+      it "names a #{residue}-byte shortfall when no header fits" do
+        expect(scan(png(chunk("IHDR", ihdr), "z" * residue)).first.message)
+          .to eq("#{phrase}, too few for a chunk header")
+      end
+    end
+
+    it "says the file is shorter than the signature" do
+      expect(scan("abc").first.message).to eq("file is shorter than the PNG signature")
+    end
+
+    it "names the missing terminator" do
+      expect(scan_path("truncated_after_ihdr.png").first.message)
+        .to eq("PNG datastream ends without an IEND chunk")
+    end
+
+    it "names a second IEND behind the end of the datastream" do
+      bytes = png(chunk("IHDR", ihdr), chunk("IEND", "")) + header(8, "IEND") + ("z" * 12)
+
+      expect(scan(bytes).first.message)
+        .to eq("a second IEND chunk follows the end of the datastream")
+    end
+
+    it "names bytes past the end without claiming they are a chunk" do
+      expect(scan_path("doubled.png").first.message).to eq("unexpected bytes after the IEND chunk")
+    end
+
+    it "says duplicate, not second, because a third repeat also emits" do
+      bytes = png(chunk("IHDR", ihdr), chunk("IHDR", ihdr), chunk("IHDR", ihdr), chunk("IEND", ""))
+      messages = scan(bytes).map(&:message).uniq
+
+      expect(messages).to eq(["duplicate IHDR chunk; a PNG datastream carries exactly one"])
     end
   end
 end
