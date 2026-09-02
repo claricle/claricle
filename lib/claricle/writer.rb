@@ -2,7 +2,8 @@
 
 # Required here rather than from the entry point: claricle.rb does not
 # require this file yet, so requiring it on its own is the only load path
-# it has. registry.rb does the same for the same reason.
+# it has. registry.rb also carries its own requires, though for its own
+# stated reason -- it IS required from claricle.rb:10.
 require_relative "errors"
 
 module Claricle
@@ -83,6 +84,11 @@ module Claricle
 
       # Returns true (folds), false (distinguishes) or UNDECIDABLE.
       #
+      # The BASENAME is upcased, never the whole path: upcasing the path
+      # uppercases every directory component, which on a case-sensitive
+      # filesystem does not exist, so the probe would report undecidable
+      # everywhere on Linux and refuse every legitimate batch.
+      #
       # UNDECIDABLE REFUSES the batch upstream. Treating an unprobeable
       # directory as case-sensitive would be fail-OPEN: it compares more
       # names as distinct and lets a real collision through.
@@ -96,11 +102,6 @@ module Claricle
         File.unlink(created) if created
       end
 
-      # The BASENAME is upcased, never the whole path: upcasing the path
-      # uppercases every directory component, which on a case-sensitive
-      # filesystem does not exist, so the probe would report undecidable
-      # everywhere on Linux and refuse every legitimate batch.
-      #
       # Returns the path ONLY once the EXCL open has returned, so a name
       # this probe did not create never becomes something the caller then
       # deletes. Armed before the open, an EEXIST clash would make the
@@ -121,6 +122,7 @@ module Claricle
         @destinations = destinations
         @sources = sources
         @force = force
+        @probed = {}
       end
 
       def check
@@ -137,7 +139,16 @@ module Claricle
 
       private
 
+      # File.dirname and File.basename silently drop a trailing separator,
+      # so "build/" was examined as "build", accepted whenever nothing of
+      # that name existed, and then failed out of File.link at exit 4 with
+      # the STAGE FILENAME in the message -- the exact leak the directory
+      # refusal exists to prevent, reached by a shape that skipped it. An
+      # empty destination failed the same way for the same reason.
       def examine(dest)
+        raise InvocationError, "output path is empty" if dest.empty?
+        raise InvocationError, "output path names a directory: #{dest}" if dest.end_with?(File::SEPARATOR)
+
         parent = File.dirname(dest)
         raise InvocationError, "output directory is not a directory: #{parent}" unless directory_stat(parent).directory?
 
@@ -216,8 +227,14 @@ module Claricle
             .group_by { |_dest, key| [File.dirname(key), Naming.fold(File.basename(key))] }
       end
 
+      # fetch with a block, never `||=`: `measure` returns FALSE on a
+      # case-sensitive volume, so `||=` would re-probe on every group there
+      # -- which is the very bug this memo removes, wearing the shape of
+      # its own fix. Measured before the memo: 4 colliding groups in one
+      # directory produced 4 probe files on a case-sensitive volume and 1
+      # on a folding one, because a folding volume refuses at the first.
       def refuse_group(dir, names)
-        verdict = CaseProbe.measure(dir)
+        verdict = @probed.fetch(dir) { @probed[dir] = CaseProbe.measure(dir) }
         if verdict == CaseProbe::UNDECIDABLE
           raise InvocationError,
                 "cannot determine whether #{dir} distinguishes case, so refusing: #{names.join(", ")}"

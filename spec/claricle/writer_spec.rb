@@ -178,29 +178,73 @@ RSpec.describe "Claricle::Writer" do
       expect(groups.values.first.map(&:first)).to eq([upper, lower])
     end
 
+    # The verdict handling, isolated from the volume. Deleting the whole
+    # collision rule failed only E5 and E7 on a case-sensitive volume, and
+    # both are root-guarded -- so under a root container on Linux the
+    # branch's central rule had NO pin at all.
+    it "acts on the probe's verdict in all three directions" do # U12
+      upper = File.join(dir, "Q.svg")
+      lower = File.join(dir, "q.svg")
+
+      outcomes = [true, case_probe.const_get(:UNDECIDABLE), false].map do |verdict|
+        allow(case_probe).to receive(:measure).and_return(verdict)
+        outcome_of.call([upper, lower])
+      end
+
+      expect(outcomes).to eq(%i[refused refused constructed])
+    end
+
+    # "At most one probe per directory" is the declared card deviation, and
+    # it was false: a case-sensitive volume never refuses, so every group
+    # probed. Stubbing the verdict to false makes this hold on any volume.
+    it "probes a directory at most once, however many groups collide in it" do # U13
+      probed = []
+      allow(case_probe).to receive(:measure) do |target|
+        probed << target
+        false
+      end
+      destinations = %w[A a B b C c].map { |name| File.join(dir, "#{name}.svg") }
+
+      writer.new(destinations, sources: [])
+
+      expect(probed).to eq([File.realpath(dir)])
+    end
+
     it "refuses a destination that is an input, by hardlink or symlink alias, even with force" do # E1
       source = File.join(dir, "source.svg")
       File.binwrite(source, "SOURCE")
       File.link(source, File.join(dir, "hard.svg"))
       File.symlink(source, File.join(dir, "soft.svg"))
 
+      # The offending destination is NOT at index 0 and there is more than
+      # one source, so a preflight that examined only the first of either
+      # would accept this batch. Three such truncations survived the whole
+      # suite while it looked green.
+      innocent = File.join(dir, "innocent.svg")
+      other_source = File.join(dir, "other.svg")
+      File.binwrite(other_source, "OTHER")
+
       %w[hard.svg soft.svg].each do |name|
-        expect { writer.new([File.join(dir, name)], sources: [source], force: true) }
+        expect { writer.new([innocent, File.join(dir, name)], sources: [other_source, source], force: true) }
           .to raise_error(Claricle::InvocationError, /overwrite an input/)
       end
       expect(File.binread(source)).to eq("SOURCE")
+      expect(Dir.children(dir)).not_to include("innocent.svg")
     end
 
     it "refuses two destinations that are the same file, even with force" do # E2
+      # Both pairs sit AFTER an innocent destination, for the reason
+      # given in E1.
+      innocent = File.join(dir, "innocent.svg")
       repeat = File.join(dir, "fresh.svg")
-      expect { writer.new([repeat, repeat], sources: [], force: true) }
+      expect { writer.new([innocent, repeat, repeat], sources: [], force: true) }
         .to raise_error(Claricle::InvocationError, /same file/)
 
       one = File.join(dir, "one.svg")
       File.binwrite(one, "X")
       two = File.join(dir, "two.svg")
       File.link(one, two)
-      expect { writer.new([one, two], sources: [], force: true) }
+      expect { writer.new([innocent, one, two], sources: [], force: true) }
         .to raise_error(Claricle::InvocationError, /same file/)
     end
 
@@ -315,6 +359,24 @@ RSpec.describe "Claricle::Writer" do
       end
     end
 
+    # A trailing separator and an empty name reach preflight through
+    # File.dirname/File.basename, which silently drop them, so both were
+    # accepted and then failed out of File.link at exit 4 WITH the stage
+    # filename in the message. "build/" is a plausible invocation: shell
+    # completion appends the slash.
+    it "refuses a destination that names a directory or nothing, never naming the stage" do # E34
+      Dir.chdir(dir) do
+        ["build/", "", File.join(dir, "sub/")].each do |destination|
+          expect { writer.new([destination], sources: []) }
+            .to raise_error(Claricle::InvocationError) { |error|
+              expect(error.message).to match(/output path (names a directory|is empty)/)
+              expect(error.message).not_to match(/\.claricle-\d+-[0-9a-f]+/)
+            }
+        end
+        expect(Dir.children(dir)).to eq([])
+      end
+    end
+
     it "names the directory when the parent is missing or is not a directory" do # E9
       plain = File.join(dir, "plain")
       File.binwrite(plain, "x")
@@ -331,8 +393,13 @@ RSpec.describe "Claricle::Writer" do
       dangling = File.join(dir, "dangling.svg")
       File.symlink(File.join(dir, "absent"), dangling)
 
+      # Behind an innocent destination, so a preflight that examined only
+      # the first entry would accept the batch. This is the `examine` half
+      # of the iteration property E1 and E2 carry for the later passes.
+      innocent = File.join(dir, "innocent.svg")
+
       [plain, dangling].each do |dest|
-        expect { writer.new([dest], sources: []) }
+        expect { writer.new([innocent, dest], sources: []) }
           .to raise_error(Claricle::InvocationError, /exists/)
       end
     end
