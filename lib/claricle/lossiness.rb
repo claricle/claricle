@@ -290,11 +290,19 @@ module Claricle
         @phase = :epilog if @depth.zero?
       end
 
-      # REXML accepts a second root and post-root character data without
-      # raising -- measured, [svg, rect, line, rect] for a document with two.
+      # REXML accepts a second root and post-root CDATA without raising --
+      # measured, [svg, rect, line, rect] for a document with two roots.
+      #
+      # Two omissions from this list are deliberate, both measured over every
+      # post-root shape. `:text` is DEAD: post-root text raises ParseException
+      # before reaching here, and post-root whitespace emits no text event at
+      # all, so it never fires -- removed rather than kept as a fail-safe,
+      # because an unreachable branch is indistinguishable from an untested
+      # one to the next reader. `:comment` is absent because a comment after
+      # the root is legal XML, not evidence of anything.
       def note_epilog(event)
         return unless @phase == :epilog
-        return unless %i[start_element text cdata].include?(event.event_type)
+        return unless %i[start_element cdata].include?(event.event_type)
 
         note(:unclassified)
       end

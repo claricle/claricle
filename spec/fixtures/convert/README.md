@@ -25,6 +25,7 @@ conversion.
 | `clip_path_element`, `clip_path_attribute` | `lossy` | a clip applied by element or by attribute going unseen |
 | `embedded_raster` | `lossy` (eps), `unknown` (emf) | a one-list rule set calling the EMF case lossless, which nobody measured |
 | `prefixed_gradient` | `lossy` | matching the qualified name, so `s:linearGradient` hides a loss |
+| `text` | `unknown` | an unmeasured element and NO proven shape at all — the shape that must never come back `lossless`. Its sibling below carries proven shapes so the empty-feature step cannot answer first |
 | `text_rect_line` | `unknown` | an unmeasured element waved through. Carries a rect and a line so the empty-feature guard cannot answer first |
 | `path_and_rect` | `unknown` | an unmeasured element waved through when proven shapes sit beside it. The `<path/>` is bare: a `d=` attribute would trip the attribute rule instead. It does NOT catch `IGNORED` growing — adding `path` there reddens the constant pin, not this fixture |
 | `defs_container` | `lossless` | `defs` dropped from `IGNORED` |
