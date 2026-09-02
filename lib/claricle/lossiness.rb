@@ -49,6 +49,20 @@ module Claricle
 
     ATTR_FEATURES = { "clip-path" => :clip_path }.freeze
 
+    # The complement of XML 1.0's `Char` production. PullParser does not
+    # enforce it -- measured, a U+001C in character data or in an `id` value
+    # reaches `lossless` while REXML::Document refuses the same bytes -- so a
+    # file no conformant parser will read was getting the one verdict that
+    # tells the caller not to look.
+    #
+    # Matched against DECODED characters, never against source bytes.
+    # utf16_gradient.svg holds 193 bytes below 0x20 that are ordinary UTF-16
+    # code units, and a byte-level guard condemns that legal document. REXML
+    # hands every payload back as valid UTF-8 or raises trying -- measured over
+    # 62 fixtures in four source shapes and 14 hostile encoding cases,
+    # declared-vs-actual mismatches and all five BOMs among them.
+    ILLEGAL_CHAR = /[^\u0009\u000A\u000D\u0020-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/
+
     # Names admitted whatever their value: structural and identity only.
     ATTR_HARMLESS = %w[version id].freeze
 
@@ -174,10 +188,17 @@ module Claricle
     module AttributeRules
       module_function
 
+      # The prefix decides FIRST, and the ordering is the rule. A namespace
+      # declaration is `xmlns=` with no prefix, or `xmlns:foo=`. `foo:xmlns` is
+      # neither -- it is an ordinary attribute in the foo namespace whose local
+      # name merely happens to be `xmlns`. Testing the local name first let it
+      # skip `prefixed` and, at the SVG namespace value, come back harmless:
+      # measured, a `lossless` verdict for a document carrying an attribute
+      # from a namespace nobody has measured.
       def feature_for(prefix, name, value)
-        return namespace(value) if name == "xmlns"
         return nil if prefix == "xmlns"
         return prefixed(prefix, name) if prefix
+        return namespace(value) if name == "xmlns"
 
         ATTR_FEATURES[name] || valued(name, value)
       end
@@ -203,6 +224,24 @@ module Claricle
       end
     end
 
+    # Extracted for the reason AttributeRules is: Scanner stays inside
+    # Metrics/ClassLength without an exemption.
+    module CharacterRules
+      module_function
+
+      # Attribute values arrive as a Hash, and its KEYS are swept too: the
+      # names REXML accepts are not the same set as the names XML 1.0 allows.
+      # Anything that is neither -- a nil id, a Symbol event type -- carries no
+      # characters to judge.
+      def illegal?(field)
+        case field
+        when String then ILLEGAL_CHAR.match?(field)
+        when Hash then field.any? { |name, value| illegal?(name) || illegal?(value) }
+        else false
+        end
+      end
+    end
+
     # One small method per surface, dispatched from the pull loop. Decomposed
     # rather than exempted: only Metrics/BlockLength is configured in
     # .rubocop.yml, so every default limit is live, and every cop exemption in
@@ -213,6 +252,13 @@ module Claricle
     # token in a comment, not the sentence around it. Measured -- it reported
     # Lint/RedundantCopDisableDirective on the first draft of this paragraph.)
     class Scanner
+      # Raised by `next_event` and caught by `run`, so the two failures that
+      # both mean "REXML refused this document" converge on one verdict without
+      # a flag whose only job is to skip the lines after the loop. Never
+      # escapes this class.
+      class Unreadable < StandardError; end
+      private_constant :Unreadable
+
       def initialize(source)
         @source = source
         @found = []
@@ -222,28 +268,54 @@ module Claricle
         @phase = :prolog
       end
 
-      # The rescue wraps the WHOLE scan, not the parse alone -- `consume` and
-      # AttributeRules run inside it, and they genuinely raise ArgumentError:
+      # This rescue no longer covers the parser -- `next_event` does, and
+      # `Unreadable` is how it reports one. What is left for this one is
+      # `consume` and AttributeRules, which genuinely raise ArgumentError:
       # measured, every value rule raises `ArgumentError: invalid byte sequence
-      # in UTF-8` on invalid-UTF-8 input. That is unreachable today because
-      # REXML raises ParseException on such a document first, and the direction
-      # is safe (an unreadable document is `unknown`), but the comment used to
-      # claim a narrower scope than the code has.
+      # in UTF-8` on invalid-UTF-8 input. That stays unreachable while REXML
+      # transcodes or raises first, and the direction is safe.
       #
-      # RuntimeError is deliberately omitted, matching detector.rb:383-393: an
-      # unusable encoding name raises a bare ArgumentError from the parser,
-      # while a RuntimeError raised elsewhere is a different fault that must
-      # not be reported as an unreadable document.
+      # REXML::ParseException is gone from here because it can no longer arrive
+      # here: nothing outside the parser raises it.
       def run
         parser = REXML::Parsers::PullParser.new(@source)
-        consume(parser.pull) while parser.has_next?
+        while (event = next_event(parser))
+          consume(event)
+        end
         note_truncation
         [@root_ok, @found.uniq]
-      rescue REXML::ParseException, ArgumentError
+      rescue Unreadable, ArgumentError
         [false, [:unclassified]]
       end
 
       private
+
+      # The rescue wraps the parser ALONE, the route detector.rb:400-421 takes,
+      # and that is what makes catching RuntimeError here safe. REXML defends
+      # itself against entity bombs with two BARE `raise "..."` sites reachable
+      # from this loop -- baseparser.rb:642 "number of entity expansions
+      # exceeded" and :600 "entity expansion has grown too large" -- and both
+      # escaped `classify`, which is documented to return one of three levels.
+      #
+      # Catching RuntimeError around the WHOLE scan instead would report a bug
+      # in `consume` or AttributeRules as an unreadable document. Here nothing
+      # of ours runs inside, so there is no fault of ours to swallow.
+      #
+      # It is also a NARROWING, not a widening: REXML::ParseException is itself
+      # a RuntimeError -- measured, `[ParseException, RuntimeError, StandardError,
+      # Exception]` -- so the class this used to catch is a subset of the one it
+      # catches now. Listing both would be Lint/ShadowedException. ArgumentError
+      # is separate: it is REXML's answer to an unusable encoding name.
+      #
+      # `PullParser.new` sits OUTSIDE, deliberately. A source that is neither
+      # String nor IO raises `RuntimeError: NilClass is not a valid input
+      # stream.` there -- measured for nil, Integer, Array and Hash -- and that
+      # is a caller error, never a verdict.
+      def next_event(parser)
+        parser.pull if parser.has_next?
+      rescue RuntimeError, ArgumentError
+        raise Unreadable
+      end
 
       # PullParser does NOT report an unclosed element stack at EOF; only
       # REXML::Document does. So "REXML raised" is not the whole of
@@ -266,8 +338,24 @@ module Claricle
         @found << feature
       end
 
+      # EVERY field of every event, not the character-data ones alone. The
+      # obvious guard checks `:text`, `:cdata` and `:comment`; `id` is exactly
+      # the route that list misses, because ATTR_HARMLESS admits it by NAME and
+      # its value never reaches a value rule -- measured, `id="a\u001Cb"`
+      # classified `lossless`. A list of the routes we thought of is what let
+      # this through in the first place.
+      #
+      # `event[0..]` is PullEvent's Range form, `@contents.slice(1..nil)`, so it
+      # yields the whole tail whatever the event's arity -- measured 0 to 5
+      # across all 14 emitted types, the widest being an entity declaration
+      # with a PUBLIC id and an NDATA notation. No bound to keep in step.
+      def note_illegal_characters(event)
+        note(:unclassified) if event[0..].any? { |field| CharacterRules.illegal?(field) }
+      end
+
       def consume(event)
         note(:unclassified) unless KNOWN_EVENTS.include?(event.event_type)
+        note_illegal_characters(event)
         note_declarations(event)
         return close_element if event.event_type == :end_element
 

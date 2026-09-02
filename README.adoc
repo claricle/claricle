@@ -216,6 +216,7 @@ lib/claricle/
   version.rb           # VERSION
   detector.rb          # magic-byte and XML-root format detection
   image.rb             # the object every operation takes
+  lossiness.rb         # what a conversion loses, read from the source document
   registry.rb          # frozen format -> handler map
   handlers/base.rb     # what a handler subclasses
   handlers/metafile.rb # EMF header metadata

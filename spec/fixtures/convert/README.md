@@ -61,6 +61,10 @@ conversion.
 | `malformed` | `unknown` | a parse failure escaping as an exception |
 | `comment_rect`, `cdata_rect` | `lossless` | comments and CDATA treated as marks |
 | `style_element_rect` | `unknown` | a `<style>` element treated as structural |
+| `entity_bomb` | `unknown` | REXML's entity-expansion COUNT limit escaping as a bare `RuntimeError` instead of answering. Four levels of ten-fold nesting: one to three levels return `unknown` cleanly, so a shallower document would pass while testing nothing. Its SIZE-limit sibling is a separate REXML guard and is built inline in the spec, where its bulk is not noise on disk |
+| `control_char_text` | `unknown` | a character illegal in XML 1.0 sitting in character data. `REXML::Document` refuses this file; `PullParser` reads it without complaint |
+| `control_char_id` | `unknown` | the same character in an `id` value — the route a guard written over the character-data events misses, because `ATTR_HARMLESS` admits `id` by NAME and its value never reaches a value rule |
+| `prefixed_xmlns_attr` | `unknown` | a prefixed attribute whose LOCAL NAME is `xmlns` skipping the prefix guard. `foo:xmlns` is not a namespace declaration. It needs both properties at once, which is why nothing caught it: `foreign_prefixed_attr` is prefixed but not named `xmlns`, `redundant_svg_ns_rect` is named `xmlns` but not prefixed |
 
 ## A note on what a README entry means here
 

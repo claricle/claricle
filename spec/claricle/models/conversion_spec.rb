@@ -34,6 +34,24 @@ RSpec.describe "conversion lossiness" do
     end
   end
 
+  def classify_source(source, to: :eps, from: :svg)
+    Claricle.const_get(:Lossiness).classify(source_format: from, target_format: to,
+                                            source: source)
+  end
+
+  # `rect_and_line.svg` rebuilt, with `body` spliced between the two shapes and
+  # `root_attrs` appended to the root. An inline document then differs from the
+  # fixture control by exactly the one thing its example names -- the same
+  # discipline spec/fixtures/convert/README.md states for the fixtures
+  # themselves. Two examples below assert it reproduces that file byte for
+  # byte, so the two controls cannot drift apart.
+  def control_document(body = "", root_attrs: "")
+    root = %(<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"#{root_attrs}>)
+    rect = %(<rect width="10" height="10" fill="#ff0000"/>)
+    line = %(<line x1="0" y1="0" x2="10" y2="10" stroke="#000000"/>)
+    "#{root}#{rect}#{body}#{line}</svg>"
+  end
+
   # `Claricle::Models::Conversion` spelled out, not the `model` local above: a
   # `def` body cannot see a describe-scope local, which is the same arity/scope
   # reason a helper taking arguments cannot be a `let`.
@@ -201,6 +219,130 @@ RSpec.describe "conversion lossiness" do
 
     it "returns a verdict for an unusable declared encoding rather than raising" do
       expect(classify("bad_encoding")).to eq("unknown")
+    end
+
+    # REXML defends itself against entity bombs with two BARE `raise "..."`
+    # sites reachable from the pull loop -- baseparser.rb:642 "number of entity
+    # expansions exceeded, processing aborted." and :600 "entity expansion has
+    # grown too large". Both are RuntimeError, and both escaped `classify`,
+    # which is documented to return one of three levels: measured, a 426-byte
+    # document raised rather than answering.
+    #
+    # The VALUE is asserted, not the absence of a raise. `not_to raise_error`
+    # would pass just as well on `nil`, which is not one of the three levels.
+    #
+    # Both limits, because a guard proven against one of a pair is proven in
+    # one direction only. They need genuinely different documents: the count
+    # guard never fires for the size bomb, and nesting one to four levels
+    # returns `unknown` cleanly all the way -- only level 4 and beyond reaches
+    # the count limit, so a shallow fixture passes while testing nothing.
+    #
+    # The size bomb is inline and needs no recursion at all: two flat entities,
+    # one 1000 bytes and one repeating it twenty times. As a fixture its bulk
+    # would read as noise on disk.
+    it "returns a verdict for either entity-expansion limit rather than raising" do
+      grown = %(<!DOCTYPE svg [<!ENTITY b "#{"Z" * 1000}"><!ENTITY c "#{"&b;" * 20}">]>) +
+              control_document("&c;")
+
+      expect(classify("entity_bomb")).to eq("unknown")
+      expect(classify_source(grown)).to eq("unknown")
+
+      # That the two are DIFFERENT raise sites is asserted, not assumed --
+      # otherwise the pair could quietly collapse into one guard tested twice.
+      # Compared to each other, never to literals: REXML's wording is not a
+      # public contract and both strings have changed across versions.
+      messages = [File.binread(path_for("entity_bomb")), grown].map do |document|
+        parser = REXML::Parsers::PullParser.new(document)
+        begin
+          parser.pull while parser.has_next?
+          nil
+        rescue RuntimeError => e
+          e.message
+        end
+      end
+      expect(messages.uniq.size).to eq(2), "expected two distinct REXML limits, got #{messages.inspect}"
+    end
+
+    # `PullParser.new` runs OUTSIDE `next_event`'s rescue, so a source that is
+    # neither String nor IO still reaches the caller as an exception instead of
+    # becoming a verdict. Measured at this tip for all four shapes below.
+    #
+    # This example exists to stop a later, blanket `rescue RuntimeError` around
+    # the whole scan from quietly turning a caller's type error into `unknown`
+    # -- the one regression the entity-bomb fix above could plausibly cause.
+    # The class is asserted without its message, which is REXML's to change.
+    it "does not turn a source of the wrong type into a verdict" do
+      [nil, 42, [], {}].each do |bad|
+        expect { classify_source(bad) }
+          .to raise_error(RuntimeError),
+              "expected a #{bad.class} source to raise rather than answer with a level"
+      end
+    end
+
+    # REXML's PullParser does not enforce the XML 1.0 `Char` production, so
+    # characters no conformant parser will read reached `lossless` -- the one
+    # verdict that tells a caller not to look -- about a file a real converter
+    # refuses outright. `REXML::Document` rejects the first two of these.
+    #
+    # Four landing sites rather than one, and `id` is the reason. The obvious
+    # fix is to check the character-data events; `id` is exactly the route such
+    # a list misses, because ATTR_HARMLESS waves it through by NAME and its
+    # value never reaches a value rule. The guard sweeps every field of every
+    # event instead, so it is not a list of the routes we thought of.
+    it "never calls a document carrying a character illegal in XML lossless" do
+      expect(classify("control_char_text")).to eq("unknown")
+      expect(classify("control_char_id")).to eq("unknown")
+      expect(classify_source(control_document("<!-- a\u001Cb -->"))).to eq("unknown")
+      expect(classify_source(control_document("<![CDATA[a\u001Cb]]>"))).to eq("unknown")
+      # Not a C0 control: U+FFFF is excluded by the same production, and a
+      # guard written as "below 0x20" would miss it.
+      expect(classify_source(control_document("\uFFFF"))).to eq("unknown")
+    end
+
+    # The other direction, which is the one a character guard gets wrong. It
+    # runs on DECODED characters, never on source bytes: utf16_gradient.svg
+    # holds 193 bytes below 0x20 that are ordinary UTF-16 code units, so a
+    # byte-level guard condemns a legal document. The two clean UTF-16
+    # documents here are what discriminate -- both would answer `unknown` under
+    # a byte guard and `lossless` under a character one.
+    it "admits every character XML 1.0 allows, including outside the BMP" do
+      expect(control_document).to eq(File.binread(path_for("rect_and_line")))
+      expect(classify_source(control_document)).to eq("lossless")
+      expect(classify_source(control_document("\t\n\r"))).to eq("lossless")
+      expect(classify_source(control_document("\u{1F600}"))).to eq("lossless")
+
+      clean = control_document
+      expect(classify_source("\xFF\xFE".b + clean.encode("UTF-16LE").b)).to eq("lossless")
+      expect(classify_source("\xFE\xFF".b + clean.encode("UTF-16BE").b)).to eq("lossless")
+
+      # And the fixture that made the distinction matter still answers for its
+      # own reason -- an unmeasured gradient -- rather than because a guard
+      # fired on its encoding.
+      expect(classify("utf16_gradient")).to eq("unknown")
+    end
+
+    # `foo:xmlns` is not a namespace declaration. A declaration is `xmlns=`
+    # with no prefix, or `xmlns:foo=`; `foo:xmlns` is an ordinary attribute in
+    # the foo namespace that merely has that local name. The local-name test
+    # used to run BEFORE the prefix guards, so any prefixed attribute named
+    # `xmlns` skipped `prefixed` entirely and, at the SVG namespace value, came
+    # back harmless -- breaking the "No other prefix is allowed" contract the
+    # constant states about itself.
+    #
+    # No example caught it because the corpus tests the two halves apart and
+    # never together: foreign_prefixed_attr is prefixed but not named `xmlns`,
+    # redundant_svg_ns_rect is named `xmlns` but not prefixed.
+    it "does not let the local name xmlns exempt an attribute from the prefix guard" do
+      expect(classify("prefixed_xmlns_attr")).to eq("unknown")
+
+      # Three controls, so the cheap wrong fixes are visible. Ignoring every
+      # prefixed attribute passes the line above and fails the first; treating
+      # anything named `xmlns` as unmeasured fails the second and third.
+      expect(classify("foreign_prefixed_attr")).to eq("unknown")
+      expect(classify("redundant_svg_ns_rect")).to eq("lossless")
+      expect(control_document).to eq(File.binread(path_for("rect_and_line")))
+      declared = control_document(root_attrs: %( xmlns:foo="http://example.com/f"))
+      expect(classify_source(declared)).to eq("lossless")
     end
 
     it "does not let a namespace prefix hide a loss" do
