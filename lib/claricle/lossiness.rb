@@ -166,11 +166,30 @@ module Claricle
 
         refuse_unreadable(source)
         refuse_unpositioned(source)
-        root_ok, present = Scanner.new(source).run
+        root_ok, present = scan(source)
         verdict(rule, root_ok, present)
       end
 
       private
+
+      # The caller's own fault reaches them as their own exception, not as
+      # a verdict and not wrapped in one of ours.
+      def scan(source)
+        tagged = TaggedSource.new(source)
+        verdict = Scanner.new(tagged).run
+        # Checked AFTER the scan, not raised through it. REXML's
+        # `IOSource#read` rescues `Exception` and treats the source as ended
+        # (rexml source.rb:260-262), so a fault from the caller's `readline`
+        # never propagates -- the scan completes and returns a verdict about
+        # a document their own broken reader truncated. Only the recording
+        # survives that rescue. A `read`, `eof?` or `pos` fault DOES
+        # propagate, and the rescue below carries it out unwrapped.
+        raise tagged.fault if tagged.fault
+
+        verdict
+      rescue SourceFault => e
+        raise e.original
+      end
 
       def verdict(rule, root_ok, present)
         return "unknown" unless root_ok
@@ -352,6 +371,59 @@ module Claricle
     # (Spelling that directive out in full here would BE one: RuboCop reads the
     # token in a comment, not the sentence around it. Measured -- it reported
     # Lint/RedundantCopDisableDirective on the first draft of this paragraph.)
+    # Carries a fault raised by the CALLER's own source out past both parse
+    # rescues. REXML invokes the reader INSIDE them, so without this an IO
+    # whose `readline` raises came back as `unknown` -- a verdict about the
+    # caller's document, when the fault was in their object.
+    #
+    # This is why the fault is tagged at its ORIGIN rather than inferred from
+    # where a rescue sits. `PullParser.new` being outside the rescue proves
+    # only that CONSTRUCTION is safe; it says nothing about where REXML READS.
+    class SourceFault < StandardError
+      def initialize(cause)
+        @original = cause
+        super(cause.message)
+      end
+
+      attr_reader :original
+    end
+    private_constant :SourceFault
+
+    # Forwards to the caller's source and tags anything it raises. EVERY
+    # source is wrapped, including a String: a String cannot raise while
+    # being read, so the special case that skipped it was a branch nothing
+    # could distinguish -- measured, always wrapping passes the whole suite.
+    # REXML reaches a String through `to_str` and then reads a StringIO, so
+    # the wrapper sees two or three delegated calls and nothing after.
+    class TaggedSource
+      def initialize(source) = @source = source
+
+      def respond_to_missing?(name, include_private = false)
+        @source.respond_to?(name, include_private)
+      end
+
+      # Recorded as well as raised. REXML's `IOSource#read` rescues
+      # `Exception` and treats the source as ended (rexml source.rb:260-262),
+      # so a fault raised by the caller's `readline` is swallowed INSIDE the
+      # gem and reappears as a short document -- no wrapper can let it
+      # propagate. Recording it is the only way it survives that rescue.
+      attr_reader :fault
+
+      def method_missing(name, *, &)
+        # `__send__`, never `public_send`: a bounded source may be a bare
+        # BasicObject, which does not define `public_send`, so that call
+        # lands in its own method_missing and reads as a forbidden access.
+        # `__send__` is a real BasicObject method and dispatches cleanly.
+        @source.__send__(name, *, &)
+      rescue SourceFault
+        raise
+      rescue StandardError => e
+        @fault ||= e
+        raise SourceFault, e
+      end
+    end
+    private_constant :TaggedSource
+
     class Scanner
       # Raised by `next_event` and caught by `run`, so the two failures that
       # both mean "REXML refused this document" converge on one verdict without

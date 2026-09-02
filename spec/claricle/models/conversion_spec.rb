@@ -296,6 +296,32 @@ RSpec.describe "conversion lossiness" do
     #
     # The second half is the part that must not be lost: whatever the class,
     # a caller error must never come back as one of the three levels.
+    # REXML invokes the supplied reader INSIDE the parse rescue, so a fault in
+    # the CALLER's own IO came back as a verdict about their document --
+    # measured, an IO whose `readline` raised returned "unknown".
+    #
+    # This refutes the reasoning that let it through for two rounds: that a
+    # caller error is safe because `PullParser.new` sits OUTSIDE the rescue.
+    # True of construction only. Location does not preserve origin, so the
+    # fault is tagged where it is raised instead of inferred from where the
+    # rescue sits.
+    it "does not report a fault in the caller's own IO as a verdict" do
+      clean = File.binread(path_for("rect_and_line"))
+
+      %i[read readline eof?].each do |method|
+        faulty = Class.new(StringIO) do
+          define_method(method) { |*| raise("caller fault via #{method}") }
+        end
+        expect { classify_source(faulty.new(clean)) }
+          .to raise_error(RuntimeError, /caller fault/),
+              "a fault in ##{method} must reach the caller, not become a level"
+      end
+
+      # The other direction: an IO that behaves still gets a verdict, so the
+      # tagging cannot be turning every IO read into an escape.
+      expect(classify_source(StringIO.new(clean))).to eq("lossless")
+    end
+
     it "refuses a source of the wrong type instead of answering about it" do
       [nil, 42, [], {}, :sym, 1.5].each do |bad|
         expect { classify_source(bad) }
