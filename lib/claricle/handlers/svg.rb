@@ -117,9 +117,12 @@ module Claricle
       # That is a structural property, not a memory bound: the
       # many-attribute run above also built zero.
       module Structure
-        # Narrower than XML's full well-formedness, in a way worth
-        # stating precisely because item 03 documents per format exactly
-        # what `conform` checks, and it will quote this.
+        # DIVERGES from XML's full well-formedness in BOTH directions,
+        # in a way worth stating precisely because item 03 documents per
+        # format exactly what `conform` checks, and it will quote this.
+        # It stays silent on three families a validator rejects, and it
+        # reports an error on four names a validator accepts. Neither
+        # direction implies the other, so both are stated below.
         #
         # `REXML::Text.check` enforces TWO rules, and it runs only when
         # the DOM builds Text nodes. This route builds none, so BOTH are
@@ -132,11 +135,10 @@ module Claricle
         #     malformed SVG there is, `<svg>Tom & Jerry</svg>`, and in
         #     `id="a<b"`.
         #
-        # Every gap named here -- the two families above and the third
-        # below -- is a false NEGATIVE: input this scan calls clean that
-        # a validator rejects. That direction is the one card 03 needs
-        # stated, and it is not interchangeable with the opposite risk
-        # of flagging valid input.
+        # The three families in this section are all false NEGATIVES:
+        # input this scan calls clean that a validator rejects. The
+        # opposite direction is real too and is stated at the end of
+        # this comment.
         #
         # A THIRD family is unrelated to `Text.check`: a CDATA section
         # at top level AFTER the root element. `count_roots` sees a
@@ -159,6 +161,34 @@ module Claricle
         # Distinct from the undefined-entity limit below: REXML's DOM
         # ACCEPTS `&nope;`, so that limit is a place the DOM agrees with
         # us, not a case it catches and we miss.
+        #
+        # KNOWN FALSE POSITIVE -- the other direction, and the only one.
+        # Four characters are legal in an XML name and REXML's OWN
+        # published NCNAME_STR accepts them, but REXML's live parser
+        # refuses them, so a VALID document is reported as
+        # svg.not_well_formed:
+        #
+        #   U+00B7 middle dot       U+0300 combining grave
+        #   U+203F undertie         U+2040 character tie
+        #
+        # Measured against xmllint, which calls all four valid, and
+        # against U+00C0, U+0660, U+3005 and ASCII, which the same
+        # parser accepts -- so this is about those four characters, not
+        # about extended names in general. U+0300 makes it reachable
+        # rather than exotic: NFD is the macOS filesystem default.
+        #
+        # Pinned to REXML 3.4.4; the gemspec's `~> 3.4.4` admits patch
+        # releases that could change this, so the spec asserts against
+        # REXML's own NCNAME_STR and breaks if the parser is fixed.
+        #
+        # Not fixable in this handler. The ParseException carries no
+        # continued_exception, and its message has already lost the
+        # name's leading character, so the QName cannot be recovered.
+        # Suppressing the exception would not resume parsing either: a
+        # legal affected name followed by genuinely malformed content
+        # would then return [], trading this false positive for a false
+        # negative, which is worse. A real fix means adapting or
+        # replacing REXML's grammar and re-parsing the document.
         NOT_WELL_FORMED_CODE = "svg.not_well_formed"
         ENCODING_UNUSABLE_CODE = "svg.encoding_unusable"
         MULTIPLE_ROOTS_CODE = "svg.multiple_root_elements"
@@ -166,7 +196,7 @@ module Claricle
         UNDECODABLE_CAUSES = [ArgumentError, EncodingError].freeze
         # CHARACTERS, not bytes. REXML's first message line bounds lines
         # and not bytes -- the spec's 50,000-character token yields a
-        # 50,028-byte first line -- and an issue has to stay printable
+        # 50,027-byte first line -- and an issue has to stay printable
         # as one line. So the real
         # bound is 200 characters, hence at most 800 bytes; the byte
         # count is script-dependent and there is no fixed multiplier.

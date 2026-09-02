@@ -1196,15 +1196,74 @@ RSpec.describe "Claricle SVG handler" do
       expect(scan(source.b)).to eq([])
     end
 
-    # A false failure, pinned in both directions so it cannot change
-    # silently: the detector widens REXML's live name grammar to XML's
-    # canonical one, and this scan does not. Fixing it needs
-    # `detector.rb`, which this branch does not own.
-    it "refuses a canonical name the detector accepts" do
-      source = %(<a·:svg xmlns:a·="#{svg_ns}"/>).b
+    # KNOWN FALSE POSITIVE, characterised rather than endorsed. These
+    # four characters are legal in an XML name and REXML's OWN published
+    # grammar accepts them, but REXML's live parser refuses them, so
+    # `conform` reports a well-formedness error on a valid document.
+    #
+    # Pinned to REXML 3.4.4 (gemspec `~> 3.4.4`, which admits patch
+    # releases that could change this). The four are checked against
+    # REXML's own NCNAME_STR rather than a copy of it, so this goes red
+    # if the grammar moves under us.
+    #
+    # This example is a CANARY and is deliberately tight. When a future
+    # REXML accepts these names, `scan` returns [] and this BREAKS --
+    # which is the point: it forces the limitation to be removed from
+    # the class comment rather than quietly outliving the bug. Nothing
+    # here is loosened with `.or`, and no exception prose is pinned,
+    # only the class.
+    #
+    # Not fixable inside this handler: REXML hands back nothing to
+    # recover the name from. Measured on the U+00B7 document, the
+    # ParseException carries `continued_exception == nil` and its
+    # message reads "Invalid attribute name: <·:svg>" -- the leading
+    # `a` is already consumed and gone. Suppressing the exception would
+    # not resume parsing either, so a legal name followed by genuinely
+    # malformed content would return [] and turn this false positive
+    # into a false negative. A real fix means adapting or replacing
+    # REXML's grammar and re-parsing, which is a different design.
+    it "reports a well-formedness error on four names XML actually allows" do
+      anchored_ncname = /\A#{REXML::XMLTokens::NCNAME_STR}\z/
 
-      expect(Claricle.detect(source)).to eq(:svg)
-      expect(pairs(scan(source))).to eq([["error", "svg.not_well_formed"]])
+      {
+        "U+00B7 middle dot" => "·",
+        "U+0300 combining grave" => "̀",
+        "U+203F undertie" => "‿",
+        "U+2040 character tie" => "⁀"
+      }.each do |label, char|
+        name = "a#{char}"
+        source = %(<#{name}:svg xmlns:#{name}="#{svg_ns}"/>).b
+
+        expect(name).to match(anchored_ncname), "for #{label}"
+        expect { drain(source) }
+          .to raise_error(REXML::ParseException), "for #{label}"
+
+        # Reachable, not exotic: detection still calls this an SVG, so a
+        # real file takes this route. U+0300 arrives by itself -- NFD is
+        # the macOS filesystem default.
+        expect(Claricle.detect(source)).to eq(:svg), "for #{label}"
+        expect(pairs(scan(source))).to eq([["error", "svg.not_well_formed"]]),
+                                       "for #{label}"
+      end
+    end
+
+    # The other side of the same divergence, and it is what makes the
+    # example above a statement about FOUR characters rather than about
+    # non-ASCII names in general. Without these rows, a scan that
+    # refused every extended name would pass the canary.
+    it "accepts the extended names REXML's parser does handle" do
+      {
+        "U+00C0 A-grave" => "À",
+        "U+0660 arabic-indic zero" => "٠",
+        "U+3005 iteration mark" => "々",
+        "ASCII" => "b"
+      }.each do |label, char|
+        name = "a#{char}"
+        source = %(<#{name}:svg xmlns:#{name}="#{svg_ns}"/>).b
+
+        expect(Claricle.detect(source)).to eq(:svg), "for #{label}"
+        expect(scan(source)).to eq([]), "for #{label}"
+      end
     end
   end
 end
