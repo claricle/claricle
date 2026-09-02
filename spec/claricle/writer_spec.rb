@@ -457,6 +457,23 @@ RSpec.describe "Claricle::Writer" do
       expect(Dir.children(dir)).to eq(["only.svg"])
     end
 
+    # The stage's half of the rule U11 pins for the probe. The plan states
+    # it -- "armed before the open, an EEXIST clash on the stage name would
+    # make cleanup unlink a file the Writer never created" -- and its spec
+    # table left it unpinned, so walking the RULES rather than the specs is
+    # what surfaced it. Random.urandom is stubbed so a victim can be
+    # planted at the stage's own name.
+    it "never unlinks a file it did not create when the stage name clashes" do # E33
+      dest = File.join(dir, "clash.svg")
+      subject = writer.new([dest], sources: [])
+      allow(Random).to receive(:urandom).with(8).and_return(("\xCD" * 8).b)
+      victim = File.join(dir, ".#{File.basename(dest)}.claricle-#{Process.pid}-#{"cd" * 8}")
+      File.binwrite(victim, "PLANTED")
+
+      expect { subject.write(payload, to: dest) }.to raise_error(Errno::EEXIST)
+      expect(File.binread(victim)).to eq("PLANTED")
+    end
+
     it "leaves no staged file behind when the publish fails" do # E15
       dest = File.join(dir, "clash.svg")
       subject = writer.new([dest], sources: [])
