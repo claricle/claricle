@@ -101,14 +101,19 @@ RSpec.describe "Claricle SVG handler" do
     loop { break if parser.pull[0] == :end_document }
   end
 
-  # GC on both sides so the count is live objects, not garbage awaiting a
-  # sweep. Measured stable at 0 across consecutive runs.
+  # GC is DISABLED across the measurement, not run after it. Measured:
+  # with a trailing `GC.start` a mutant that built a whole DOM inside the
+  # scan and dropped it scored zero, because the tree was collected
+  # before it was counted. Disabling GC counts every Element the work
+  # created, retained or not.
   def elements_created
     GC.start
+    GC.disable
     before = ObjectSpace.each_object(REXML::Element).count
     yield
-    GC.start
     ObjectSpace.each_object(REXML::Element).count - before
+  ensure
+    GC.enable
   end
 
   # The final entity expands to MARKUP, so a parser that expanded the
