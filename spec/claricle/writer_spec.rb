@@ -366,8 +366,14 @@ RSpec.describe "Claricle::Writer" do
     # completion appends the slash.
     it "refuses a destination that names a directory or nothing, never naming the stage" do # E34
       Dir.chdir(dir) do
+        # The offender leads and an innocent name trails it, which is the
+        # opposite order to E1/E2/E10. take(1) proves the walk does not
+        # stop at the front; this proves it does not stop at the back. A
+        # last-only truncation survived all 46 examples without it.
+        innocent = File.join(dir, "innocent.svg")
+
         ["build/", "", File.join(dir, "sub/")].each do |destination|
-          expect { writer.new([destination], sources: []) }
+          expect { writer.new([destination, innocent], sources: []) }
             .to raise_error(Claricle::InvocationError) { |error|
               expect(error.message).to match(/output path (names a directory|is empty)/)
               expect(error.message).not_to match(/\.claricle-\d+-[0-9a-f]+/)
