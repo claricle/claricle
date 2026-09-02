@@ -376,12 +376,21 @@ RSpec.describe "conversion lossiness" do
       reader&.close
     end
 
+    # BOTH IO classes the seam accepts, because that is the axis that produced
+    # the gap: measured, a closed File raises IOError from `pos` while a closed
+    # StringIO returns 0 from `pos` and used to reach the scan, where the read
+    # raised a bare IOError outside the seam's own error type.
     it "refuses a closed source the same way it refuses an unpositionable one" do
-      # The block form closes the file and hands back the closed IO, which is
-      # the object under test here.
-      closed = File.open(path_for("rect_and_line"), "rb") { |io| io }
-      expect { lossiness.classify(source_format: :svg, target_format: :eps, source: closed) }
-        .to raise_error(Claricle::InvocationError, /not readable/)
+      # The block form closes the file and hands back the closed IO.
+      closed_file = File.open(path_for("rect_and_line"), "rb") { |io| io }
+      closed_string_io = StringIO.new(File.binread(path_for("rect_and_line")))
+      closed_string_io.close
+
+      [closed_file, closed_string_io].each do |source|
+        expect { lossiness.classify(source_format: :svg, target_format: :eps, source: source) }
+          .to raise_error(Claricle::InvocationError, /not readable/),
+              "expected a closed #{source.class} to be refused by the seam"
+      end
     end
 
     it "refuses a source that has already been partly consumed" do

@@ -138,21 +138,30 @@ module Claricle
       # answer at all (`IO.pipe#pos` raises Errno::ESPIPE). Both are caller
       # errors, never verdicts, so this is raised outside the parse rescue.
       def refuse_unpositioned(source)
+        refuse_closed(source)
         return unless source.respond_to?(:pos)
 
         position = begin
           source.pos
         rescue Errno::ESPIPE
           raise InvocationError, "source position is not observable"
-        rescue IOError => e
-          # A closed IO is the third caller error here, and used to escape as a
-          # raw IOError while the other two were wrapped -- an inconsistent
-          # seam on a public contract.
-          raise InvocationError, "source is not readable: #{e.message}"
         end
         return if position.zero?
 
         raise InvocationError, "source must be positioned at byte 0"
+      end
+
+      # Asked BEFORE `pos`, because `pos` does not agree across IO classes on a
+      # closed stream -- measured: `File#pos` raises IOError, while
+      # `StringIO#pos` returns 0 and sails through a position check, so the
+      # failure surfaced later as a raw IOError from inside the scan. `closed?`
+      # answers the same for both. A pipe is not closed, so this leaves the
+      # ESPIPE case above reachable.
+      def refuse_closed(source)
+        return unless source.respond_to?(:closed?)
+        return unless source.closed?
+
+        raise InvocationError, "source is not readable: closed stream"
       end
     end
 
