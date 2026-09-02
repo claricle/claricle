@@ -59,8 +59,8 @@ module Claricle
     # utf16_gradient.svg holds 193 bytes below 0x20 that are ordinary UTF-16
     # code units, and a byte-level guard condemns that legal document. REXML
     # hands every payload back as valid UTF-8 or raises trying -- measured over
-    # 62 fixtures in four source shapes and 14 hostile encoding cases,
-    # declared-vs-actual mismatches and all five BOMs among them.
+    # every convert fixture in four source shapes, and over 14 hostile encoding
+    # cases with declared-vs-actual mismatches and all five BOMs among them.
     ILLEGAL_CHAR = /[^\u0009\u000A\u000D\u0020-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/
 
     # Names admitted whatever their value: structural and identity only.
@@ -92,6 +92,7 @@ module Claricle
     # never emitted at all. Compare the two sets, never their sizes:
     #   ruby -rrexml/parsers/pullparser -e 'p REXML::Parsers::PullEvent
     #     .instance_methods(false).grep(/\?\z/).map { |m| m.to_s.chomp("?").to_sym }'
+    #
     # The four declaration types come from SUBSET_DECLARATIONS rather than
     # being spelled a second time, and the direction is why. Listed twice, the
     # two could drift, and that drift FAILS OPEN: dropping `:entitydecl` from
@@ -238,8 +239,9 @@ module Claricle
 
       # Attribute values arrive as a Hash, and its KEYS are swept too: the
       # names REXML accepts are not the same set as the names XML 1.0 allows.
-      # Anything that is neither -- a nil id, a Symbol event type -- carries no
-      # characters to judge.
+      # Only three classes reach here -- measured across every convert fixture
+      # plus a document exercising all 14 event types: String, Hash, and nil
+      # for an absent optional field such as an xmldecl's encoding.
       def illegal?(field)
         case field
         when String then ILLEGAL_CHAR.match?(field)
@@ -297,7 +299,7 @@ module Claricle
 
       private
 
-      # The rescue wraps the parser ALONE, the route detector.rb:400-421 takes,
+      # The rescue wraps the parser ALONE, the route detector.rb:417-421 takes,
       # and that is what makes catching RuntimeError here safe. REXML defends
       # itself against entity bombs with two BARE `raise "..."` sites reachable
       # from this loop -- baseparser.rb:642 "number of entity expansions
