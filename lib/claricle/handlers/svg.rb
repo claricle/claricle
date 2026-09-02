@@ -176,17 +176,27 @@ module Claricle
             error.continued_exception.is_a?(ArgumentError)
           end
 
-          # RuntimeError#to_s, not `error.message`: ParseException#to_s
-          # reaches `current_line`, which re-reads the whole document at
-          # its default newline separator -- measured at +52 MiB against
-          # +0 MiB here on a 64 MiB newline-free document, for prose
-          # that came out identical.
+          # RuntimeError#to_s, not `error.message`, for three measured
+          # reasons. ParseException#to_s reaches `current_line`, which
+          # re-reads the whole document at its default newline separator
+          # -- +52 MiB against +0 MiB here on a 64 MiB newline-free
+          # document. It appends REXML's own backtrace, so `e.message`
+          # on a real PNG is 674 characters carrying absolute
+          # filesystem paths where this is 17. And an issue has to stay
+          # printable as one line.
           def prose(error)
-            RuntimeError.instance_method(:to_s).bind_call(error)[0, MESSAGE_CHARACTER_LIMIT]
+            RuntimeError.instance_method(:to_s).bind_call(error)
           end
 
+          # Every issue this module builds passes through here, so the
+          # length bound is applied ONCE, at the funnel, rather than at
+          # each call site. An unusable encoding NAME is document
+          # content and so is attacker-controlled -- measured, a
+          # 100,000-character name produced a 100,018-character message
+          # when only `prose` truncated.
           def issue(code, message)
-            Models::Issue.new(severity: "error", code: code, message: message)
+            Models::Issue.new(severity: "error", code: code,
+                              message: message[0, MESSAGE_CHARACTER_LIMIT])
           end
         end
       end
