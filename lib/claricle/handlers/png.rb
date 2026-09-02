@@ -46,6 +46,26 @@ module Claricle
         6 => "truecolor+alpha"
       }.freeze
 
+      # Lives out here rather than inside StructureScanner, its only
+      # consumer, because the `header_at` guard added alongside it pushed
+      # that class to 102 lines against Metrics/ClassLength's 100 --
+      # measured by moving this back, which fires the cop. Headroom is two
+      # lines, so item 03 should decompose the scanner rather than hoist
+      # another constant.
+      STRUCTURE_MESSAGES = {
+        duplicate_ihdr: "duplicate IHDR chunk; a PNG datastream carries exactly one",
+        missing_iend: "PNG datastream ends without an IEND chunk",
+        duplicate_iend: "a second IEND chunk follows the end of the datastream",
+        trailing_data: "unexpected bytes after the IEND chunk",
+        # The whole record span against the bytes really left. Comparing
+        # a payload length with remaining record bytes reads as
+        # "declares 13 bytes but only 17 remain", which compares two
+        # different units and tells the reader nothing.
+        chunk_overruns: "chunk needs %d bytes but only %d remain in the file",
+        header_residue: "%s left, too few for a chunk header",
+        shorter_than_signature: "file is shorter than the PNG signature"
+      }.freeze
+
       # Headroom over IHDR_BYTES (13) and PHYS_BYTES (9): neither
       # `readable` nor `dpi` ever needs more of a wanted chunk than
       # that, so nothing here trusts a declared length past this cap --
@@ -192,10 +212,204 @@ module Claricle
         end
       end
 
+      # Chunk-sequence faults png_conform 0.1.4 does not correctly
+      # report (D23). Reads ONLY 8-byte chunk headers and seeks over
+      # every payload, so the bytes read are 8 x the HEADERS EXAMINED --
+      # measured 24 bytes for a 75-byte file and for a 10 MiB one. Not
+      # "independent of file size", which overstates it: a 20-byte
+      # IEND-only stream reads 8 bytes, and 100 empty chunks plus IEND read
+      # 808 (the 100 alone read 800). The
+      # guarantee is that no payload is ever read, whatever it declares.
+      #
+      # Beside `ChunkReader` rather than inside it: that one stops at
+      # IEND, keeps payloads, and supports a non-seekable pipe through
+      # `drain`. This needs `io.size` and absolute seeks, treats a short
+      # read as a fault rather than an ending, and classifies what lies
+      # past IEND.
+      class StructureScanner
+        SIGNATURE_BYTES = 8
+        HEADER_BYTES = 8
+        # Length field, type and CRC: what a chunk costs beyond its payload.
+        FRAMING_BYTES = 12
+        # REC-PNG-20031110 5.4 restricts a type code to four ASCII
+        # letters. Anything else is not a name, and handing raw bytes to
+        # `Location#chunk` is not merely untidy -- a high byte makes
+        # lutaml raise, which would take the scan down on exactly the
+        # malformed input this exists to report.
+        LETTERS = /\A[A-Za-z]{4}\z/
+
+        # Where the walk stopped, carrying the header it stopped on so
+        # the terminal issue never re-reads one.
+        Stop = Data.define(:state, :offset, :length, :type)
+
+        def initialize(io)
+          @io = io
+          @size = io.size
+          @seen_ihdr = false
+        end
+
+        # Byte-ordered, with the terminal issue last. Empty for a
+        # well-formed datastream -- never nil.
+        #
+        # Memoized because scanning twice would append twice, and the
+        # bounded-read guarantee would go with it. Both exits return the
+        # same accumulator, so they cannot drift apart into two contracts.
+        def issues
+          @issues ||= scan
+        end
+
+        private
+
+        def scan
+          found = []
+          return found << rangeless("png.chunk_truncated", :shorter_than_signature) if @size < SIGNATURE_BYTES
+
+          @found = found
+          terminate(walk)
+          found
+        end
+
+        # Ends in exactly one of three states, and the short-file guard
+        # above is what keeps that true: with `size` at least 8 and
+        # `offset` only advancing when a whole record fits,
+        # `size - offset` can never go negative.
+        def walk
+          offset = SIGNATURE_BYTES
+          until offset == @size
+            length, type = header_at(offset)
+            return Stop[:truncated, offset, length, type] unless record_fits?(offset, length)
+
+            note_duplicate(type, offset, span(length))
+            offset += span(length)
+            return Stop[:complete, offset, nil, nil] if type == "IEND"
+          end
+          Stop[:ended, offset, nil, nil]
+        end
+
+        def terminate(stop)
+          case stop.state
+          when :ended then @found << rangeless("png.missing_iend", :missing_iend, chunk: "IEND")
+          when :truncated then @found << truncated(stop)
+          when :complete then trailing(stop.offset)
+          end
+        end
+
+        # Only a COMPLETE repeat counts. The bounds test above returns
+        # first, so a repeated IHDR whose record is cut never arrives
+        # here -- which is the right answer, since its range would name
+        # bytes the file does not contain.
+        def note_duplicate(type, offset, span)
+          return unless type == "IHDR"
+
+          @found << issue("png.duplicate_ihdr", STRUCTURE_MESSAGES[:duplicate_ihdr], offset, span, "IHDR") if @seen_ihdr
+          @seen_ihdr = true
+        end
+
+        # The range is what is really there, not what was declared: a
+        # half-open range must never name bytes the file lacks.
+        #
+        # Stated against a TRUTHFUL `io.size`, which this scanner documents
+        # rather than enforces. Under a size that over-reports, this range and
+        # `trailing`'s both name bytes past EOF -- measured, a real file
+        # truncated to 41 bytes after `io.size` was captured yields
+        # byte_offset 56, which is 15 bytes past its end. That is the deferred
+        # gap the over-reporting examples in the spec pin as known.
+        def truncated(stop)
+          remaining = @size - stop.offset
+          message =
+            if stop.length
+              format(STRUCTURE_MESSAGES[:chunk_overruns], span(stop.length), remaining)
+            else
+              format(STRUCTURE_MESSAGES[:header_residue], bytes_phrase(remaining))
+            end
+          issue("png.chunk_truncated", message, stop.offset, remaining, letters(stop.type))
+        end
+
+        # Everything past IEND is outside the datastream and gets exactly
+        # one issue over the whole remainder.
+        def trailing(offset)
+          remaining = @size - offset
+          return if remaining.zero?
+
+          @found <<
+            if complete_iend_at?(offset)
+              issue("png.duplicate_iend", STRUCTURE_MESSAGES[:duplicate_iend], offset, remaining, "IEND")
+            else
+              issue("png.trailing_data", STRUCTURE_MESSAGES[:trailing_data], offset, remaining, nil)
+            end
+        end
+
+        # A type code alone is not a chunk. Calling a nine-byte remainder
+        # whose header declares 25 "a second IEND chunk" asserts a record
+        # that is not there -- the same completeness rule `note_duplicate`
+        # obeys.
+        def complete_iend_at?(offset)
+          length, type = header_at(offset)
+          type == "IEND" && record_fits?(offset, length)
+        end
+
+        # The whole record, payload and framing together.
+        def span(length) = FRAMING_BYTES + length
+
+        # Under a truthful `io.size` a residue is 1 to 7 bytes, so the
+        # singular is reachable -- the over-reporting rows in the spec do
+        # reach larger values, e.g. "1000 bytes left". Either way
+        # "1 bytes left" is copy a person reads while something is wrong.
+        def bytes_phrase(count) = "#{count} byte#{"s" unless count == 1}"
+
+        # The one completeness rule, in one place. `walk` and
+        # `complete_iend_at?` are its callers -- writing it twice, once as an
+        # overrun test and once as its inverse, is how the two drift apart.
+        # (`note_duplicate` does NOT call it; it is handed the span `walk`
+        # already computed.)
+        def record_fits?(offset, length)
+          !length.nil? && offset + span(length) <= @size
+        end
+
+        # nil when no header fits, which `walk` reads as truncation.
+        #
+        # The size test is not enough on its own, because it trusts
+        # `io.size`. A short or absent read is checked too, so the walk
+        # stays total even where that number lies -- measured, `read(8)`
+        # at EOF returns nil and `nil.unpack` raises NoMethodError. A
+        # short read is a fault here exactly as it is everywhere else in
+        # this scanner, not an ending. `ChunkReader#read_header` already
+        # takes the same care for the same reason -- cited by NAME, not by
+        # line: a same-file line range rots the moment anything above it
+        # moves, which is exactly how this comment was wrong once already.
+        def header_at(offset)
+          return nil if offset + HEADER_BYTES > @size
+
+          @io.seek(offset)
+          header = @io.read(HEADER_BYTES)
+          return nil unless header&.bytesize == HEADER_BYTES
+
+          header.unpack("Na4")
+        end
+
+        def letters(type)
+          type if type&.match?(LETTERS)
+        end
+
+        def issue(code, message, offset, length, chunk)
+          Models::Issue.new(
+            severity: "error", code: code, message: message,
+            location: Models::Location.new(byte_offset: offset, byte_length: length, chunk: chunk)
+          )
+        end
+
+        # Absent is not zero: a fault with no chunk to point at carries no
+        # range rather than an invented one at EOF.
+        def rangeless(code, key, chunk: nil)
+          Models::Issue.new(severity: "error", code: code, message: STRUCTURE_MESSAGES[key],
+                            location: Models::Location.new(chunk: chunk))
+        end
+      end
+
       private_constant :IHDR_LAYOUT, :IHDR_BYTES, :PHYS_LAYOUT, :PHYS_BYTES,
                        :METRE_UNIT, :METRES_PER_INCH, :WANTED_CHUNKS,
-                       :COLOR_SPACES, :MAX_CHUNK_READ, :DRAIN_BUFFER,
-                       :Chunk, :ChunkReader
+                       :COLOR_SPACES, :STRUCTURE_MESSAGES, :MAX_CHUNK_READ, :DRAIN_BUFFER,
+                       :Chunk, :ChunkReader, :StructureScanner
 
       def inspection(image)
         chunks = read_chunks(image)
@@ -318,6 +532,14 @@ module Claricle
           code: "png.ihdr_unreadable",
           message: "PNG header (IHDR) could not be read"
         )
+      end
+
+      # The structural pre-pass (D23). Built and spec'd here; the call
+      # from `conformance_report` lands with item 03's conform wiring,
+      # which must also decide the delegate reader -- neither of
+      # png_conform's is safe on every input.
+      def structural_issues(image)
+        image.with_path { |path| File.open(path, "rb") { |io| StructureScanner.new(io).issues } }
       end
 
       # nil when pHYs is absent, and nil when it records an aspect ratio
