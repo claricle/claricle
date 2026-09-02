@@ -22,8 +22,16 @@ module Claricle
 
     # Thor supplies this command. Keep a closed consumer of command output
     # successful without hiding an EPIPE raised by the command's own work.
+    #
+    # General help finishes command generation and sorting before it calls
+    # the shell. Command help starts with `shell.say`, then performs more
+    # generation such as building its banner. Thor exposes both through one
+    # `super` call, so rescuing that call hides later generation failures.
+    # Record its shell calls first, then replay them inside the output rescue.
     def help(command = nil, subcommand = false) # rubocop:disable Style/OptionalBooleanParameter
-      tolerate_closed_output { super(command, subcommand) }
+      destination = shell
+      output = recorded_help(destination) { super(command, subcommand) }
+      tolerate_closed_output { output.write_to(destination) }
     end
 
     desc "inspect FILE", "Report a file's format and metadata"
@@ -335,7 +343,69 @@ module Claricle
       end
     end
 
+    # Thor's shell methods are the narrowest output boundary it exposes:
+    # work inside a custom method cannot be separated from that method's
+    # write. Recording whole calls preserves the exact destination shell's
+    # instance state and singleton behaviour when they are replayed.
+    #
+    # Replay dispatches by name rather than through `public_send`, because
+    # `public_send` is a method Thor never asks a shell for. A shell built
+    # on `BasicObject` inherits only the eight methods BasicObject defines
+    # -- `public_send` is not among them, since it comes from Object --
+    # and Thor drives such a shell perfectly well. Routing replay through
+    # reflection would therefore narrow the set of shells this CLI accepts
+    # below the set Thor itself accepts.
+    class HelpOutput
+      def initialize
+        @calls = []
+      end
+
+      def say(*arguments, **options, &block)
+        record(:say, arguments, options, block)
+      end
+
+      def print_table(*arguments, **options, &block)
+        record(:print_table, arguments, options, block)
+      end
+
+      def print_wrapped(*arguments, **options, &block)
+        record(:print_wrapped, arguments, options, block)
+      end
+
+      # Returns nil rather than the `each` receiver. `help` is a public
+      # method, so whatever this returns becomes its return value on the
+      # success path -- and `@calls` is this class's own internals.
+      def write_to(destination)
+        @calls.each do |method, arguments, options, block|
+          case method
+          when :say then destination.say(*arguments, **options, &block)
+          when :print_table then destination.print_table(*arguments, **options, &block)
+          when :print_wrapped then destination.print_wrapped(*arguments, **options, &block)
+          end
+        end
+        nil
+      end
+
+      private
+
+      def record(method, arguments, options, block)
+        @calls << [method, arguments, options, block]
+      end
+    end
+    private_constant :HelpOutput
+
     private
+
+    # Restore the invocation's shell before replay so generation failures
+    # leave no replacement behind and custom output runs on the exact object.
+    def recorded_help(destination)
+      output = HelpOutput.new
+      self.shell = output
+      yield
+      output
+    ensure
+      self.shell = destination
+    end
 
     def tolerate_closed_output
       yield
