@@ -111,6 +111,27 @@ RSpec.describe "conversion lossiness" do
       expect(injected.target_format).to eq("eps")
     end
 
+    # Every non-String shape refuses through `BinaryContent.cast`, EXCEPT an
+    # Array: lutaml's collection path never calls `cast` on the Array itself,
+    # stores it raw, and `#content` then calls `value` on it. Measured before
+    # the fix: `["a"]` and `[]` died as `NoMethodError: undefined method
+    # 'value' for an instance of Array` rather than refusing.
+    #
+    # `[1, 2]` is listed with the scalars deliberately -- it DID refuse, but
+    # only because an Integer ELEMENT tripped `cast`. A guard that holds for
+    # the wrong reason, and an Array of Strings walks straight past it, which
+    # is why the string arrays below are the rows that matter.
+    it "refuses a non-String content at the door, an Array of Strings included" do
+      [42, :sym, {}, 1.5, true, [1, 2], [], ["a"], %w[a b]].each do |bad|
+        expect { conversion(content: bad) }
+          .to raise_error(Lutaml::Model::ValidationError, /content/),
+              "#{bad.inspect} should refuse rather than construct"
+      end
+
+      # The other direction: a String still constructs and reads back.
+      expect(conversion(content: "<svg/>").content).to eq("<svg/>")
+    end
+
     it "refuses a lossiness outside the vocabulary at both doors" do
       expect { conversion(lossiness: "maybe") }
         .to raise_error(Lutaml::Model::ValidationError, /maybe/)
@@ -260,7 +281,7 @@ RSpec.describe "conversion lossiness" do
           e.message
         end
       end
-      expect(messages.uniq.size).to eq(2), "expected two distinct REXML limits, got #{messages.inspect}"
+      expect(messages.compact.uniq.size).to eq(2), "expected two distinct REXML limits, got #{messages.inspect}"
     end
 
     # `PullParser.new` runs OUTSIDE `next_event`'s rescue, so a source that is
@@ -288,7 +309,11 @@ RSpec.describe "conversion lossiness" do
     # fix is to check the character-data events; `id` is exactly the route such
     # a list misses, because ATTR_HARMLESS waves it through by NAME and its
     # value never reaches a value rule. The guard sweeps every field of every
-    # event instead, so it is not a list of the routes we thought of.
+    # event, and -- since the round that added the example below -- the
+    # characters each field DENOTES rather than the bytes it spells.
+    # Sweeping every FIELD is not the same as sweeping every CHARACTER:
+    # for one round this was still a route list, and an encoded reference
+    # in `id` was the route it missed.
     it "never calls a document carrying a character illegal in XML lossless" do
       expect(classify("control_char_text")).to eq("unknown")
       expect(classify("control_char_id")).to eq("unknown")
@@ -297,6 +322,92 @@ RSpec.describe "conversion lossiness" do
       # Not a C0 control: U+FFFF is excluded by the same production, and a
       # guard written as "below 0x20" would miss it.
       expect(classify_source(control_document("\uFFFF"))).to eq("unknown")
+    end
+
+    # The ENCODED route. A value REXML hands back is RAW for attributes:
+    # `id="a&#28;b"` denotes five characters, not the eight it spells. Only
+    # character data gets a decoded second field, so the literal-character
+    # guard caught text by accident of the event shape while every
+    # name-admitted attribute leaked. Measured before the fix: a literal
+    # U+001C in `id` gave unknown and `&#28;` in the same place gave lossless,
+    # while REXML::Document refuses both.
+    it "reads what an attribute value denotes, not what it spells" do
+      %w[&#28; &#x1c; &#0;].each do |reference|
+        expect(classify_source(control_document(rect_attrs: %( id="a#{reference}b"))))
+          .to eq("unknown"), "#{reference} in id should be unknown"
+      end
+
+      # Every name-admitted route, because each reaches `lossless` down its own
+      # branch of `feature_for` and closing one does not close the rest.
+      { %( version="&#28;") => "ATTR_HARMLESS",
+        %( xml:space="&#28;") => "the xml: allowance",
+        %( xml:lang="&#28;") => "the xml: allowance",
+        %( xmlns:foo="&#28;") => "the prefix == xmlns early return" }.each do |attribute, route|
+        expect(classify_source(control_document(rect_attrs: attribute)))
+          .to eq("unknown"), "#{route} should not admit an encoded illegal character"
+      end
+
+      # The other direction, so the fix is not "any value containing & is
+      # unknown": `&#65;` denotes "A" and `&amp;` denotes "&", both legal.
+      # A reference can also denote NOTHING establishable, and these are the
+      # rows that make the totality guard fail when it is removed. `&#xD800;`
+      # is a lone surrogate and `&#x110000;` is past the last codepoint: both
+      # RESOLVE, without raising, to invalid UTF-8. `&#999999999999;` raises
+      # RangeError and resolves to nil. Asking `match?` about any of the three
+      # raises rather than answers, so a guard that let them through would be
+      # relying on `Scanner#run` rescue to reach the same verdict by accident.
+      ["&#xD800;", "&#x110000;", "&#999999999999;"].each do |reference|
+        expect(classify_source(control_document(rect_attrs: %( id="a#{reference}b"))))
+          .to eq("unknown"), "#{reference} denotes nothing establishable"
+      end
+      expect(classify_source(control_document("a&#xD800;b"))).to eq("unknown")
+
+      expect(classify_source(control_document(rect_attrs: %( id="a&#65;b")))).to eq("lossless")
+      expect(classify_source(control_document(rect_attrs: %( id="a&amp;b")))).to eq("lossless")
+    end
+
+    # An UNDECLARED reference resolves to nothing, so the document denotes
+    # characters this scanner cannot establish -- strictly LESS evidence than a
+    # DECLARED entity, which already answers `unknown` through
+    # SUBSET_DECLARATIONS. Before the fix the undeclared case was the more
+    # permissive of the two, inverting the rule at the top of lossiness.rb.
+    #
+    # The oracles genuinely disagree here and the choice is deliberate:
+    # REXML::Document ACCEPTS an undeclared reference, xmllint refuses it.
+    # `unknown` is right under this file own rule whichever oracle is right,
+    # because a reference Claricle never resolves is evidence running out
+    # either way.
+    it "treats an unresolvable reference as evidence running out" do
+      subset = %(<!DOCTYPE svg [<!ENTITY e "x">]>)
+      declared = "#{subset}#{control_document(%(&e;))}"
+      expect(classify_source(declared)).to eq("unknown")
+
+      expect(classify_source(control_document("a&nope;b"))).to eq("unknown")
+      expect(classify_source(control_document(rect_attrs: %( id="a&nope;b")))).to eq("unknown")
+
+      # `&amp;nope;` denotes the literal text "&nope;", which is legal and
+      # fully accounted for. In an ATTRIBUTE the distinction survives and the
+      # verdict is `lossless`, because REXML hands attribute values back raw
+      # and the reference test runs there -- detector.rb states the same rule
+      # for the same reason.
+      expect(classify_source(control_document(rect_attrs: %( id="a&amp;nope;b"))))
+        .to eq("lossless")
+
+      # In TEXT it does NOT survive, and this is a deliberate, bounded
+      # over-fire rather than an oversight. REXML supplies character data as
+      # TWO fields, raw and pre-decoded -- ["a&amp;nope;b", "a&nope;b"] -- and
+      # the second is byte-identical to what a genuine unresolved `&nope;`
+      # produces. Nothing in the event distinguishes them, so the scanner
+      # answers `unknown`: the safe direction under the rule at the top of
+      # lossiness.rb, and the reason this row asserts `unknown` rather than
+      # pretending the ambiguity is resolvable.
+      #
+      # The cost is narrow and measured: only text carrying `&amp;` followed
+      # immediately by a name and a semicolon, such as `&amp;copy;`. Plain
+      # `&amp;` is unaffected -- the five XML built-ins are excluded by the
+      # lookahead -- and the row below pins that.
+      expect(classify_source(control_document("a&amp;nope;b"))).to eq("unknown")
+      expect(classify_source(control_document("a&amp;b"))).to eq("lossless")
     end
 
     # The other direction, which is the one a character guard gets wrong. It
@@ -432,8 +543,30 @@ RSpec.describe "conversion lossiness" do
         .to eq("unknown")
     end
 
+    # IGNORED is two elements and this covered only the root `<svg>`. All six
+    # `<defs>` fixtures carry a bare `<defs>`, and the one with attributes has
+    # `<defs>` AS the root, so it takes `visit_root` instead -- the whole
+    # corpus agreed on a property nobody chose. Measured: skip attributes on a
+    # non-root ignored element and `<defs opacity="0.5">` returns `lossless`
+    # with the rest of this file green.
     it "reads attributes on elements whose own contribution is ignored" do
       expect(classify("root_style_rect")).to eq("unknown")
+
+      nested = lambda do |attributes|
+        root = %(<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50">)
+        body = %(<defs#{attributes}><rect width="10" height="10" fill="#ff0000"/></defs>)
+        "#{root}#{body}</svg>"
+      end
+      %w[opacity="0.5" style="fill:red" transform="scale(2)"].each do |attribute|
+        expect(classify_source(nested.call(" #{attribute}")))
+          .to eq("unknown"), "<defs #{attribute}> should be unknown"
+      end
+
+      # The other direction, so the rule cannot become "a defs with any
+      # attribute is unknown": a proven-harmless name on the same element is
+      # still admitted, and so is a bare one.
+      expect(classify_source(nested.call(%( id="a")))).to eq("lossless")
+      expect(classify_source(nested.call(""))).to eq("lossless")
     end
 
     it "never mistakes a foreign-namespace element for a proven-kept shape" do

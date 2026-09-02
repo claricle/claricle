@@ -114,6 +114,29 @@ module Claricle
 
       private
 
+      # Runs BEFORE lutaml's own `validate!`, which is the whole point:
+      # `validate!` reaches every attribute through `public_send`, so it calls
+      # the `content` reader, and on a bad shape the reader is what dies.
+      # `validate_types` is too late -- base.rb:288-292 orders `validate!`
+      # ahead of it.
+      #
+      # Every non-String content refuses through `BinaryContent.cast`, EXCEPT
+      # an Array: lutaml's collection path never calls `cast` on the Array
+      # itself, so it is stored raw. Measured, `content: ["a"]` reached
+      # `NoMethodError: undefined method 'value' for an instance of Array`
+      # instead of refusing. `[1, 2]` DID refuse, but only because an Integer
+      # ELEMENT tripped `cast` -- a guard that holds for the wrong reason, and
+      # an Array of Strings walks straight past it.
+      #
+      # Reads the raw ivar, never the reader, for the same reason.
+      def normalize
+        raw = instance_variable_get(:@content)
+        return if raw.nil? || raw.is_a?(BinaryContent)
+        return if Lutaml::Model::Utils.uninitialized?(raw)
+
+        refuse(:content, "a String", raw.class)
+      end
+
       # Required at the model rather than through `required: true`, so the
       # message names the attribute and both doors agree.
       def validate_types

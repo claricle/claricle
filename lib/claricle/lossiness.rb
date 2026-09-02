@@ -55,7 +55,9 @@ module Claricle
     # file no conformant parser will read was getting the one verdict that
     # tells the caller not to look.
     #
-    # Matched against DECODED characters, never against source bytes.
+    # Matched against the characters a value DENOTES, never the bytes it
+    # spells -- CharacterRules resolves references first, because REXML hands
+    # attribute values back raw. And never against SOURCE bytes:
     # utf16_gradient.svg holds 193 bytes below 0x20 that are ordinary UTF-16
     # code units, and a byte-level guard condemns that legal document. REXML
     # hands every payload back as valid UTF-8 or raises trying -- measured over
@@ -66,10 +68,17 @@ module Claricle
     # Names admitted whatever their value: structural and identity only.
     ATTR_HARMLESS = %w[version id].freeze
 
-    # `xml:space` and `xml:lang` affect character-data handling only, and every
-    # character-data-bearing element is already unclassified by ELEMENTS' own
-    # catch-all -- so this allowance cannot produce a wrong `lossless`. No other
-    # prefix is allowed.
+    # `xml:space` and `xml:lang` affect character-data handling only, and no
+    # element ELEMENTS proves KEPT renders character data: `rect` and `line`
+    # draw a shape, and SVG does not paint text placed inside either. So the
+    # allowance cannot change what a proven-kept document renders.
+    #
+    # NOT the stronger claim this comment used to make. "Every
+    # character-data-bearing element is already unclassified" is false --
+    # measured, `<rect xml:space="preserve">` in a document carrying text
+    # classifies `lossless`, because a `rect` can BEAR character data even
+    # though it never renders it. The conclusion holds; that reason did not.
+    # No other prefix is allowed.
     ATTR_ALLOWED_PREFIXED = { "xml" => %w[space lang] }.freeze
 
     # An internal subset can make a document mean more than its markup shows:
@@ -234,6 +243,11 @@ module Claricle
 
     # Extracted for the reason AttributeRules is: Scanner stays inside
     # Metrics/ClassLength without an exemption.
+    #
+    # "Unaccounted for" rather than "illegal", because a value can fail to
+    # establish its characters two ways and both are the same answer here: it
+    # denotes something XML forbids, or it denotes something this scanner
+    # cannot resolve at all.
     module CharacterRules
       module_function
 
@@ -242,12 +256,38 @@ module Claricle
       # Only three classes reach here -- measured across every convert fixture
       # plus a document exercising all 14 event types: String, Hash, and nil
       # for an absent optional field such as an xmldecl's encoding.
-      def illegal?(field)
+      def unaccounted?(field)
         case field
-        when String then ILLEGAL_CHAR.match?(field)
-        when Hash then field.any? { |name, value| illegal?(name) || illegal?(value) }
+        when String then unaccounted_text?(field)
+        when Hash then field.any? { |name, value| unaccounted?(name) || unaccounted?(value) }
         else false
         end
+      end
+
+      # What REXML hands back is RAW for an attribute value: `id="a&#28;b"`
+      # DENOTES five characters and SPELLS eight. Only character data gets a
+      # decoded second field, so checking the bytes as given caught text by
+      # accident of the event shape and let every name-admitted attribute
+      # through -- `id`, `version`, `xml:space`, `xml:lang` and `xmlns:*` all
+      # reached `lossless`. detector.rb:423-424 states the same fact about the
+      # same parser, and this reuses the resolver it states it beside.
+      #
+      # The reference test runs on the RAW and the character test on the
+      # RESOLVED. That order is the rule, not a convenience: `&amp;nope;`
+      # denotes the literal text "&nope;", which is legal, and after
+      # resolution it is indistinguishable from a genuinely unresolved
+      # `&nope;`. AttributeReferences documents the same asymmetry.
+      def unaccounted_text?(raw)
+        return true if AttributeReferences.unresolved?(raw)
+
+        resolved = AttributeReferences.resolve(raw)
+        # nil is RangeError -- a reference outside Unicode. Invalid UTF-8 is a
+        # surrogate or a codepoint above U+10FFFF, which `resolve` produces
+        # WITHOUT raising. Both mean the denoted characters are unestablished,
+        # and `match?` would raise rather than answer about either.
+        return true if resolved.nil? || !resolved.valid_encoding?
+
+        ILLEGAL_CHAR.match?(resolved)
       end
     end
 
@@ -358,13 +398,13 @@ module Claricle
       # yields the whole tail whatever the event's arity -- measured 0 to 5
       # across all 14 emitted types, the widest being an entity declaration
       # with a PUBLIC id and an NDATA notation. No bound to keep in step.
-      def note_illegal_characters(event)
-        note(:unclassified) if event[0..].any? { |field| CharacterRules.illegal?(field) }
+      def note_unaccounted_characters(event)
+        note(:unclassified) if event[0..].any? { |f| CharacterRules.unaccounted?(f) }
       end
 
       def consume(event)
         note(:unclassified) unless KNOWN_EVENTS.include?(event.event_type)
-        note_illegal_characters(event)
+        note_unaccounted_characters(event)
         note_declarations(event)
         return close_element if event.event_type == :end_element
 
