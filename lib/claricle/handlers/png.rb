@@ -46,6 +46,26 @@ module Claricle
         6 => "truecolor+alpha"
       }.freeze
 
+      # Lives out here rather than inside StructureScanner, its only
+      # consumer, because the `header_at` guard added alongside it pushed
+      # that class to 102 lines against Metrics/ClassLength's 100 --
+      # measured by moving this back, which fires the cop. Headroom is two
+      # lines, so item 03 should decompose the scanner rather than hoist
+      # another constant.
+      STRUCTURE_MESSAGES = {
+        duplicate_ihdr: "duplicate IHDR chunk; a PNG datastream carries exactly one",
+        missing_iend: "PNG datastream ends without an IEND chunk",
+        duplicate_iend: "a second IEND chunk follows the end of the datastream",
+        trailing_data: "unexpected bytes after the IEND chunk",
+        # The whole record span against the bytes really left. Comparing
+        # a payload length with remaining record bytes reads as
+        # "declares 13 bytes but only 17 remain", which compares two
+        # different units and tells the reader nothing.
+        chunk_overruns: "chunk needs %d bytes but only %d remain in the file",
+        header_residue: "%s left, too few for a chunk header",
+        shorter_than_signature: "file is shorter than the PNG signature"
+      }.freeze
+
       # Headroom over IHDR_BYTES (13) and PHYS_BYTES (9): neither
       # `readable` nor `dpi` ever needs more of a wanted chunk than
       # that, so nothing here trusts a declared length past this cap --
@@ -197,7 +217,8 @@ module Claricle
       # every payload, so the bytes read are 8 x the HEADERS EXAMINED --
       # measured 24 bytes for a 75-byte file and for a 10 MiB one. Not
       # "independent of file size", which overstates it: a 20-byte
-      # IEND-only stream reads 8 bytes and 100 empty chunks read 808. The
+      # IEND-only stream reads 8 bytes, and 100 empty chunks plus IEND read
+      # 808 (the 100 alone read 800). The
       # guarantee is that no payload is ever read, whatever it declares.
       #
       # Beside `ChunkReader` rather than inside it: that one stops at
@@ -216,19 +237,6 @@ module Claricle
         # lutaml raise, which would take the scan down on exactly the
         # malformed input this exists to report.
         LETTERS = /\A[A-Za-z]{4}\z/
-        MESSAGES = {
-          duplicate_ihdr: "duplicate IHDR chunk; a PNG datastream carries exactly one",
-          missing_iend: "PNG datastream ends without an IEND chunk",
-          duplicate_iend: "a second IEND chunk follows the end of the datastream",
-          trailing_data: "unexpected bytes after the IEND chunk",
-          # The whole record span against the bytes really left. Comparing
-          # a payload length with remaining record bytes reads as
-          # "declares 13 bytes but only 17 remain", which compares two
-          # different units and tells the reader nothing.
-          chunk_overruns: "chunk needs %d bytes but only %d remain in the file",
-          header_residue: "%s left, too few for a chunk header",
-          shorter_than_signature: "file is shorter than the PNG signature"
-        }.freeze
 
         # Where the walk stopped, carrying the header it stopped on so
         # the terminal issue never re-reads one.
@@ -293,19 +301,26 @@ module Claricle
         def note_duplicate(type, offset, span)
           return unless type == "IHDR"
 
-          @found << issue("png.duplicate_ihdr", MESSAGES[:duplicate_ihdr], offset, span, "IHDR") if @seen_ihdr
+          @found << issue("png.duplicate_ihdr", STRUCTURE_MESSAGES[:duplicate_ihdr], offset, span, "IHDR") if @seen_ihdr
           @seen_ihdr = true
         end
 
         # The range is what is really there, not what was declared: a
         # half-open range must never name bytes the file lacks.
+        #
+        # Stated against a TRUTHFUL `io.size`, which this scanner documents
+        # rather than enforces. Under a size that over-reports, this range and
+        # `trailing`'s both name bytes past EOF -- measured, a real file
+        # truncated to 41 bytes after `io.size` was captured yields
+        # byte_offset 56, which is 15 bytes past its end. That is the deferred
+        # gap the over-reporting examples in the spec pin as known.
         def truncated(stop)
           remaining = @size - stop.offset
           message =
             if stop.length
-              format(MESSAGES[:chunk_overruns], span(stop.length), remaining)
+              format(STRUCTURE_MESSAGES[:chunk_overruns], span(stop.length), remaining)
             else
-              format(MESSAGES[:header_residue], bytes_phrase(remaining))
+              format(STRUCTURE_MESSAGES[:header_residue], bytes_phrase(remaining))
             end
           issue("png.chunk_truncated", message, stop.offset, remaining, letters(stop.type))
         end
@@ -318,9 +333,9 @@ module Claricle
 
           @found <<
             if complete_iend_at?(offset)
-              issue("png.duplicate_iend", MESSAGES[:duplicate_iend], offset, remaining, "IEND")
+              issue("png.duplicate_iend", STRUCTURE_MESSAGES[:duplicate_iend], offset, remaining, "IEND")
             else
-              issue("png.trailing_data", MESSAGES[:trailing_data], offset, remaining, nil)
+              issue("png.trailing_data", STRUCTURE_MESSAGES[:trailing_data], offset, remaining, nil)
             end
         end
 
@@ -336,24 +351,40 @@ module Claricle
         # The whole record, payload and framing together.
         def span(length) = FRAMING_BYTES + length
 
-        # A residue is 1 to 7 bytes, so the singular is reachable and
-        # "1 bytes remain" is copy a person reads while something is wrong.
+        # Under a truthful `io.size` a residue is 1 to 7 bytes, so the
+        # singular is reachable -- the over-reporting rows in the spec do
+        # reach larger values, e.g. "1000 bytes left". Either way
+        # "1 bytes left" is copy a person reads while something is wrong.
         def bytes_phrase(count) = "#{count} byte#{"s" unless count == 1}"
 
-        # The one completeness rule, in one place. `note_duplicate` and
-        # `complete_iend_at?` both need it, and writing it twice -- once
-        # as an overrun test and once as its inverse -- is how the two
-        # drift apart.
+        # The one completeness rule, in one place. `walk` and
+        # `complete_iend_at?` are its callers -- writing it twice, once as an
+        # overrun test and once as its inverse, is how the two drift apart.
+        # (`note_duplicate` does NOT call it; it is handed the span `walk`
+        # already computed.)
         def record_fits?(offset, length)
           !length.nil? && offset + span(length) <= @size
         end
 
         # nil when no header fits, which `walk` reads as truncation.
+        #
+        # The size test is not enough on its own, because it trusts
+        # `io.size`. A short or absent read is checked too, so the walk
+        # stays total even where that number lies -- measured, `read(8)`
+        # at EOF returns nil and `nil.unpack` raises NoMethodError. A
+        # short read is a fault here exactly as it is everywhere else in
+        # this scanner, not an ending. `ChunkReader#read_header` already
+        # takes the same care for the same reason -- cited by NAME, not by
+        # line: a same-file line range rots the moment anything above it
+        # moves, which is exactly how this comment was wrong once already.
         def header_at(offset)
           return nil if offset + HEADER_BYTES > @size
 
           @io.seek(offset)
-          @io.read(HEADER_BYTES).unpack("Na4")
+          header = @io.read(HEADER_BYTES)
+          return nil unless header&.bytesize == HEADER_BYTES
+
+          header.unpack("Na4")
         end
 
         def letters(type)
@@ -370,14 +401,14 @@ module Claricle
         # Absent is not zero: a fault with no chunk to point at carries no
         # range rather than an invented one at EOF.
         def rangeless(code, key, chunk: nil)
-          Models::Issue.new(severity: "error", code: code, message: MESSAGES[key],
+          Models::Issue.new(severity: "error", code: code, message: STRUCTURE_MESSAGES[key],
                             location: Models::Location.new(chunk: chunk))
         end
       end
 
       private_constant :IHDR_LAYOUT, :IHDR_BYTES, :PHYS_LAYOUT, :PHYS_BYTES,
                        :METRE_UNIT, :METRES_PER_INCH, :WANTED_CHUNKS,
-                       :COLOR_SPACES, :MAX_CHUNK_READ, :DRAIN_BUFFER,
+                       :COLOR_SPACES, :STRUCTURE_MESSAGES, :MAX_CHUNK_READ, :DRAIN_BUFFER,
                        :Chunk, :ChunkReader, :StructureScanner
 
       def inspection(image)

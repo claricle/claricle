@@ -108,7 +108,9 @@ RSpec.describe "Claricle PNG handler" do
   # Fed from a thread, so bytes past the pipe buffer do not deadlock the
   # writer, and killed in an ensure -- a spec that stops reading early
   # would otherwise leave the feeder blocked on a full buffer forever.
-  # Same shape as detector_spec.rb:463, EPIPE rescue included: there
+  # Same shape as detector_spec.rb:617-631, "returns from a pipe that stays
+  # open past its bound" -- named as well as numbered so it survives a move.
+  # EPIPE rescue included: there
   # isn't one, because the kill lands before the writer can ever resume
   # into a closed reader. Measured over 800 runs, both teardown
   # orderings, EPIPE never fired.
@@ -731,7 +733,9 @@ module PngStreams
   end
 
   # A chunk header alone: a declared length and a type with no record
-  # behind them, which is how every truncation row is built.
+  # behind them. How MOST truncation rows are built -- not all: the residue
+  # rows append raw bytes with no header, and the duplicate-IEND rows slice
+  # one, so do not read this as covering every truncation case.
   def header(length, type)
     [length].pack("N") + type.b
   end
@@ -789,7 +793,7 @@ module PngRows
       # 42 bytes of remainder behind a 20-byte IEND record, so the range
       # cannot be the record's span -- the two coincide at exactly 20 in
       # the row above, which is the shape that hid this twice before.
-      "complete second IEND with 30 bytes behind it" =>
+      "complete second IEND with 22 bytes behind it" =>
         after_iend(header(8, "IEND") + ("z" * 12) + ("t" * 22), "duplicate_iend", 42, "IEND")
     }
   end
@@ -942,14 +946,21 @@ RSpec.describe "Claricle PNG structural scanner" do
 
   # --- the boundedness harness ------------------------------------------
   #
-  # Three layers, because two were not enough twice over. The allowlist
-  # ADDS size and seek to svg_spec.rb:49's list: this walk needs both, and
-  # without them the harness fails a CORRECT implementation, which is the
-  # worst way for a gate to be wrong.
+  # Three layers, because two were not enough twice over. THREE DIFFERENT
+  # LISTS live here and an earlier comment ran them together, so they are
+  # named apart: `CapabilityIO`'s INSTANCE surface is [read, seek, size,
+  # close] -- it is that one which adds size and seek, because this walk
+  # needs both and without them the harness fails a CORRECT implementation,
+  # the worst way for a gate to be wrong. `svg_spec.rb:49` is a different
+  # list again ([read, close, closed?, path, to_path, to_io, fileno]), and
+  # `permitted_class_calls` below is a CLASS-method list sharing only `path`.
   # The scanner is measured to reach the filesystem through exactly ONE
-  # class method: File.open. So this is an ALLOWLIST -- every other way
-  # File or IO can hand back bytes is refused by name derived from the
-  # class, not by a list someone has to remember to extend.
+  # class method: File.open. So this is an ALLOWLIST -- refused by names
+  # derived from the class, not by a list someone has to remember to extend.
+  # NOT total, and the gap is named rather than implied: `:open` is
+  # subtracted BY NAME from a set built from BOTH receivers, so `IO.open`
+  # is permitted too, and neither `Kernel.open` nor a subprocess is on
+  # either receiver at all. Those routes are known-open follow-ups.
   #
   # A denylist was tried and leaked three times: first `each_byte` past a
   # read-only recorder, then `IO.binread` and the non-block `File.open`
@@ -957,8 +968,13 @@ RSpec.describe "Claricle PNG structural scanner" do
   # `File.readlines` past a six-name one. Each leak read the whole file
   # while the example stayed green.
   # MEASURED, not guessed: these are every File class method the example
-  # actually uses -- `open` for the scanner, the rest for the temporary
-  # file and its cleanup. None of the others returns file CONTENT.
+  # actually uses -- `open` for the scanner, the rest for the temporary file
+  # and its cleanup. None of the others returns file CONTENT.
+  # NOT all of them are load-bearing, and that is stated rather than implied:
+  # removing `binwrite`, `expand_path` or `writable?` one at a time leaves
+  # all five bounded examples GREEN, because those fire BEFORE the guards are
+  # armed. They stay because the plumbing really does call them, not because
+  # a spec would catch their absence.
   def permitted_class_calls
     %i[open join binwrite dirname expand_path lstat stat path unlink writable?]
   end
@@ -967,8 +983,6 @@ RSpec.describe "Claricle PNG structural scanner" do
     (File.singleton_methods | IO.singleton_methods).uniq - permitted_class_calls
   end
 
-  # Wraps File.open in BOTH forms. The non-block form was measured
-  # handing back an unwrapped handle, which is a hole svg_spec.rb:82 has.
   # Wraps File.open in BOTH forms -- the non-block form was measured
   # handing back an unwrapped handle, which is a hole svg_spec.rb:82 has.
   # EVERY handle is kept, not just the latest. Keeping one let a mutant
@@ -1045,8 +1059,9 @@ RSpec.describe "Claricle PNG structural scanner" do
   end
 
   # A forward guard for codes added later, not proof of anything about
-  # byte_length: a zero-length mutant satisfies it while failing ten
-  # other examples.
+  # byte_length: a zero-length mutant satisfies it while failing many
+  # other examples. No count is stated -- it read "ten", measured 23, and a
+  # number in a comment rots exactly like a line range.
   it "never names bytes the file does not contain" do
     checked = 0
 
@@ -1066,9 +1081,10 @@ RSpec.describe "Claricle PNG structural scanner" do
 
   # Documents the degeneracy directly: for each declared length the
   # header-derived span differs from what is left in the file. NOT
-  # load-bearing on its own -- the four `duplicate_rows` examples run on
-  # byte-identical streams and a remainder-derived mutant fails all of
-  # them too, so this catches no mutant they miss.
+  # load-bearing on its own -- the `duplicate_rows` examples run on streams
+  # three of whose four pairs are byte-identical (the length-13 pair shares
+  # a header but differs in payload and CRC), and a remainder-derived mutant
+  # fails all of them too, so this catches no mutant they miss.
   it "derives byte_length from the chunk header, not from the remainder" do
     {
       20 => [77, 32], 0 => [57, 12], 13 => [70, 25], 6 => [63, 18]
@@ -1080,8 +1096,10 @@ RSpec.describe "Claricle PNG structural scanner" do
     end
   end
 
-  # LOAD-BEARING. Bytes read = 8 x headers examined, never a function of
-  # file size or declared length. Rows 2 to 4 are what make that
+  # LOAD-BEARING. Bytes read = 8 x headers examined. NOT "independent of
+  # file size" -- that overstates it, and png.rb states the rule the same
+  # corrected way beside `structural_issues`. What is guaranteed is that no
+  # PAYLOAD is ever read, whatever it declares. Rows 2 to 4 make that
   # non-trivial: one carries 10 MiB it never reads, one DECLARES 10 MiB
   # it never reads, and one has a 10 MiB tail past IEND.
   describe "bounded reads" do
@@ -1089,9 +1107,14 @@ RSpec.describe "Claricle PNG structural scanner" do
       it "reads #{expected_volume} bytes when the stream #{label}" do
         events = {}
 
-        # The temporary file is written BEFORE the guards are armed:
-        # `Dir.mktmpdir` and `File.binwrite` are the test's own plumbing,
-        # not the scanner's reads, and arming first refuses them.
+        # The temporary file is written BEFORE the guards are armed, so the
+        # recorded reads belong to the scanner alone.
+        # NOT because arming first would REFUSE the plumbing -- it would not,
+        # and the old comment here said otherwise. Instrumented across
+        # `Dir.mktmpdir` + `File.binwrite` + cleanup: nine File class methods
+        # fire (path, join, stat, lstat, expand_path, writable?, binwrite,
+        # dirname, unlink) and ALL NINE are on the allowlist, because the
+        # allowlist was derived by instrumenting this exact path.
         with_png_file(bytes) do |path|
           watch_reads(events)
           forbid_slurps
@@ -1105,9 +1128,78 @@ RSpec.describe "Claricle PNG structural scanner" do
     end
   end
 
+  # `io.size` is trusted for the guard, so a size that OVER-reports lets
+  # the walk ask for a header that is not there. Measured: `read(8)` at
+  # EOF returns nil and `nil.unpack` raised NoMethodError -- a crash on
+  # exactly the malformed input this exists to report. A short read is a
+  # fault, so it lands as truncation like every other short read here.
+  #
+  # BOTH HALVES of `header&.bytesize == HEADER_BYTES` need their own row,
+  # because they are DIFFERENT reads. A size lying by 1000 puts the walk
+  # past EOF and `read` hands back nil -- the ABSENT case. A size lying by
+  # only 6 leaves a 6-byte tail, so `read(8)` hands back a SHORT string.
+  # Only the second fails when the guard is weakened to `header.nil?`,
+  # which is why one row was not enough.
+  #
+  # NEITHER row asserts byte_length, and neither asserts the message's
+  # NUMBERS, deliberately: both are computed from the lying size, so the
+  # absent case reports 1000 and "1000 bytes left, too few for a chunk
+  # header" -- a message that contradicts itself, since 1000 is ample for an
+  # 8-byte header. The SHORT row DOES assert the message's SUFFIX, which
+  # carries no number and is the only thing separating "no header at all"
+  # from "a chunk that overruns".
+  #
+  # ONE HAZARD, TWO SYMPTOMS, and the second is the worse one. That same
+  # `io.size` read also misfires on the TRAILING path: a VALID 45-byte PNG
+  # under a size over-reporting by 1000 returns ["png.trailing_data",
+  # offset 45, byte_length 1000] -- a wrong issue about a file that is
+  # FINE, naming 1000 bytes it does not have, which is exactly what the
+  # rule above `truncated` says must never happen.
+  #
+  # Fixing both means not trusting `io.size`. That deferral is recorded in
+  # this branch's own plan at section 3.6 -- which is LOCAL AND UNTRACKED,
+  # so do not go looking for it in the repo.
+  # The tracked home for the work is item 03 (TODO.plan/03-conform.md),
+  # whose card does not yet name this hazard at all and should.
+  # Item 03 must close BOTH paths: closing
+  # only the truncation one it happens to reproduce still leaves a
+  # perfectly good file reported as damaged. The ABSENT row pins only that
+  # the scanner no longer CRASHES; the SHORT row additionally pins WHICH
+  # fault it names, via the message suffix -- see its own comment below.
+  it "treats an ABSENT header read as truncation when io.size over-reports" do
+    lying = Class.new(StringIO) { def size = super + 1000 }
+    bytes = png(chunk("IHDR", ihdr))
+
+    issues = scanner_class.new(lying.new(bytes)).issues
+
+    expect(issues.map(&:code)).to eq(["png.chunk_truncated"])
+    expect(issues.first.location.byte_offset).to eq(33)
+  end
+
+  it "treats a SHORT header read as truncation when io.size over-reports" do
+    lying = Class.new(StringIO) { def size = super + 6 }
+    bytes = png(chunk("IHDR", ihdr)) + ("z" * 6)
+
+    issues = scanner_class.new(lying.new(bytes)).issues
+
+    expect(issues.map(&:code)).to eq(["png.chunk_truncated"])
+    expect(issues.first.location.byte_offset).to eq(33)
+    # THE SUFFIX IS WHAT MAKES THIS ROW LOAD-BEARING. The code and offset
+    # alone are not: weaken the guard to `header.nil?` and this same input
+    # still reports png.chunk_truncated at 33, so both of those assertions
+    # stay green. What changes is WHICH fault it names -- the 6-byte tail
+    # gets unpacked as a declared length, giving "chunk needs 2054847110
+    # bytes but only 12 remain in the file". A short read is NO HEADER AT
+    # ALL, not a chunk that overruns, and that is the distinction pinned
+    # here. The byte count is left out of the assertion because it is
+    # still derived from the lying size.
+    expect(issues.first.message).to end_with("too few for a chunk header")
+  end
+
   # Invisible without this: replacing `issues` with a bare `scan` left
-  # all 45 scanner examples green while a second call appended a false
-  # duplicate-IHDR issue.
+  # every other scanner example green while a second call appended a false
+  # duplicate-IHDR issue. No count is stated on purpose -- it was "45" and
+  # is now 49, and a number in a comment rots exactly like a line range.
   it "scans once however often issues is asked for" do
     scanner = scanner_class.new(StringIO.new(png(chunk("IHDR", ihdr), chunk("IHDR", ihdr), chunk("IEND", ""))))
 
@@ -1133,8 +1225,9 @@ RSpec.describe "Claricle PNG structural scanner" do
     expect(tuples(bytes)).to eq(expected)
   end
 
-  # `message` is required, and nothing else here reads it. Asserting the
-  # text is what stops MESSAGES's seven strings being invented unreviewed.
+  # `message` is required, and apart from the SHORT over-reporting row --
+  # which asserts only a suffix -- nothing else here reads it. Asserting the
+  # text is what stops STRUCTURE_MESSAGES's seven strings being invented unreviewed.
   describe "messages" do
     it "states the record span against the bytes really left" do
       expect(scan_path("truncated_ihdr.png").first.message)
@@ -1143,7 +1236,8 @@ RSpec.describe "Claricle PNG structural scanner" do
 
     # A residue runs 1 to 7 bytes, so both sides of the plural are
     # reachable and both are asserted -- the singular alone is what a
-    # `"#{count} bytes"` shortcut gets wrong, and nothing else here reads it.
+    # `"#{count} bytes"` shortcut gets wrong. Nothing else asserts the COUNT
+    # word; the SHORT over-reporting row reads the message suffix only.
     { 1 => "1 byte left", 7 => "7 bytes left" }.each do |residue, phrase|
       it "names a #{residue}-byte shortfall when no header fits" do
         expect(scan(png(chunk("IHDR", ihdr), "z" * residue)).first.message)
@@ -1171,7 +1265,10 @@ RSpec.describe "Claricle PNG structural scanner" do
       expect(scan_path("doubled.png").first.message).to eq("unexpected bytes after the IEND chunk")
     end
 
-    it "says duplicate, not second, because a third repeat also emits" do
+    # `.uniq` collapses the issues on purpose: what this pins is the
+    # WORDING, which stays correct however many repeats emit. The COUNT is
+    # pinned by the table row asserting two duplicate_ihdr issues, not here.
+    it "says duplicate rather than second, so a third repeat needs no rewording" do
       bytes = png(chunk("IHDR", ihdr), chunk("IHDR", ihdr), chunk("IHDR", ihdr), chunk("IEND", ""))
       messages = scan(bytes).map(&:message).uniq
 
