@@ -326,13 +326,17 @@ RSpec.describe Claricle::Models do
         Issue: -> { issue.call("info") },
         Report: -> { models::Report.new(format: "png") },
         Location: -> { models::Location.new },
-        Inspection: -> { models::Inspection.new(format: "png", parse_status: "ok") }
+        Inspection: -> { models::Inspection.new(format: "png", parse_status: "ok") },
+        Conversion: lambda {
+          models::Conversion.new(source_format: "svg", target_format: "eps",
+                                 lossiness: "lossless")
+        }
       }.freeze
 
       # Every class, not just the one Base is written on: the refusal is
       # inherited, and a subclass that quietly regained a dump would be
       # the whole hole back.
-      %i[Issue Report Location Inspection].each do |name|
+      %i[Issue Report Location Inspection Conversion].each do |name|
         it "refuses to dump #{name}" do
           expect { Marshal.dump(built.fetch(name).call) }
             .to raise_error(TypeError, /cannot marshal Claricle::Models::#{name}/)
@@ -1577,7 +1581,8 @@ RSpec.describe Claricle::Models do
     end
 
     it "lists none of them among its constants" do
-      expect(described_class.constants).to contain_exactly(:Location, :Issue, :Report, :Inspection)
+      expect(described_class.constants)
+        .to contain_exactly(:Location, :Issue, :Report, :Inspection, :Conversion)
     end
 
     # `meta` still hands back a plain Hash, so hiding the type takes
