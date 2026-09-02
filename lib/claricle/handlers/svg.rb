@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "rexml/parsers/baseparser"
+
 require_relative "base"
 require_relative "../detector"
 require_relative "../models/inspection"
@@ -69,6 +71,129 @@ module Claricle
 
       private_constant :PX_PER_INCH, :ABSOLUTE_UNITS, :NUMBER, :XML_SPACE, :DIMENSION,
                        :ISSUE_CODE, :ISSUE_MESSAGE
+
+      # Claricle's own structural verdict on a WHOLE SVG (D23), as
+      # against `inspection` above, which is scoped to the root prefix
+      # and stays that way. No delegate is consulted: svg_conform's
+      # `base` profile returns zero errors for raw binary, and UTF-32
+      # was measured passing every profile silently, so encoding has to
+      # be settled here before any profile validation runs.
+      #
+      # It reads the entire document and holds it. The cost is the file
+      # size plus a parser overhead that depends on CONTENT, not a fixed
+      # band -- measured on 64.0 MiB inputs, peak resident was 85.2 MiB
+      # for many small elements, 103.6 MiB malformed, 147-169 MiB for
+      # UTF-16, and 276.0 MiB for one 64 MiB attribute value, against
+      # 84.0 MiB for the bare read. So the worst measured case is about
+      # 4.3x the file size. That is conformance's cost to pay: item 02
+      # puts the bounded 8192-byte read in `inspect` and says
+      # whole-document well-formedness belongs here.
+      #
+      # What it never does, on any input, is build a document tree --
+      # measured at zero REXML::Element objects where REXML's DOM builds
+      # one per element and peaked at 1.0-1.4 GiB on the same files.
+      # That is a structural property, not a memory bound: the 276 MiB
+      # run above also built zero.
+      module Structure
+        NOT_WELL_FORMED_CODE = "svg.not_well_formed"
+        ENCODING_UNUSABLE_CODE = "svg.encoding_unusable"
+        MULTIPLE_ROOTS_CODE = "svg.multiple_root_elements"
+        UNDECODABLE_MESSAGE = "SVG source is not decodable text"
+        # CHARACTERS, not bytes. REXML's first message line bounds lines
+        # and not bytes -- measured at 100,027 bytes for one long token
+        # -- and an issue has to stay printable as one line. So the real
+        # bound is 200 characters, hence at most 800 bytes; the byte
+        # count is script-dependent and there is no fixed multiplier.
+        # `byteslice` is deliberately not used: it split a CJK codepoint
+        # and Models::Issue then refused the value outright.
+        MESSAGE_CHARACTER_LIMIT = 200
+        DEPTH_CHANGE = { start_element: 1, end_element: -1 }.freeze
+
+        class << self
+          # At most one issue, which is what is currently KNOWABLE
+          # rather than a law: the parser stops at its first fatal
+          # error, and the root count is only complete when none
+          # occurred. A document with two genuine problems reports the
+          # first. The Array return keeps room for a later non-fatal
+          # check, which would coexist with the root count.
+          def scan(source)
+            roots = parse(decoded(source))
+            return [] unless roots > 1
+
+            [issue(MULTIPLE_ROOTS_CODE, "document has #{roots} root elements")]
+          rescue REXML::ParseException => e
+            [parse_failure(e)]
+          rescue ArgumentError => e
+            [issue(ENCODING_UNUSABLE_CODE, e.message)]
+          end
+
+          private
+
+          # Tag, never transcode: REXML still finds a BOM or a
+          # declaration and switches encodings itself. Both arms arrive
+          # binary-tagged -- `Image.from_content` normalises to
+          # ASCII-8BIT and a path-born source is opened "rb" -- and
+          # measured, a multibyte ROOT NAME reads back as "no root
+          # element" from a binary-tagged source and parses from a
+          # UTF-8-tagged one.
+          def decoded(source)
+            bytes = source.respond_to?(:read) ? source.read : source.dup
+            bytes.force_encoding(Encoding::UTF_8)
+          end
+
+          # Loops to :end_document rather than on `has_next?`: measured,
+          # a `has_next?` loop never sees the closing events, so `<svg/>`
+          # reads back as depth 1 and a second root goes unnoticed.
+          #
+          # The root count is Claricle's own. REXML accepts four of the
+          # five second-root shapes measured -- only `<svg/><g></g>`
+          # raises -- so nothing here can be delegated to it.
+          def parse(text)
+            parser = REXML::Parsers::BaseParser.new(text)
+            roots = 0
+            depth = 0
+            loop do
+              type = parser.pull[0]
+              break if type == :end_document
+
+              roots += 1 if type == :start_element && depth.zero?
+              depth += DEPTH_CHANGE.fetch(type, 0)
+            end
+            roots
+          end
+
+          # Raw binary reaches us as an ArgumentError wrapped in a
+          # ParseException, and it is an ENCODING failure rather than a
+          # well-formedness one. Routing on the exception class alone
+          # would file it under svg.not_well_formed.
+          def parse_failure(error)
+            return issue(ENCODING_UNUSABLE_CODE, UNDECODABLE_MESSAGE) if undecodable?(error)
+
+            issue(NOT_WELL_FORMED_CODE, prose(error))
+          end
+
+          def undecodable?(error)
+            error.continued_exception.is_a?(ArgumentError)
+          end
+
+          # RuntimeError#to_s, not `error.message`: ParseException#to_s
+          # reaches `current_line`, which re-reads the whole document at
+          # its default newline separator -- measured at +52 MiB against
+          # +0 MiB here on a 64 MiB newline-free document, for prose
+          # that came out identical.
+          def prose(error)
+            RuntimeError.instance_method(:to_s).bind_call(error)[0, MESSAGE_CHARACTER_LIMIT]
+          end
+
+          def issue(code, message)
+            Models::Issue.new(severity: "error", code: code, message: message)
+          end
+        end
+      end
+
+      # After the module body: `private_constant` on a name that does
+      # not exist yet raises NameError.
+      private_constant :Structure
 
       def inspection(image)
         # Detector.read_root, not a second reader: it owns the 8192-byte

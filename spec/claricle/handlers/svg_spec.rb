@@ -5,6 +5,9 @@ require "English"
 # means in the root-prefix examples, and the library never loads it.
 require "rexml/document"
 require "rexml/security"
+# FileUtils for the XXE example, which keeps its canary file alive across
+# the whole example rather than letting a block form delete it early.
+require "fileutils"
 require "tempfile"
 
 RSpec.describe "Claricle SVG handler" do
@@ -89,6 +92,34 @@ RSpec.describe "Claricle SVG handler" do
         block.call(file)
       end
     end
+  end
+
+  # Drains the pull parser the way the scan does, so an example can say
+  # "REXML itself raises nothing here" without duplicating the loop.
+  def drain(source)
+    parser = REXML::Parsers::BaseParser.new(source.dup.force_encoding(Encoding::UTF_8))
+    loop { break if parser.pull[0] == :end_document }
+  end
+
+  # GC on both sides so the count is live objects, not garbage awaiting a
+  # sweep. Measured stable at 0 across consecutive runs.
+  def elements_created
+    GC.start
+    before = ObjectSpace.each_object(REXML::Element).count
+    yield
+    GC.start
+    ObjectSpace.each_object(REXML::Element).count - before
+  end
+
+  # The final entity expands to MARKUP, so a parser that expanded the
+  # chain would produce a document this scan judges differently. Without
+  # that the bomb is indistinguishable from ordinary text.
+  def billion_laughs
+    entities = ("a".."f").each_cons(2).map do |from, to|
+      %(<!ENTITY #{to} "#{"&#{from};" * 10}">)
+    end.join
+    %(<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY a "</svg><g/>">#{entities}]>) +
+      %(<svg xmlns="#{svg_ns}">&f;</svg>)
   end
 
   describe "dimensions" do
@@ -701,6 +732,302 @@ RSpec.describe "Claricle SVG handler" do
         expect(inspect_svg(tagged))
           .to have_attributes(parse_status: "ok", width: 7.0)
       end
+    end
+  end
+
+  # Claricle's own structural pre-pass (D23). Whole-document, unlike
+  # `inspection` above, which is scoped to the root prefix.
+  describe "the structural scan" do
+    let(:scanner) do
+      Claricle.const_get(:Handlers).const_get(:Svg).const_get(:Structure, false)
+    end
+
+    def scan(source)
+      scanner.scan(source)
+    end
+
+    def scan_file(source)
+      Tempfile.create(["scan", ".svg"]) do |file|
+        file.binmode
+        file.write(source)
+        file.flush
+        File.open(file.path, "rb") { |io| scanner.scan(io) }
+      end
+    end
+
+    # One declaration, one reference, so a resolving parser inlines the
+    # target's markup and the verdict changes.
+    def system_entity_document(target)
+      %(<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY x SYSTEM "#{target}">]>) +
+        %(<svg xmlns="#{svg_ns}">&x;</svg>)
+    end
+
+    def triples(issues)
+      issues.map { |issue| [issue.severity, issue.code, issue.message] }
+    end
+
+    def pairs(issues)
+      issues.map { |issue| [issue.severity, issue.code] }
+    end
+
+    # Built here rather than as fixtures: each is one line and the point
+    # of each is its shape, which a binary file would hide.
+    def utf16_document
+      ("\xFF\xFE".b + %(<?xml version="1.0" encoding="UTF-16"?><svg xmlns="#{svg_ns}"/>)
+        .encode("UTF-16LE").b)
+    end
+
+    def latin1_document
+      %(<?xml version="1.0" encoding="ISO-8859-1"?><svg xmlns="#{svg_ns}" id="café"/>)
+        .encode("ISO-8859-1").b
+    end
+
+    def sound_documents
+      {
+        "a minimal root" => %(<svg xmlns="#{svg_ns}" width="7"/>),
+        "a prolog, a body and a trailing comment" =>
+          %(<?xml version="1.0"?><!DOCTYPE svg><svg xmlns="#{svg_ns}"><g><rect/></g></svg><!--t-->),
+        "a multibyte root name" => %(<漢 xmlns="#{svg_ns}"/>),
+        "UTF-16 with a BOM" => utf16_document,
+        "a UTF-8 BOM" => ("\xEF\xBB\xBF".b + %(<svg xmlns="#{svg_ns}"/>).b),
+        "a declared ISO-8859-1 encoding" => latin1_document,
+        "an undeclared entity reference" => %(<svg xmlns="#{svg_ns}">&nope;</svg>)
+      }
+    end
+
+    # `code` and the DOM co-assertion, not the exact prose: the gemspec
+    # pins rexml at `~> 3.4.4`, which admits 3.4.5+, and a consumer
+    # resolves fresh rather than from our lock. The anchor is what the
+    # message must keep saying; the wording is REXML's to change.
+    def malformed_documents
+      {
+        "damage after the root" => [%(<svg xmlns="#{svg_ns}"/><g></svg>), /extra tag/i, true],
+        "a mismatched end tag" => [%(<svg xmlns="#{svg_ns}"><g></rect></svg>), /end tag/i, true],
+        "an unclosed root" => [%(<svg xmlns="#{svg_ns}">), /end tag/i, true],
+        "a truncation mid-body" => [%(<svg xmlns="#{svg_ns}"><rect ), /attribute/i, true],
+        "an unbound namespace prefix" => [%(<z:svg xmlns="#{svg_ns}"/>), /prefix/i, true],
+        "a stray end tag" => [%(</svg>), /end tag/i, true],
+        "whitespace alone" => ["   \n ", /no root element/i, true],
+        # No DOM co-assertion: measured, `REXML::Document.new("")`
+        # ACCEPTS an empty document where `("   ")` raises. The row is
+        # otherwise identical to the whitespace one above.
+        "no document at all" => ["", /no root element/i, false]
+      }
+    end
+
+    it "reports no issue for a structurally sound document" do
+      sound_documents.each do |label, source|
+        expect(scan(source.b)).to eq([]), "expected #{label} to be sound"
+      end
+    end
+
+    it "reports exactly one error issue naming a malformed document's failure" do
+      malformed_documents.each do |label, (source, anchor, dom_rejects)|
+        expect { REXML::Document.new(source) }.to raise_error(REXML::ParseException) if dom_rejects
+
+        issues = scan(source.b)
+        expect(pairs(issues)).to eq([["error", "svg.not_well_formed"]]), "for #{label}"
+        expect(issues.first.message).to match(anchor), "for #{label}"
+      end
+    end
+
+    # Four of the five shapes are invisible to the pull parser, so this
+    # verdict is Claricle's own arithmetic rather than a forwarded REXML
+    # error -- which is why each row asserts the parser stays quiet.
+    it "reports a second root element the pull parser accepts" do
+      [%(<svg xmlns="#{svg_ns}"/><g/>), %(<svg xmlns="#{svg_ns}"></svg><g/>),
+       %(<svg xmlns="#{svg_ns}"/><svg xmlns="#{svg_ns}"/>),
+       %(<svg xmlns="#{svg_ns}"/> <g/>)].each do |source|
+        expect { drain(source) }.not_to raise_error
+        expect(triples(scan(source.b)))
+          .to eq([["error", "svg.multiple_root_elements", "document has 2 root elements"]])
+      end
+    end
+
+    # The one second-root shape REXML does catch, so the counter above
+    # cannot be the only thing keeping that example green.
+    it "reports the second-root shape REXML rejects as malformed instead" do
+      source = %(<svg xmlns="#{svg_ns}"/><g></g>)
+
+      expect { drain(source) }.to raise_error(REXML::ParseException)
+      expect(pairs(scan(source.b))).to eq([["error", "svg.not_well_formed"]])
+    end
+
+    # The D23 hole: svg_conform's `base` profile returns zero errors for
+    # raw binary, and UTF-32 was measured passing every profile silently.
+    # Refusal only -- the code differs by byte order, measured, so an
+    # exact-triple table here would be a one-shape generalisation.
+    it "refuses UTF-32 and raw binary while accepting the encodings SVG allows" do
+      body = %(<svg xmlns="#{svg_ns}"/>)
+      refused = {
+        "UTF-32BE with a BOM" => ("\x00\x00\xFE\xFF".b + body.encode("UTF-32BE").b),
+        "UTF-32LE with a BOM" => ("\xFF\xFE\x00\x00".b + body.encode("UTF-32LE").b),
+        "UTF-32BE with no BOM" => body.encode("UTF-32BE").b,
+        "UTF-32LE with no BOM" => body.encode("UTF-32LE").b,
+        "a real PNG" => File.binread(File.join(__dir__, "..", "..", "fixtures", "detector", "valid.png")),
+        "random bytes" => Random.new(7).bytes(512)
+      }
+      refused.each do |label, source|
+        expect(pairs(scan(source))).to eq([["error", "svg.encoding_unusable"]])
+          .or(eq([["error", "svg.not_well_formed"]])), "expected #{label} refused"
+        expect(scan(source)).not_to be_empty, "expected #{label} refused"
+      end
+      sound_documents.each_value { |source| expect(scan(source.b)).to eq([]) }
+    end
+
+    # Raw binary is an ENCODING failure, not a well-formedness one, and
+    # REXML delivers it as an ArgumentError wrapped in a ParseException.
+    # Three wrong implementations fail this: `.lines.first` yields
+    # "#<ArgumentError: ...>", the bare `to_s` yields "Exception
+    # parsing", and routing on the exception class alone yields
+    # svg.not_well_formed.
+    it "calls raw binary an encoding failure, in Claricle's own words" do
+      png = File.binread(File.join(__dir__, "..", "..", "fixtures", "detector", "valid.png"))
+
+      [png, Random.new(7).bytes(512)].each do |source|
+        expect(triples(scan(source)))
+          .to eq([["error", "svg.encoding_unusable", "SVG source is not decodable text"]])
+      end
+    end
+
+    it "names an unusable declared encoding separately from a malformed document" do
+      source = %(<?xml version="1.0" encoding="not-a-charset"?><svg/>)
+
+      expect(triples(scan(source.b)))
+        .to eq([["error", "svg.encoding_unusable", "Bad encoding name not-a-charset"]])
+    end
+
+    # REXML's "first line" bounds LINES, not bytes -- measured at 100,027
+    # bytes for one long token. The cap counts CHARACTERS, so the byte
+    # ceiling is script-dependent: a fixed multiplier would be wrong.
+    # byteslice is deliberately not used; it split a CJK codepoint and
+    # Models::Issue then refused the value outright.
+    it "bounds the message in characters, keeping it valid in every script" do
+      { "ASCII" => "a", "CJK" => "漢", "astral" => "\u{1F600}" }.each do |script, char|
+        source = %(<svg xmlns="#{svg_ns}"><rect #{char * 50_000})
+
+        message = scan(source.b).first.message
+        expect(message.length).to eq(200), "for #{script}"
+        expect(message).to be_valid_encoding, "for #{script}"
+        expect(message.bytesize).to be <= 800, "for #{script}"
+      end
+    end
+
+    # Both directions, and asserted as a PROPERTY rather than as a list
+    # of forbidden routes. Naming the calls to watch is a losing shape --
+    # `svg_spec.rb` already records it losing three times above, and a
+    # fetch through Net::HTTP, Socket, IO.popen or any helper nobody
+    # thought to name would sail past an enumerated hook list.
+    #
+    # So every hostile document here declares an entity whose
+    # replacement text is MARKUP that would break well-formedness. A
+    # scan that resolved it -- by any route, from a file, over a socket,
+    # or from the internal subset -- reports a different verdict. A scan
+    # that never parsed at all fails the ordinary rows below. Only a
+    # parser that reads the document and resolves nothing returns [] for
+    # every row. The hooks stay as a supplement, not as the assertion.
+    it "never fetches an external entity and never expands one" do
+      canary = "#{Dir.tmpdir}/claricle-canary-#{Process.pid}.txt"
+      # Markup, so inlining it is observable, plus a canary string so a
+      # leak into the message is observable too.
+      File.write(canary, %(</svg><g/>TOP-SECRET-CANARY))
+      hits = []
+      [[File, :open], [File, :read], [File, :binread], [IO, :read]].each do |mod, name|
+        allow(mod).to receive(name).and_wrap_original do |original, *args, &block|
+          hits << "#{mod}.#{name}"
+          original.call(*args, &block)
+        end
+      end
+      expect(REXML::Security).not_to receive(:entity_expansion_limit=)
+      expect(REXML::Security).not_to receive(:entity_expansion_text_limit=)
+
+      hostile = {
+        "a SYSTEM file entity" => system_entity_document("file://#{canary}"),
+        "a SYSTEM http entity" => system_entity_document("http://127.0.0.1:1/a"),
+        "an external DTD subset" =>
+          %(<?xml version="1.0"?><!DOCTYPE svg SYSTEM "file://#{canary}"><svg xmlns="#{svg_ns}">&x;</svg>),
+        "a parameter entity" =>
+          %(<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY % p SYSTEM "file://#{canary}"> %p;]><svg xmlns="#{svg_ns}"/>),
+        "an internal entity holding markup" =>
+          %(<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY x "</svg><g/>">]><svg xmlns="#{svg_ns}">&x;</svg>),
+        "a billion-laughs bomb ending in markup" => billion_laughs
+      }
+      begin
+        hostile.each do |label, source|
+          issues = scan(source.b)
+          # Resolving the entity by ANY route inlines `</svg><g/>` and
+          # the verdict changes. This is the assertion.
+          expect(issues).to eq([]), "expected #{label} left unresolved, got #{triples(issues).inspect}"
+          expect(triples(issues).to_s).not_to include("TOP-SECRET-CANARY")
+        end
+        # The other direction: a scan that simply never parses would also
+        # return [] above, so ordinary content must still be judged.
+        expect(scan(%(<svg xmlns="#{svg_ns}">a &amp; b &#65;</svg>).b)).to eq([])
+        expect(pairs(scan(%(<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY x "y">]><svg xmlns="#{svg_ns}">&x;</g>).b)))
+          .to eq([["error", "svg.not_well_formed"]])
+        expect(hits).to eq([])
+        expect(File.read(canary)).to eq(%(</svg><g/>TOP-SECRET-CANARY))
+      ensure
+        FileUtils.rm_f(canary)
+      end
+    end
+
+    # The property that separates this from the rejected DOM route, and
+    # the only one that survives the ruling permitting a whole-file read.
+    # Not a mock, so verify_partial_doubles cannot hollow it out; not a
+    # named-class refusal; not bytes-consumed.
+    it "never builds a document tree, where the DOM builds one per element" do
+      source = %(<svg xmlns="#{svg_ns}">#{"<rect/>" * 1000}</svg>).b
+
+      scanned = elements_created { scan(source) }
+      built = elements_created { REXML::Document.new(source.dup.force_encoding(Encoding::UTF_8)) }
+
+      expect(scanned).to eq(0)
+      expect(built).to be > 1000
+      expect(elements_created { scan(%(<svg xmlns="#{svg_ns}"><g></rect></svg>).b) }).to eq(0)
+    end
+    # A String and a real File must not disagree. The multibyte-root row
+    # is what pins the encoding retag: both arms arrive binary-tagged --
+    # `Image#initialize` normalises content to ASCII-8BIT and a path is
+    # opened "rb" -- and without the retag that row alone goes red.
+    it "reaches the same verdict from a String and from a file" do
+      documents = sound_documents.values +
+                  malformed_documents.values.map(&:first) +
+                  [%(<svg xmlns="#{svg_ns}"/><g/>), %(<漢 xmlns="#{svg_ns}"/>)]
+
+      documents.each do |source|
+        expect(triples(scan_file(source.b))).to eq(triples(scan(source.b))), "for #{source[0, 40].inspect}"
+      end
+    end
+
+    it "leaves inspect and the advertised capabilities untouched" do
+      malformed = %(<svg xmlns="#{svg_ns}" width="7"/><g/>)
+
+      expect(scan(malformed.b)).not_to be_empty
+      expect(Claricle.const_get(:Handlers).const_get(:Svg).capabilities).to eq([:inspect])
+      expect(inspect_svg(malformed)).to have_attributes(parse_status: "ok", width: 7.0)
+    end
+
+    # `const_get` walks straight past `private_constant` -- so the Module
+    # clause is what stops this passing with the feature deleted, and the
+    # `::` form is what actually asserts the privacy.
+    it "stays off the public surface" do
+      svg = Claricle.const_get(:Handlers).const_get(:Svg)
+
+      expect(svg.const_get(:Structure, false)).to be_a(Module)
+      expect(svg.constants(false)).not_to include(:Structure)
+      expect { svg::Structure }.to raise_error(NameError, /private constant/)
+    end
+
+    # A false failure, pinned in both directions so it cannot change
+    # silently: the detector widens REXML's live name grammar to XML's
+    # canonical one, and this scan does not. Fixing it needs
+    # `detector.rb`, which this branch does not own.
+    it "refuses a canonical name the detector accepts" do
+      source = %(<a·:svg xmlns:a·="#{svg_ns}"/>).b
+
+      expect(Claricle.detect(source)).to eq(:svg)
+      expect(pairs(scan(source))).to eq([["error", "svg.not_well_formed"]])
     end
   end
 end
