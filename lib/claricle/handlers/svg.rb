@@ -120,6 +120,7 @@ module Claricle
         ENCODING_UNUSABLE_CODE = "svg.encoding_unusable"
         MULTIPLE_ROOTS_CODE = "svg.multiple_root_elements"
         UNDECODABLE_MESSAGE = "SVG source is not decodable text"
+        UNDECODABLE_CAUSES = [ArgumentError, EncodingError].freeze
         # CHARACTERS, not bytes. REXML's first message line bounds lines
         # and not bytes -- the spec's 50,000-character token yields a
         # 50,028-byte first line -- and an issue has to stay printable
@@ -129,15 +130,6 @@ module Claricle
         # `byteslice` is deliberately not used: it split a CJK codepoint
         # and Models::Issue then refused the value outright.
         MESSAGE_CHARACTER_LIMIT = 200
-        # A parse error is useless without the offending text, so the
-        # message quotes the document -- but the quoted bytes are
-        # operator-supplied, and a raw ESC reaching a terminal or a CI
-        # log is an injection surface. Measured: `encoding="a\e[2Jb"`
-        # put a live escape sequence in the message, and a newline in
-        # the same position split it across two lines, which is what
-        # "one line" above is supposed to rule out. Collapsed to spaces
-        # rather than deleted, so the text stays legible.
-        CONTROL_CHARACTERS = /[[:cntrl:]]/
 
         class << self
           # At most one issue, which is what is currently KNOWABLE
@@ -217,8 +209,17 @@ module Claricle
             issue(NOT_WELL_FORMED_CODE, prose(error))
           end
 
+          # Both classes, because the SAME failure reaches us as either
+          # depending only on WHERE inside REXML it was raised. REXML's
+          # `pull_event` wraps one region and the prolog sits outside it,
+          # so a BOM plus a character truncated in the PROLOG arrives
+          # bare as Encoding::InvalidByteSequenceError, while the same
+          # truncation after a start tag arrives WRAPPED in a
+          # ParseException whose prose is the useless "Exception
+          # parsing" -- measured on 13 bytes and on 9. Same defect, same
+          # verdict.
           def undecodable?(error)
-            error.continued_exception.is_a?(ArgumentError)
+            UNDECODABLE_CAUSES.any? { |kind| error.continued_exception.is_a?(kind) }
           end
 
           # RuntimeError#to_s, not `error.message`, for three measured
@@ -243,13 +244,25 @@ module Claricle
             Models::Issue.new(severity: "error", code: code, message: printable(message))
           end
 
+          # Length only. Control characters are deliberately NOT stripped
+          # here: `Cli::Presenter::CONTROL` already owns that rule for
+          # every rendered row, issue messages included (`cli.rb:126`),
+          # over a wider set than `[[:cntrl:]]` -- it covers U+2028 and
+          # U+2029, which `[[:cntrl:]]` does not match. A second copy
+          # here would be the weaker of two rules for one thing, and it
+          # would DESTROY the character where the render layer escapes
+          # it, breaking the stated contract that `--json` carries the
+          # true value while only the human rendering escapes. `meta` is
+          # free document text and is handled exactly this way.
+          #
           # Slice BEFORE scrubbing: slicing is safe on an invalid
-          # encoding and bounds the work, where `gsub` RAISES on one --
-          # measured, ArgumentError -- and scrubbing 8,000,000
-          # characters to keep 200 costs 0.0118s against 0.0000s.
-          # Scrub then repairs whatever the cut left half-formed.
+          # encoding and bounds the work, where scanning the whole
+          # string RAISES on one -- measured, ArgumentError -- and
+          # scrubbing 8,000,000 characters to keep 200 costs 0.0118s
+          # against 0.0000s. Scrub then repairs whatever the cut left
+          # half-formed, which `Models::Issue` refuses outright.
           def printable(message)
-            message[0, MESSAGE_CHARACTER_LIMIT].scrub.gsub(CONTROL_CHARACTERS, " ")
+            message[0, MESSAGE_CHARACTER_LIMIT].scrub
           end
         end
       end

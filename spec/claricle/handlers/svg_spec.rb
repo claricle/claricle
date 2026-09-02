@@ -911,19 +911,24 @@ RSpec.describe "Claricle SVG handler" do
 
     # A regex anchor, not REXML's exact prose: the gemspec pins rexml at
     # `~> 3.4.4`, which admits 3.4.5+, and a consumer resolves fresh.
-    # Thirteen bytes: a UTF-16LE BOM then an odd-length processing
-    # instruction, so the last character is truncated mid-unit. REXML
-    # transcodes lazily inside the pull loop, so this raises
-    # Encoding::InvalidByteSequenceError -- which is neither an
-    # ArgumentError nor a ParseException, and escaped `scan` entirely on
-    # both arms before the EncodingError clause existed. Exactly the
-    # input class this unit exists to catch.
-    it "returns an issue for bytes truncated mid-character rather than raising" do
-      source = "\xFF\xFE<\x00?\x00x\x00 \x00>\x00\x00".b
-
-      expect(source.bytesize).to eq(13)
-      expect(pairs(scan(source))).to eq([["error", "svg.encoding_unusable"]])
-      expect(pairs(scan_file(source))).to eq([["error", "svg.encoding_unusable"]])
+    # The same undecodable-bytes failure reaches `scan` in two different
+    # shapes, and which one depends only on WHERE inside REXML it was
+    # raised -- its `pull_event` wraps one region and the prolog sits
+    # outside it. Both rows matter: every other encoding fixture in this
+    # file raises in the PROLOG and so arrives BARE, which means none of
+    # them can tell "catches a bare EncodingError" apart from "catches
+    # any EncodingError". The 9-byte row raises after a start tag, so it
+    # arrives WRAPPED in a ParseException whose prose is the useless
+    # "Exception parsing".
+    {
+      "bare, truncated in the prolog" => "\xFF\xFE<\x00?\x00x\x00 \x00>\x00\x00".b,
+      "wrapped, truncated after a start tag" => ("\xFF\xFE".b + "<svg>\x00\xD8".b)
+    }.each do |label, source|
+      it "returns an encoding issue for bytes #{label}" do
+        expect(pairs(scan(source))).to eq([["error", "svg.encoding_unusable"]])
+        expect(pairs(scan_file(source))).to eq([["error", "svg.encoding_unusable"]])
+        expect(scan(source).first.message).to eq("SVG source is not decodable text")
+      end
     end
 
     it "names an unusable declared encoding separately from a malformed document" do
@@ -938,12 +943,19 @@ RSpec.describe "Claricle SVG handler" do
     # attacker-controlled, and it reaches `issue` by a different route
     # than a parse failure does. Without the bound at the funnel this
     # message measured 100,018 characters.
+    # Three scripts, because on ASCII a byte bound and a character bound
+    # are indistinguishable -- both read 200/200 -- so an ASCII-only
+    # example leaves a byteslice implementation green on the very route
+    # this bound was added for.
     it "bounds the message on the encoding route too, not just the parse route" do
-      source = %(<?xml version="1.0" encoding="#{"x" * 100_000}"?><svg/>)
+      { "ASCII" => "x", "CJK" => "漢", "astral" => "\u{1F600}" }.each do |script, char|
+        source = %(<?xml version="1.0" encoding="#{char * 100_000}"?><svg/>)
 
-      issues = scan(source.b)
-      expect(pairs(issues)).to eq([["error", "svg.encoding_unusable"]])
-      expect(issues.first.message.length).to eq(200)
+        issues = scan(source.b)
+        expect(pairs(issues)).to eq([["error", "svg.encoding_unusable"]]), "for #{script}"
+        expect(issues.first.message.length).to eq(200), "for #{script}"
+        expect(issues.first.message).to be_valid_encoding, "for #{script}"
+      end
     end
 
     # REXML's "first line" bounds LINES, not bytes -- measured at 100,027
@@ -962,23 +974,22 @@ RSpec.describe "Claricle SVG handler" do
       end
     end
 
-    # The message quotes operator-supplied document text, so it must not
-    # carry control bytes into a terminal or a CI log, and it must
-    # actually be one line -- a length bound alone does not make it one.
-    it "keeps the message on one line and free of control characters" do
-      escape = 27.chr
-      newline = 10.chr
+    # Control characters are NOT stripped here. `Cli::Presenter::CONTROL`
+    # already escapes them for every rendered row, over a wider set --
+    # it covers U+2028 and U+2029, which `[[:cntrl:]]` does not match, so
+    # a second copy here would be the weaker of two rules for one thing.
+    # It would also destroy the character where the render layer escapes
+    # it, breaking the contract that `--json` carries the true value.
+    #
+    # Asserted on the CHARACTER, not on `lines.size`: `String#lines`
+    # splits on newline only, so a live U+2028 passes `lines.size == 1`
+    # and no such example could ever catch it.
+    it "carries the document's own text through, as meta does" do
+      [10.chr, 27.chr, "\u2028", "\u2029"].each do |char|
+        message = scan(%(<?xml version="1.0" encoding="a#{char}b"?><svg/>).b).first.message
 
-      # Collapsed to a space, not deleted: the surrounding text stays
-      # legible, which is the whole reason the message quotes it.
-      { "a#{escape}[2Jb" => "a [2Jb", "a#{newline}b" => "a b", "a#{7.chr}b" => "a b" }
-        .each do |name, visible|
-          message = scan(%(<?xml version="1.0" encoding="#{name}"?><svg/>).b).first.message
-
-          expect(message.lines.size).to eq(1), "for #{name.inspect}"
-          expect(message).not_to match(/[[:cntrl:]]/), "for #{name.inspect}"
-          expect(message).to include(visible)
-        end
+        expect(message).to include("a#{char}b"), "for #{char.inspect}"
+      end
     end
 
     # Both directions, and asserted as a PROPERTY rather than as a list
@@ -1059,6 +1070,23 @@ RSpec.describe "Claricle SVG handler" do
       expect(built).to be > 1000
       expect(elements_created { scan(%(<svg xmlns="#{svg_ns}"><g></rect></svg>).b) }).to eq(0)
     end
+    # Every other example here feeds an unfrozen `source.b`, a shape
+    # production never supplies: `Image#with_source` yields the frozen
+    # `@content` (`image.rb:138` freezes it, `:212` yields it). Dropping
+    # the `dup` in `tagged` leaves the whole suite green and raises
+    # FrozenError on the only input shape that actually occurs, so the
+    # mutation matrix cannot see it -- it varies the code while holding
+    # the inputs fixed, and the inputs are the wrong shape.
+    it "scans the frozen bytes a real image supplies, without retagging them" do
+      image = Claricle::Image.from_content(%(<svg xmlns="#{svg_ns}" width="7"/>), format: :svg)
+
+      issues = image.with_source { |source| scanner.scan(source) }
+
+      expect(issues).to eq([])
+      expect(image.content).to be_frozen
+      expect(image.content.encoding).to eq(Encoding::BINARY)
+    end
+
     # A String and a real File must not disagree. The multibyte-root row
     # is what pins the encoding retag: both arms arrive binary-tagged --
     # `Image#initialize` normalises content to ASCII-8BIT and a path is
