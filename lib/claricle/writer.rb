@@ -154,8 +154,15 @@ module Claricle
       # string, while Pathname has no #end_with? at all. Guarding on the
       # object refused a zero-byte destination as "empty" and crashed on a
       # missing one with NoMethodError, both of which worked before.
+      #
+      # File.path, not to_s: it is Ruby's own path coercion, so it accepts
+      # exactly what File.dirname already accepted -- a String or anything
+      # with #to_path -- and raises the same TypeError for anything else.
+      # to_s is lax where this must be strict: it turns nil into "" and an
+      # Array into its inspect, which reported a CALLER's bug as the USER's
+      # invocation mistake at exit 2.
       def examine(dest)
-        name = dest.to_s
+        name = File.path(dest)
         raise InvocationError, "output path is empty" if name.empty?
         raise InvocationError, "output path names a directory: #{name}" if name.end_with?(File::SEPARATOR)
 

@@ -223,6 +223,14 @@ RSpec.describe "Claricle::Writer" do
       writer.new([zero], sources: [], force: true).write(payload, to: zero)
 
       expect([missing.binread, zero.binread]).to eq([payload, payload])
+
+      # ...and an object that is not a path is NOT reinterpreted as one.
+      # File.path refuses it exactly as File.dirname did before these
+      # guards existed, so a caller's bug stays a caller's bug instead of
+      # being reported to the user as their invocation mistake.
+      [nil, [File.join(dir, "x.svg")]].each do |not_a_path|
+        expect { writer.new([not_a_path], sources: []) }.to raise_error(TypeError)
+      end
     end
 
     it "refuses a destination that is an input, by hardlink or symlink alias, even with force" do # E1
