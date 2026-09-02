@@ -450,11 +450,23 @@ RSpec.describe "Claricle::Writer" do
       expect(File.binread(dest)).to eq(big_payload)
     end
 
-    it "leaves exactly the destination in the directory on success" do # E14
-      dest = File.join(dir, "only.svg")
-      writer.new([dest], sources: []).write(payload, to: dest)
+    # A whole batch through ONE Writer, across two directories. Every other
+    # multi-write example (E3, E4, E28) reaches its "both written" branch
+    # only on a case-sensitive volume, so without this row nothing on a
+    # folding filesystem ever publishes two destinations successfully --
+    # a property the whole corpus shared that nobody chose. Distinct
+    # payloads, so cross-contamination cannot pass for success.
+    it "publishes every destination of a batch and leaves no stage behind" do # E14
+      Dir.mkdir(File.join(dir, "sub"))
+      destinations = [File.join(dir, "a.svg"), File.join(dir, "b.svg"), File.join(dir, "sub", "c.svg")]
+      subject = writer.new(destinations, sources: [])
 
-      expect(Dir.children(dir)).to eq(["only.svg"])
+      returned = destinations.map { |dest| subject.write(File.basename(dest).b, to: dest) }
+
+      expect(returned).to eq(destinations)
+      expect(destinations.map { |dest| File.binread(dest) }).to eq(%w[a.svg b.svg c.svg])
+      expect(Dir.children(dir).sort).to eq(%w[a.svg b.svg sub])
+      expect(Dir.children(File.join(dir, "sub"))).to eq(["c.svg"])
     end
 
     # The stage's half of the rule U11 pins for the probe. The plan states
