@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "rexml/parsers/pullparser"
+require "rexml/xmltokens"
 
 require_relative "errors"
 
@@ -19,6 +20,11 @@ module Claricle
   # dependency of this gem and is never reached.
   module Lossiness
     LEVELS = %w[lossless lossy unknown].freeze
+
+    # A source may be a bare BasicObject exposing only reader methods, so a
+    # type test must not dispatch a method to it. Same idiom, and the same
+    # reason, as models/free_form_hash.rb:28.
+    CORE_INSTANCE = ::Object.instance_method(:is_a?)
 
     SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 
@@ -125,8 +131,17 @@ module Claricle
     # Self-contained lengths. A percentage resolves against a viewport, `em`
     # against a font, `mm` through a DPI setting -- all context the scanner
     # cannot see. Units are unsettled anyway (D15).
-    SELF_CONTAINED = /\A[+-]?(?:\d+\.\d+|\.\d+|\d+)(?:px)?\z/
-    VIEWBOX = /\A\s*[+-]?[\d.]+(?:[\s,]+[+-]?[\d.]+){3}\s*\z/
+    NUMBER = /[+-]?(?:\d+\.\d+|\.\d+|\d+)/
+    SELF_CONTAINED = /\A#{NUMBER}(?:px)?\z/
+    # `width` and `height` are EXTENTS and SVG forbids a negative one, so
+    # `width="-1"` describes no renderable document and must never earn a
+    # positive `lossless` claim. `x`, `y` and the line endpoints are signed
+    # COORDINATES and keep SELF_CONTAINED -- one pattern served both, which is
+    # how a negative extent passed.
+    NON_NEGATIVE = /\A\+?(?:\d+\.\d+|\.\d+|\d+)(?:px)?\z/
+    # Four NUMBERS. The old `[\d.]+` was a run of digits and dots, not a number
+    # grammar, so `. . . .` and `1.2.3 0 10 10` both matched.
+    VIEWBOX = /\A\s*#{NUMBER}(?:[\s,]+#{NUMBER}){3}\s*\z/
     SOLID_COLOUR = Regexp.union(HEX_COLOUR, RGB_COLOUR)
 
     # Attribute name -> the pattern its value must match. One table rather than
@@ -134,7 +149,7 @@ module Claricle
     # above. A name absent here carries no value we have evidence for.
     VALUE_RULES = {
       "fill" => SOLID_COLOUR, "stroke" => SOLID_COLOUR,
-      "width" => SELF_CONTAINED, "height" => SELF_CONTAINED,
+      "width" => NON_NEGATIVE, "height" => NON_NEGATIVE,
       "x" => SELF_CONTAINED, "y" => SELF_CONTAINED,
       "x1" => SELF_CONTAINED, "y1" => SELF_CONTAINED,
       "x2" => SELF_CONTAINED, "y2" => SELF_CONTAINED,
@@ -149,6 +164,7 @@ module Claricle
         rule = RULES[target_format]
         return "unknown" if rule.nil?
 
+        refuse_unreadable(source)
         refuse_unpositioned(source)
         root_ok, present = Scanner.new(source).run
         verdict(rule, root_ok, present)
@@ -162,6 +178,23 @@ module Claricle
         return "lossy" if present.intersect?(rule[:lost])
 
         (present - rule[:kept]).empty? ? "lossless" : "unknown"
+      end
+
+      # REXML answers a source it cannot read at all with a bare
+      # `RuntimeError: NilClass is not a valid input stream.` -- measured for
+      # nil, Integer, Array and Hash. That is a caller error exactly like the
+      # two below, and this module already converts those, so letting a third
+      # leak raw contradicted the contract these comments state. It is raised
+      # here, outside the parse, for the same reason they are.
+      def refuse_unreadable(source)
+        # `respond_to?` first, and `String ===` rather than `source.is_a?`:
+        # a caller may hand over a bare BasicObject exposing only the reader
+        # methods, and asking such a source `is_a?` is itself a forbidden
+        # call -- measured, it broke the bounded-IO example. `Module#===`
+        # tests the object without dispatching a method to it.
+        return if source.respond_to?(:read) || CORE_INSTANCE.bind_call(source, ::String)
+
+        raise InvocationError, "source must be a String or a readable IO"
       end
 
       # A partially consumed IO hides everything already read -- measured, an
@@ -213,6 +246,7 @@ module Claricle
       # measured, a `lossless` verdict for a document carrying an attribute
       # from a namespace nobody has measured.
       def feature_for(prefix, name, value)
+        return :unclassified if CharacterRules.ill_formed?(value)
         return nil if prefix == "xmlns"
         return prefixed(prefix, name) if prefix
         return namespace(value) if name == "xmlns"
@@ -277,6 +311,24 @@ module Claricle
       # denotes the literal text "&nope;", which is legal, and after
       # resolution it is indistinguishable from a genuinely unresolved
       # `&nope;`. AttributeReferences documents the same asymmetry.
+      # A complete reference, so an INCOMPLETE one can be told apart from a
+      # merely unresolvable one.
+      VALID_REFERENCE = /&(?:\#\d+;|\#x\h+;|#{REXML::XMLTokens::NAME};)/
+
+      # Well-formedness, which is narrower than "every character is legal".
+      # `&amp` and `&#xZZ;` match no reference at all, so the unresolved test
+      # never sees them, and the characters they spell are perfectly legal --
+      # three guards in a row passed them while `id` supplied positive evidence
+      # by name. A raw `<` is never permitted here either. REXML::Document
+      # refuses every such document; PullParser reads it.
+      #
+      # PARSED character data ONLY -- attribute values and text. CDATA and
+      # comments legally carry a raw `<` and a bare `&`, so a rule applied to
+      # every field would condemn two shapes this suite pins as `lossless`.
+      def ill_formed?(raw)
+        raw.include?("<") || raw.gsub(VALID_REFERENCE, "").include?("&")
+      end
+
       def unaccounted_text?(raw)
         return true if AttributeReferences.unresolved?(raw)
 
@@ -398,8 +450,18 @@ module Claricle
       # yields the whole tail whatever the event's arity -- measured 0 to 5
       # across all 14 emitted types, the widest being an entity declaration
       # with a PUBLIC id and an NDATA notation. No bound to keep in step.
+      # A `:text` event carries the raw source AND REXML's own decoding of
+      # it; only the first is source. The decoded copy answers a question
+      # this file answers for itself, and reading it made an ESCAPED
+      # reference indistinguishable from a genuine one -- measured, the
+      # decoded forms of `a&amp;nope;b` and `a&nope;b` are byte-identical
+      # while the raw forms are not. The attribute path always read the raw,
+      # which is why attributes were right when text was not.
       def note_unaccounted_characters(event)
-        note(:unclassified) if event[0..].any? { |f| CharacterRules.unaccounted?(f) }
+        text = event.event_type == :text
+        fields = text ? [event[0]] : event[0..]
+        note(:unclassified) if fields.any? { |f| CharacterRules.unaccounted?(f) }
+        note(:unclassified) if text && CharacterRules.ill_formed?(event[0])
       end
 
       def consume(event)

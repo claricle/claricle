@@ -284,19 +284,23 @@ RSpec.describe "conversion lossiness" do
       expect(messages.compact.uniq.size).to eq(2), "expected two distinct REXML limits, got #{messages.inspect}"
     end
 
-    # `PullParser.new` runs OUTSIDE `next_event`'s rescue, so a source that is
-    # neither String nor IO still reaches the caller as an exception instead of
-    # becoming a verdict. Measured at this tip for all four shapes below.
+    # A source that is neither a String nor readable is a CALLER error, and it
+    # reaches the caller as `InvocationError` -- the class this module already
+    # converts a closed stream and an unpositionable one into. It used to leak
+    # REXML's bare `RuntimeError: NilClass is not a valid input stream.`
     #
-    # This example exists to stop a later, blanket `rescue RuntimeError` around
-    # the whole scan from quietly turning a caller's type error into `unknown`
-    # -- the one regression the entity-bomb fix above could plausibly cause.
-    # The class is asserted without its message, which is REXML's to change.
-    it "does not turn a source of the wrong type into a verdict" do
-      [nil, 42, [], {}].each do |bad|
+    # This example asserted that RuntimeError for one round, which was worse
+    # than having no example: it turned a gap into a guarantee, so fixing the
+    # inconsistency would have read as a regression. It now pins the contract
+    # the module's own comments claim.
+    #
+    # The second half is the part that must not be lost: whatever the class,
+    # a caller error must never come back as one of the three levels.
+    it "refuses a source of the wrong type instead of answering about it" do
+      [nil, 42, [], {}, :sym, 1.5].each do |bad|
         expect { classify_source(bad) }
-          .to raise_error(RuntimeError),
-              "expected a #{bad.class} source to raise rather than answer with a level"
+          .to raise_error(Claricle::InvocationError, /String or a readable IO/),
+              "expected a #{bad.class} source to be refused as a caller error"
       end
     end
 
@@ -377,6 +381,68 @@ RSpec.describe "conversion lossiness" do
     # `unknown` is right under this file own rule whichever oracle is right,
     # because a reference Claricle never resolves is evidence running out
     # either way.
+    # A reference that is not merely unresolvable but MALFORMED, and a raw `<`,
+    # which is never legal in parsed character data. Three misses stacked on
+    # one input let these through: `&amp` and `&#xZZ;` are INCOMPLETE, so they
+    # never match a reference and slipped past the unresolved test; the
+    # characters themselves are legal, so ILLEGAL_CHAR passed them; and `id`
+    # is admitted by NAME, which then supplied positive evidence for
+    # `lossless`. REXML::Document refuses every one of these documents.
+    it "never calls a document with malformed markup in a value lossless" do
+      ["&amp", "&#xZZ;", "&#;", "a<b", "a & b"].each do |value|
+        expect(classify_source(control_document(rect_attrs: %( id="#{value}"))))
+          .to eq("unknown"), "attribute value #{value.inspect} is not well formed"
+      end
+
+      # The same rule in character data, which had the same hole.
+      ["a&amp b", "a&#xZZ;b"].each do |text|
+        expect(classify_source(control_document(text)))
+          .to eq("unknown"), "text #{text.inspect} is not well formed"
+      end
+
+      # The other direction, and CDATA and comments are the reason it matters:
+      # both legally carry a raw `<` and a bare `&`, so a rule applied to every
+      # field rather than to PARSED character data would condemn them. These
+      # rows fail if that happens.
+      expect(classify_source(control_document("<![CDATA[a<b]]>"))).to eq("lossless")
+      expect(classify_source(control_document("<![CDATA[a&b]]>"))).to eq("lossless")
+      expect(classify_source(control_document("<!-- a<b -->"))).to eq("lossless")
+      expect(classify_source(control_document(rect_attrs: %( id="R&amp;D")))).to eq("lossless")
+      expect(classify_source(control_document("R&amp;D"))).to eq("lossless")
+    end
+
+    # `width` and `height` are EXTENTS and cannot be negative; `x`, `y` and the
+    # line endpoints are signed coordinates and can. One pattern served both,
+    # so `width="-1"` -- not a valid SVG extent -- got a positive `lossless`
+    # claim. `viewBox` had the matching problem: `[\d.]+` is not a number
+    # grammar, so `. . . .` and `1.2.3 0 10 10` both passed.
+    it "proves an extent is non-negative and a viewBox is four numbers" do
+      %w[width height].each do |name|
+        negative = control_document.sub(%(#{name}="100"), %(#{name}="-1"))
+                                   .sub(%(#{name}="50"), %(#{name}="-1"))
+        expect(negative).not_to eq(control_document), "#{name} substitution did not apply"
+        expect(classify_source(negative)).to eq("unknown"), "a negative #{name} should be unknown"
+      end
+      expect(classify_source(control_document.sub(%(<rect width="10"), %(<rect width="-1"))))
+        .to eq("unknown")
+
+      ["ChangeMe . . . .", "1.2.3 0 10 10", "0 0 10", "0 0 10 10 10"].each do |box|
+        value = box.sub("ChangeMe ", "")
+        expect(classify_source(control_document(root_attrs: %( viewBox="#{value}"))))
+          .to eq("unknown"), "viewBox #{value.inspect} is not four numbers"
+      end
+
+      # The other direction: a signed COORDINATE may be negative, and a real
+      # viewBox still passes. Without these a rule that refused every minus
+      # sign, or every viewBox, would look correct.
+      expect(classify_source(control_document(rect_attrs: %( x="-1" y="-2")))).to eq("lossless")
+      expect(classify_source(control_document.sub(%(x1="0"), %(x1="-5")))).to eq("lossless")
+      expect(classify_source(control_document(root_attrs: %( viewBox="-1 -1 10 10"))))
+        .to eq("lossless")
+      expect(classify_source(control_document(root_attrs: %( viewBox="0,0,10,10"))))
+        .to eq("lossless")
+    end
+
     it "treats an unresolvable reference as evidence running out" do
       subset = %(<!DOCTYPE svg [<!ENTITY e "x">]>)
       declared = "#{subset}#{control_document(%(&e;))}"
@@ -393,20 +459,18 @@ RSpec.describe "conversion lossiness" do
       expect(classify_source(control_document(rect_attrs: %( id="a&amp;nope;b"))))
         .to eq("lossless")
 
-      # In TEXT it does NOT survive, and this is a deliberate, bounded
-      # over-fire rather than an oversight. REXML supplies character data as
-      # TWO fields, raw and pre-decoded -- ["a&amp;nope;b", "a&nope;b"] -- and
-      # the second is byte-identical to what a genuine unresolved `&nope;`
-      # produces. Nothing in the event distinguishes them, so the scanner
-      # answers `unknown`: the safe direction under the rule at the top of
-      # lossiness.rb, and the reason this row asserts `unknown` rather than
-      # pretending the ambiguity is resolvable.
+      # And it survives in TEXT too, which this suite got wrong for one round.
+      # REXML supplies character data as TWO fields, raw and pre-decoded --
+      # ["a&amp;nope;b", "a&nope;b"] -- and the DECODED copies of an escaped
+      # and a genuine reference are byte-identical. The RAW copies are not, so
+      # the event does distinguish them; sweeping the derived field is what
+      # destroyed the distinction. The scanner now reads the raw alone, which
+      # is what the attribute path always did.
       #
-      # The cost is narrow and measured: only text carrying `&amp;` followed
-      # immediately by a name and a semicolon, such as `&amp;copy;`. Plain
-      # `&amp;` is unaffected -- the five XML built-ins are excluded by the
-      # lookahead -- and the row below pins that.
-      expect(classify_source(control_document("a&amp;nope;b"))).to eq("unknown")
+      # These two rows are the ones that go red if the reference test is ever
+      # pointed back at the decoded copy.
+      expect(classify_source(control_document("a&amp;nope;b"))).to eq("lossless")
+      expect(classify_source(control_document("a&nope;b"))).to eq("unknown")
       expect(classify_source(control_document("a&amp;b"))).to eq("lossless")
     end
 
@@ -427,8 +491,9 @@ RSpec.describe "conversion lossiness" do
       expect(classify_source("\xFE\xFF".b + clean.encode("UTF-16BE").b)).to eq("lossless")
 
       # And the fixture that made the distinction matter still answers for its
-      # own reason -- an unmeasured gradient -- rather than because a guard
-      # fired on its encoding.
+      # own reason. That reason is the ROOT guard, not its gradient: a
+      # gradient is a MEASURED loss and would give `lossy`. See the
+      # utf16_gradient row in spec/fixtures/convert/README.md.
       expect(classify("utf16_gradient")).to eq("unknown")
     end
 
@@ -726,7 +791,7 @@ RSpec.describe "conversion lossiness" do
                             :processing_instruction, :end_document)
 
       # `:end_document` looks dead and is not. No fixture delivers it, because
-      # all 62 were written with no trailing newline -- a property the whole
+      # all 66 are written with no trailing newline -- a property the whole
       # corpus shares that nobody chose. Any trailing whitespace produces it,
       # which is every SVG file an editor has ever saved, so dropping it from
       # KNOWN_EVENTS would send every real-world document to `unknown`.
