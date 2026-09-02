@@ -206,7 +206,7 @@ module Claricle
         end
       end
 
-      # The dirname comes from the KEY, which pass 1 has already
+      # The dirname comes from the KEY, which `key_for` has already
       # realpath-resolved -- NOT from the raw destination. Grouping by the
       # raw dirname makes both passes miss the same file: out/Q.svg and
       # linkdir/q.svg where linkdir -> out land in different groups, and
