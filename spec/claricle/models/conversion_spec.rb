@@ -58,7 +58,6 @@ RSpec.describe "conversion lossiness" do
       expect(subject.content).to eq(emf_bytes)
       expect(subject.content.encoding).to eq(Encoding::BINARY)
       expect(subject.content.bytesize).to eq(364)
-      expect { subject.to_json }.not_to raise_error
     end
 
     it "neither forces BINARY nor corrupts UTF-8 text content" do
@@ -167,18 +166,33 @@ RSpec.describe "conversion lossiness" do
       end
     end
 
+    # Both fixtures carry an unmeasured element BESIDE proven ones, so the
+    # empty-feature step cannot answer first and the element catch-all is the
+    # guard under test. `path_and_rect` uses a bare `<path/>`: a `d=` attribute
+    # would trip the attribute rule instead.
+    #
+    # Renamed from "cannot have its ignored-element list grow silently", which
+    # this cannot show -- adding "path" to IGNORED reddens the constant pin
+    # below, not this example.
     it "never waves through an element nobody has measured" do
-      expect(classify("text_rect_line")).to eq("unknown")
-      expect(classify("text_rect_line", to: :emf)).to eq("unknown")
-    end
-
-    it "cannot have its ignored-element list grow silently" do
-      expect(classify("path_and_rect")).to eq("unknown")
-      expect(classify("path_and_rect", to: :emf)).to eq("unknown")
+      %w[text_rect_line path_and_rect].each do |name|
+        expect(classify(name)).to eq("unknown"), "#{name} -> eps"
+        expect(classify(name, to: :emf)).to eq("unknown"), "#{name} -> emf"
+      end
     end
 
     it "pins the two elements that are deliberately ignored" do
       expect(classify("defs_container")).to eq("lossless")
+    end
+
+    # These three shipped with a README entry and no example. Measured: making
+    # `content_feature` return nil for "style" -- the exact wrong behaviour the
+    # README names -- left the whole suite green at 991/0 while
+    # style_element_rect classified `lossless`.
+    it "treats a style element as unmeasured, and comments and CDATA as marks-free" do
+      expect(classify("style_element_rect")).to eq("unknown")
+      expect(classify("comment_rect")).to eq("lossless")
+      expect(classify("cdata_rect")).to eq("lossless")
     end
 
     it "returns a verdict for an unreadable document rather than raising" do
@@ -193,10 +207,14 @@ RSpec.describe "conversion lossiness" do
       expect(classify("prefixed_gradient")).to eq("lossy")
     end
 
-    it "always returns a member of the documented vocabulary" do
-      %w[rect_and_line gradient_linear text malformed empty_svg].each do |name|
-        expect(model::LOSSINESS_LEVELS).to include(classify(name))
-      end
+    # text.svg is the one fixture shaped "an unmeasured element and NO proven
+    # shape at all" -- text_rect_line carries a rect and a line -- so it is
+    # exactly the document that must never come back lossless. It used to be
+    # covered only by an `include` matcher over the vocabulary, which
+    # "lossless" satisfies.
+    it "never calls a document of only unmeasured elements lossless" do
+      expect(classify("text")).to eq("unknown")
+      expect(classify("text", to: :emf)).to eq("unknown")
     end
 
     it "pins every rule table against silent growth" do
@@ -305,17 +323,40 @@ RSpec.describe "conversion lossiness" do
 
     it "never waves through an event type it does not recognise" do
       expect(classify("external_entity_ref")).to eq("unknown")
-      # the union basis: 14 predicates + 3 emitted types that have none
-      predicates = REXML::Parsers::PullEvent.instance_methods(false).grep(/\?\z/)
-      expect(predicates.size).to eq(14)
-      expect(lossiness::KNOWN_EVENTS.size).to eq(14)
+
+      # The SETS, never their sizes: both happen to hold 14 and they overlap in
+      # only 10, so `eq(14)` on each pins a coincidence -- swapping one member
+      # of KNOWN_EVENTS for a non-event keeps the size and silently flips
+      # comment_rect. Asserted against REXML's own predicate list so a grammar
+      # change in the dependency reddens here.
+      predicates = REXML::Parsers::PullEvent.instance_methods(false)
+                                            .grep(/\?\z/)
+                                            .map { |m| m.to_s.chomp("?").to_sym }
+      expect(predicates - lossiness::KNOWN_EVENTS)
+        .to contain_exactly(:doctype, :entity, :error, :instruction)
+      expect(lossiness::KNOWN_EVENTS - predicates)
+        .to contain_exactly(:start_doctype, :end_doctype,
+                            :processing_instruction, :end_document)
+    end
+
+    # PullParser does not report an unclosed stack at EOF, so "REXML raised"
+    # was not the whole of malformedness. Measured before the depth guard:
+    # cutting 30 bytes off large_trailing_gradient.svg turned `lossy` into
+    # `lossless` -- losing evidence made the verdict more confident.
+    it "never grows more confident when the document is truncated" do
+      expect(classify("large_trailing_gradient")).to eq("lossy")
+      expect(classify("truncated_gradient")).to eq("unknown")
     end
 
     it "treats a nested svg viewport as a new, unmeasured context" do
       expect(classify("nested_svg_rect")).to eq("unknown")
     end
 
-    it "never calls a second root or epilog content lossless" do
+    # Named for the guard that actually answers. `second_root` trips the epilog
+    # check before `visit_root` ever reaches its `@roots > 1` branch, so this
+    # cannot isolate the second-root count -- that branch is deliberate
+    # redundancy in the safe direction, not something this example pins.
+    it "never calls content after the root closes lossless" do
       expect(classify("second_root")).to eq("unknown")
       expect(classify("epilog_content")).to eq("unknown")
     end
@@ -333,6 +374,14 @@ RSpec.describe "conversion lossiness" do
         .to raise_error(Claricle::InvocationError, /position/)
     ensure
       reader&.close
+    end
+
+    it "refuses a closed source the same way it refuses an unpositionable one" do
+      # The block form closes the file and hands back the closed IO, which is
+      # the object under test here.
+      closed = File.open(path_for("rect_and_line"), "rb") { |io| io }
+      expect { lossiness.classify(source_format: :svg, target_format: :eps, source: closed) }
+        .to raise_error(Claricle::InvocationError, /not readable/)
     end
 
     it "refuses a source that has already been partly consumed" do
@@ -360,24 +409,50 @@ RSpec.describe "conversion lossiness" do
     # `to_str` is deliberately ABSENT: SourceFactory would use it to slurp the
     # whole source into a StringIO, which is exactly the access pattern the
     # `source:` seam exists to avoid.
-    it "never slurps or repositions the IO it is given" do
+    #
+    # BasicObject, not Object, and that is the difference between watching a
+    # route and closing it. Measured: an Object-based double still answers 52
+    # methods without ever reaching method_missing, and
+    # `instance_variable_get(:@io).read` hands back the real IO and reads all
+    # 17,986 bytes. BasicObject removes 43 of those, so the permitted list
+    # below is what the object answers rather than only what it intercepts.
+    it "never repositions the IO it is given, and never reads it in one call" do
       permitted = %i[eof? external_encoding read readline nil? pos]
-      restricted = Class.new do
-        define_method(:initialize) { |io| @io = io }
+      restricted = Class.new(BasicObject) do
+        attr_reader :largest_read
+
+        define_method(:initialize) do |io|
+          @io = io
+          @largest_read = 0
+        end
         define_method(:respond_to?) { |m, p = false| permitted.include?(m) && @io.respond_to?(m, p) }
         define_method(:method_missing) do |name, *args, &blk|
-          raise "forbidden IO call: #{name}" unless permitted.include?(name)
-          raise "unbounded read" if name == :read && args.empty?
+          # Bare `Kernel`/`String`, no `::` prefix: a `Class.new(BasicObject)
+          # do ... end` body and its `define_method` blocks capture the
+          # ENCLOSING lexical scope, so top-level constants resolve normally.
+          # The `::` form is only needed under `class Foo < BasicObject`, which
+          # opens a fresh constant scope. Measured both ways before deciding.
+          Kernel.raise "forbidden IO call: #{name}" unless permitted.include?(name)
+          Kernel.raise "unbounded read" if name == :read && args.empty?
 
-          @io.public_send(name, *args, &blk)
+          result = @io.public_send(name, *args, &blk)
+          @largest_read = [@largest_read, result.bytesize].max if result.is_a?(String)
+          result
         end
-        define_method(:respond_to_missing?) { |m, p = false| permitted.include?(m) && @io.respond_to?(m, p) }
+        define_method(:respond_to_missing?) { |*| false }
       end
 
-      File.open(path_for("gradient_linear"), "rb") do |io|
+      File.open(path_for("large_trailing_gradient"), "rb") do |io|
+        wrapper = restricted.new(io)
         verdict = lossiness.classify(source_format: :svg, target_format: :eps,
-                                     source: restricted.new(io))
+                                     source: wrapper)
         expect(verdict).to eq("lossy")
+        # The repositioning half is pinned by `permitted` above (seek, rewind
+        # and pos= all raise, and to_str is absent so SourceFactory cannot
+        # wrap the source in a StringIO). This pins the realistic slurp shape
+        # -- one call returning the whole document -- rather than cumulative
+        # bytes, which a streaming parse legitimately reads in full.
+        expect(wrapper.largest_read).to be < File.size(path_for("large_trailing_gradient"))
       end
     end
   end

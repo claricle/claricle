@@ -51,9 +51,6 @@ module Claricle
 
     # Names admitted whatever their value: structural and identity only.
     ATTR_HARMLESS = %w[version id].freeze
-    # Names whose VALUE decides -- a name proves nothing about what it carries.
-    GEOMETRY = %w[width height x y x1 y1 x2 y2].freeze
-    PAINT = %w[fill stroke].freeze
 
     # `xml:space` and `xml:lang` affect character-data handling only, and every
     # character-data-bearing element is already unclassified by ELEMENTS' own
@@ -66,13 +63,21 @@ module Claricle
     # start tag. REXML applies neither.
     SUBSET_DECLARATIONS = %i[entitydecl attlistdecl elementdecl notationdecl].freeze
 
-    # Every event type this scanner accounts for. Anything else is unmeasured
-    # and yields `unclassified`, which closes the class rather than an
-    # instance: `:externalentity` is emitted by `<!DOCTYPE svg [%missing;]>`
-    # and matches none of PullEvent's 14 predicates. Re-derive the predicate
-    # list, which is corpus-independent where an emitted list is not:
-    #   ruby -rrexml/parsers/pullparser \
-    #     -e 'puts REXML::Parsers::PullEvent.instance_methods(false).grep(/\?\z/).size'
+    # Every EMITTED event type this scanner accounts for. Anything else is
+    # unmeasured and yields `unclassified`, which closes the class rather than
+    # an instance: `:externalentity` is emitted by `<!DOCTYPE svg [%missing;]>`
+    # and is handled by that fallback, not by this list.
+    #
+    # NOT the same set as PullEvent's predicate methods, and the matching
+    # counts are a coincidence. Measured, the two overlap in 10 of 14:
+    #   predicates not here : [:doctype, :entity, :error, :instruction]
+    #   here, not predicates: [:start_doctype, :end_doctype,
+    #                          :processing_instruction, :end_document]
+    # `doctype?`/`instruction?` are predicate names for the emitted
+    # `:start_doctype`/`:processing_instruction`; `entity?` and `error?` are
+    # never emitted at all. Compare the two sets, never their sizes:
+    #   ruby -rrexml/parsers/pullparser -e 'p REXML::Parsers::PullEvent
+    #     .instance_methods(false).grep(/\?\z/).map { |m| m.to_s.chomp("?").to_sym }'
     KNOWN_EVENTS = %i[
       start_element end_element text cdata comment xmldecl
       start_doctype end_doctype entitydecl attlistdecl elementdecl
@@ -91,6 +96,19 @@ module Claricle
     # cannot see. Units are unsettled anyway (D15).
     SELF_CONTAINED = /\A[+-]?(?:\d+\.\d+|\.\d+|\d+)(?:px)?\z/
     VIEWBOX = /\A\s*[+-]?[\d.]+(?:[\s,]+[+-]?[\d.]+){3}\s*\z/
+    SOLID_COLOUR = Regexp.union(HEX_COLOUR, RGB_COLOUR)
+
+    # Attribute name -> the pattern its value must match. One table rather than
+    # two name lists plus a special case, following ELEMENTS and ATTR_FEATURES
+    # above. A name absent here carries no value we have evidence for.
+    VALUE_RULES = {
+      "fill" => SOLID_COLOUR, "stroke" => SOLID_COLOUR,
+      "width" => SELF_CONTAINED, "height" => SELF_CONTAINED,
+      "x" => SELF_CONTAINED, "y" => SELF_CONTAINED,
+      "x1" => SELF_CONTAINED, "y1" => SELF_CONTAINED,
+      "x2" => SELF_CONTAINED, "y2" => SELF_CONTAINED,
+      "viewBox" => VIEWBOX
+    }.freeze
 
     class << self
       # `source` is a String of bytes or an open IO positioned at byte 0.
@@ -126,6 +144,11 @@ module Claricle
           source.pos
         rescue Errno::ESPIPE
           raise InvocationError, "source position is not observable"
+        rescue IOError => e
+          # A closed IO is the third caller error here, and used to escape as a
+          # raw IOError while the other two were wrapped -- an inconsistent
+          # seam on a public contract.
+          raise InvocationError, "source is not readable: #{e.message}"
         end
         return if position.zero?
 
@@ -163,23 +186,11 @@ module Claricle
 
       def valued(name, value)
         return nil if ATTR_HARMLESS.include?(name)
-        return paint(value) if PAINT.include?(name)
-        return geometry(value) if GEOMETRY.include?(name)
-        return viewbox(value) if name == "viewBox"
 
-        :unclassified
-      end
+        rule = VALUE_RULES[name]
+        return :unclassified if rule.nil?
 
-      def paint(value)
-        HEX_COLOUR.match?(value) || RGB_COLOUR.match?(value) ? nil : :unclassified
-      end
-
-      def geometry(value)
-        SELF_CONTAINED.match?(value) ? nil : :unclassified
-      end
-
-      def viewbox(value)
-        VIEWBOX.match?(value) ? nil : :unclassified
+        rule.match?(value) ? nil : :unclassified
       end
     end
 
@@ -202,19 +213,45 @@ module Claricle
         @phase = :prolog
       end
 
-      # The rescue wraps the parse alone and deliberately omits RuntimeError,
-      # matching detector.rb:383-393: an unusable encoding name raises a bare
-      # ArgumentError from the parser, while a RuntimeError raised elsewhere is
-      # a different fault that must not be reported as an unreadable document.
+      # The rescue wraps the WHOLE scan, not the parse alone -- `consume` and
+      # AttributeRules run inside it, and they genuinely raise ArgumentError:
+      # measured, every value rule raises `ArgumentError: invalid byte sequence
+      # in UTF-8` on invalid-UTF-8 input. That is unreachable today because
+      # REXML raises ParseException on such a document first, and the direction
+      # is safe (an unreadable document is `unknown`), but the comment used to
+      # claim a narrower scope than the code has.
+      #
+      # RuntimeError is deliberately omitted, matching detector.rb:383-393: an
+      # unusable encoding name raises a bare ArgumentError from the parser,
+      # while a RuntimeError raised elsewhere is a different fault that must
+      # not be reported as an unreadable document.
       def run
         parser = REXML::Parsers::PullParser.new(@source)
         consume(parser.pull) while parser.has_next?
+        note_truncation
         [@root_ok, @found.uniq]
       rescue REXML::ParseException, ArgumentError
         [false, [:unclassified]]
       end
 
       private
+
+      # PullParser does NOT report an unclosed element stack at EOF; only
+      # REXML::Document does. So "REXML raised" is not the whole of
+      # malformedness -- measured, `malformed.svg` is a MISMATCHED END TAG,
+      # which raises, while EOF-with-an-open-stack does not. Truncating
+      # large_trailing_gradient.svg by 30 bytes turned `lossy` into
+      # `lossless`: losing evidence made the verdict MORE confident, the exact
+      # inversion the rule at the top of this file forbids.
+      #
+      # The depth was already tracked and simply never consulted. A bare
+      # self-closing root (`<svg .../>`) also ends at depth 1, because REXML
+      # emits `[:start_element]` alone for it -- that document always has an
+      # empty feature set, so the ladder answers `unknown` either way and this
+      # guard costs it nothing. Both are pinned by fixture.
+      def note_truncation
+        note(:unclassified) unless @depth.zero?
+      end
 
       def note(feature)
         @found << feature

@@ -275,6 +275,24 @@ Or install it yourself as:
 $ gem install claricle
 ----
 
+== Conversion lossiness
+
+Whether a conversion loses anything is decided per conversion, from what the
+source document actually contains -- not from a table of format pairs. The same
+edge is clean for a rectangle and destructive for a gradient, so a per-edge
+label would call the second one lossless on the first one's evidence.
+
+A verdict is one of `lossless`, `lossy` or `unknown`, published as
+`Models::Conversion::LOSSINESS_LEVELS`. `unknown` is the default: a `lossless`
+verdict is a positive claim and is made only when every feature the document
+contains has been shown to survive that target. `lossy` and `unknown` both tell
+you to look; only `lossless` tells you not to, so only `lossless` can hide a
+loss.
+
+The model class `Models::Conversion` and its vocabulary
+`Conversion::LOSSINESS_LEVELS` are public. `Lossiness` and
+`Models::BinaryContent` are private constants.
+
 == Development
 
 After checking out the repo, run `bin/setup` to install dependencies.
@@ -312,24 +330,6 @@ https://github.com/claricle/claricle/blob/main/CODE_OF_CONDUCT.md[code of conduc
 == Copyright
 
 Copyright https://www.ribose.com[Ribose Inc.]
-
-== Conversion lossiness
-
-Whether a conversion loses anything is decided per conversion, from what the
-source document actually contains -- not from a table of format pairs. The same
-edge is clean for a rectangle and destructive for a gradient, so a per-edge
-label would call the second one lossless on the first one's evidence.
-
-A verdict is one of `lossless`, `lossy` or `unknown`, published as
-`Models::Conversion::LOSSINESS_LEVELS`. `unknown` is the default: a `lossless`
-verdict is a positive claim and is made only when every feature the document
-contains has been shown to survive that target. `lossy` and `unknown` both tell
-you to look; only `lossless` tells you not to, so only `lossless` can hide a
-loss.
-
-The model class `Models::Conversion` and its vocabulary
-`Conversion::LOSSINESS_LEVELS` are public. `Lossiness` and
-`Models::BinaryContent` are private constants.
 
 == License
 

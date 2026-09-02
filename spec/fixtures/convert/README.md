@@ -26,7 +26,7 @@ conversion.
 | `embedded_raster` | `lossy` (eps), `unknown` (emf) | a one-list rule set calling the EMF case lossless, which nobody measured |
 | `prefixed_gradient` | `lossy` | matching the qualified name, so `s:linearGradient` hides a loss |
 | `text_rect_line` | `unknown` | an unmeasured element waved through. Carries a rect and a line so the empty-feature guard cannot answer first |
-| `path_and_rect` | `unknown` | `IGNORED` growing silently. The `<path/>` is bare: a `d=` attribute would trip the attribute guard instead |
+| `path_and_rect` | `unknown` | an unmeasured element waved through when proven shapes sit beside it. The `<path/>` is bare: a `d=` attribute would trip the attribute rule instead. It does NOT catch `IGNORED` growing — adding `path` there reddens the constant pin, not this fixture |
 | `defs_container` | `lossless` | `defs` dropped from `IGNORED` |
 | `empty_svg`, `empty_defs` | `unknown` | a vacuous `lossless` from a document with no features |
 | `defs_root_svg_ns` | `unknown` | the root local-name check removed. Carries the CORRECT namespace, so only that check can catch it |
@@ -38,7 +38,7 @@ conversion.
 | `foreign_prefixed_attr` | `unknown` | a local-name-first reading that lets `foo:fill` through |
 | `entity_gradient`, `attlist_default_opacity` | `unknown` | markup an internal DTD subset can hide |
 | `public_doctype_rect`, `system_dtd_rect` | `unknown` | an external subset, which is never fetched |
-| `public_doctype_attlist` | `unknown` | keying on the PUBLIC identifier instead of the subset's contents |
+| `public_doctype_attlist` | `unknown` | nothing on its own — it trips the external-subset and internal-declaration rules together, and each is caught alone by `public_doctype_rect` and `attlist_default_opacity`. Kept as a corpus row confirming the two compose, not as a discriminator |
 | `bare_doctype_rect` | `lossless` | the DTD rule widened to "any doctype" |
 | `external_entity_ref` | `unknown` | an event type the scanner does not recognise |
 | `stylesheet_pi_rect`, `other_pi_rect` | `unknown` | a PI going unseen; the second catches a rule written for one PI name |
@@ -51,11 +51,21 @@ conversion.
 | `geom_height_percent`, `geom_y1_percent` | `unknown` | a rule that guards `width` and leaves the rest name-only |
 | `geom_px_rect`, `geom_viewbox_rect` | `lossless` | the geometry rule collapsing into "refuse every unit" |
 | `nested_svg_rect` | `unknown` | a nested `<svg>` viewport ignored by name rather than by position |
+| `truncated_gradient` | `unknown` | an unclosed element stack at EOF. `large_trailing_gradient` cut by 30 bytes: without the depth check this classifies `lossless`, so losing bytes made the verdict MORE confident |
 | `second_root`, `epilog_content` | `unknown` | document phase unmodelled. REXML raises on neither |
 | `no_root_dimensions` | `unknown` | absent root dimensions read as harmless while `50%` is refused |
 | `large_trailing_gradient` | `lossy` | a scan bounded to a prefix. Over 8192 bytes, feature at the very end |
 | `utf16_gradient` | `unknown` | currently caught by the root guard, not a guard of its own — it is here so relaxing that guard reddens something |
 | `bad_encoding` | `unknown` | an unusable encoding name crashing instead of returning a verdict |
 | `malformed` | `unknown` | a parse failure escaping as an exception |
-| `comment_rect`, `cdata_rect` | `lossless` | comments and CDATA being treated as marks |
+| `comment_rect`, `cdata_rect` | `lossless` | comments and CDATA treated as marks |
 | `style_element_rect` | `unknown` | a `<style>` element treated as structural |
+
+## A note on what a README entry means here
+
+An entry in the table above is a CLAIM that a spec asserts that property. Three
+fixtures once had an entry and no example — and one of them, `style_element_rect`,
+would have let a `<style>` document reach `lossless` with the whole suite green.
+A fixture with no spec is invisible; a fixture with no spec AND a table entry is
+worse, because the next reader checks the table and stops looking. If you add a
+fixture here, add the example in the same change.
