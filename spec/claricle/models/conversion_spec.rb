@@ -537,6 +537,22 @@ RSpec.describe "conversion lossiness" do
       # wrong reason: REXML rejects a duplicate attribute outright, so the
       # verdict was `unknown` before any value rule was consulted, and the
       # rows would have stayed green with the geometry pattern deleted.
+      #
+      # Exactly ONE of the two `sub` calls can match per name -- the control
+      # carries `x1="0"` but `x2="10"` and `y2="10"` -- so each pair is one
+      # hit and one no-op, and asserting the COMBINED result differs is
+      # equivalent to asserting the applicable one did. A row where both
+      # could match would break that equivalence and let a no-op hide.
+      #
+      # Keep the guard below even though the example currently goes red
+      # without it. It is redundant only while the control verdict
+      # (`lossless`) DIFFERS from the row expectation (`unknown`): a no-op
+      # leaves the document identical and the next line catches it. Add a row
+      # whose control already classifies `unknown` and the no-op becomes
+      # invisible, at which point this is the only thing left. Measured:
+      # break the substitution and this fires naming the real cause; remove
+      # it and the failure points at the geometry rule instead, which is the
+      # wrong place to send the next reader.
       %w[x1 x2 y2].each do |name|
         document = control_document.sub(%(#{name}="0"), %(#{name}="50%"))
                                    .sub(%(#{name}="10"), %(#{name}="50%"))
