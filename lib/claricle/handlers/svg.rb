@@ -79,14 +79,23 @@ module Claricle
       # was measured passing every profile silently, so both have to be
       # REFUSED here before any profile validation runs.
       #
-      # "Refused", not "diagnosed as an encoding problem". Only the
-      # shapes REXML itself fails to decode carry an ArgumentError and
-      # so reach `svg.encoding_unusable`; the rest surface as
-      # `svg.not_well_formed`. Measured on UTF-32, only big-endian WITH
-      # a BOM lands on the encoding code -- the other three describe
-      # stray null bytes instead. Across nine raw-binary shapes it is
-      # seven against two. Both codes are a refusal, which is what D23
-      # needs; neither is a promise about which one a given file gets.
+      # "Refused", not "diagnosed as an encoding problem". Four routes
+      # reach `svg.encoding_unusable` and they do not divide along
+      # "REXML could not decode it":
+      #
+      #   * a bad encoding NAME, which decodes perfectly -- a bare
+      #     ArgumentError from REXML's encoding setter;
+      #   * undecodable bytes in the prolog -- a bare EncodingError;
+      #   * undecodable bytes after a start tag -- the same failure
+      #     WRAPPED in a ParseException;
+      #   * undecodable bytes REXML reports as a wrapped ArgumentError.
+      #
+      # Everything else is `svg.not_well_formed`, and which code a given
+      # file gets is REXML's decision rather than a promise made here --
+      # measured on UTF-32, only big-endian WITH a BOM reaches the
+      # encoding code while the other three describe stray null bytes,
+      # and across nine raw-binary shapes it is seven against two. Both
+      # codes are a refusal, which is what D23 needs.
       #
       # It reads the entire document and holds it. The overhead on top
       # of that tracks the largest single construct the parser holds --
@@ -108,14 +117,33 @@ module Claricle
       # That is a structural property, not a memory bound: the
       # many-attribute run above also built zero.
       module Structure
-        # Narrower than XML's full well-formedness: the Char production
-        # is NOT checked. REXML enforces it in `REXML::Text.check`,
-        # which only runs when the DOM builds Text nodes, and this route
-        # builds none. Measured, eight shapes REXML's DOM rejects are
-        # called sound here -- a NUL or FF or BEL in text or in an
-        # attribute, and the references `&#xD800;`, `&#0;`, `&#1;`,
-        # `&#xFFFE;`. Inherent to the no-tree route; item 03 documents
-        # per format exactly what `conform` checks.
+        # Narrower than XML's full well-formedness, in a way worth
+        # stating precisely because item 03 documents per format exactly
+        # what `conform` checks, and it will quote this.
+        #
+        # `REXML::Text.check` enforces TWO rules, and it runs only when
+        # the DOM builds Text nodes. This route builds none, so BOTH are
+        # skipped:
+        #
+        #   * the Char production -- `<svg>a\u0000b</svg>`, and the
+        #     references `&#xD800;`, `&#0;`, `&#1;`, `&#xFFFE;`;
+        #   * XML 1.0 2.4's markup delimiters -- a bare `&` or a raw `<`
+        #     where a reference was required, as in the commonest
+        #     malformed SVG there is, `<svg>Tom & Jerry</svg>`, and in
+        #     `id="a<b"`.
+        #
+        # The second family is NOT a Char-production case: `&` and `<`
+        # are perfectly legal XML Chars, which is why naming only the
+        # Char production described half the gap. Every shape measured
+        # when that sentence was written happened to be a Char
+        # violation, so the corpus could not tell "the Char production
+        # is unchecked" from "Text.check never runs" -- and the sentence
+        # asserted the narrower reading. The `&` examples above separate
+        # the two; the Char examples do not.
+        #
+        # Distinct from the undefined-entity limit below: REXML's DOM
+        # ACCEPTS `&nope;`, so that limit is a place the DOM agrees with
+        # us, not a case it catches and we miss.
         NOT_WELL_FORMED_CODE = "svg.not_well_formed"
         ENCODING_UNUSABLE_CODE = "svg.encoding_unusable"
         MULTIPLE_ROOTS_CODE = "svg.multiple_root_elements"

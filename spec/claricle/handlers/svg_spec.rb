@@ -1120,6 +1120,46 @@ RSpec.describe "Claricle SVG handler" do
       expect { svg::Structure }.to raise_error(NameError, /private constant/)
     end
 
+    # Both rules `REXML::Text.check` enforces, and it runs only when the
+    # DOM builds Text nodes, so this route skips both. A method rather
+    # than a group-level table because `svg_ns` is a `let`.
+    def unchecked_by_this_route
+      {
+        "a NUL in text" => %(<svg xmlns="#{svg_ns}">a#{0.chr}b</svg>),
+        "a surrogate reference" => %(<svg xmlns="#{svg_ns}">&#xD800;</svg>),
+        "a bare & in text" => %(<svg xmlns="#{svg_ns}">Tom & Jerry</svg>),
+        "a bare & in an attribute" => %(<svg xmlns="#{svg_ns}" id="Tom & Jerry"/>),
+        "a raw < in an attribute" => %(<svg xmlns="#{svg_ns}" id="a<b"/>)
+      }
+    end
+
+    # The documented gap against full well-formedness, pinned in both
+    # directions so the comment item 03 will quote cannot rot.
+    #
+    # The `&` and `<` rows are the ones that matter: they are XML 1.0
+    # 2.4 markup-delimiter violations, NOT Char-production violations --
+    # both characters are legal XML Chars -- so a corpus of Char cases
+    # alone cannot tell "the Char production is unchecked" from
+    # "Text.check never runs", which is how the comment came to describe
+    # only half the gap.
+    it "calls sound the shapes REXML's DOM rejects, in both rule families" do
+      unchecked_by_this_route.each do |label, source|
+        expect { REXML::Document.new(source) }.to raise_error(StandardError), "for #{label}"
+        expect(scan(source.b)).to eq([]), "for #{label}"
+      end
+    end
+
+    # The neighbouring limit is a DIFFERENT case and this proves it: the
+    # DOM ACCEPTS an undefined general entity, so that limit records a
+    # place the DOM agrees with us rather than one it catches and we
+    # miss. Without this the two limits read as one.
+    it "agrees with the DOM on an undefined entity, unlike the shapes above" do
+      source = %(<svg xmlns="#{svg_ns}">&nope;</svg>)
+
+      expect { REXML::Document.new(source) }.not_to raise_error
+      expect(scan(source.b)).to eq([])
+    end
+
     # A false failure, pinned in both directions so it cannot change
     # silently: the detector widens REXML's live name grammar to XML's
     # canonical one, and this scan does not. Fixing it needs
