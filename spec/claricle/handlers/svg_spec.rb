@@ -911,6 +911,21 @@ RSpec.describe "Claricle SVG handler" do
 
     # A regex anchor, not REXML's exact prose: the gemspec pins rexml at
     # `~> 3.4.4`, which admits 3.4.5+, and a consumer resolves fresh.
+    # Thirteen bytes: a UTF-16LE BOM then an odd-length processing
+    # instruction, so the last character is truncated mid-unit. REXML
+    # transcodes lazily inside the pull loop, so this raises
+    # Encoding::InvalidByteSequenceError -- which is neither an
+    # ArgumentError nor a ParseException, and escaped `scan` entirely on
+    # both arms before the EncodingError clause existed. Exactly the
+    # input class this unit exists to catch.
+    it "returns an issue for bytes truncated mid-character rather than raising" do
+      source = "\xFF\xFE<\x00?\x00x\x00 \x00>\x00\x00".b
+
+      expect(source.bytesize).to eq(13)
+      expect(pairs(scan(source))).to eq([["error", "svg.encoding_unusable"]])
+      expect(pairs(scan_file(source))).to eq([["error", "svg.encoding_unusable"]])
+    end
+
     it "names an unusable declared encoding separately from a malformed document" do
       source = %(<?xml version="1.0" encoding="not-a-charset"?><svg/>)
 
@@ -945,6 +960,25 @@ RSpec.describe "Claricle SVG handler" do
         expect(message).to be_valid_encoding, "for #{script}"
         expect(message.bytesize).to be <= 800, "for #{script}"
       end
+    end
+
+    # The message quotes operator-supplied document text, so it must not
+    # carry control bytes into a terminal or a CI log, and it must
+    # actually be one line -- a length bound alone does not make it one.
+    it "keeps the message on one line and free of control characters" do
+      escape = 27.chr
+      newline = 10.chr
+
+      # Collapsed to a space, not deleted: the surrounding text stays
+      # legible, which is the whole reason the message quotes it.
+      { "a#{escape}[2Jb" => "a [2Jb", "a#{newline}b" => "a b", "a#{7.chr}b" => "a b" }
+        .each do |name, visible|
+          message = scan(%(<?xml version="1.0" encoding="#{name}"?><svg/>).b).first.message
+
+          expect(message.lines.size).to eq(1), "for #{name.inspect}"
+          expect(message).not_to match(/[[:cntrl:]]/), "for #{name.inspect}"
+          expect(message).to include(visible)
+        end
     end
 
     # Both directions, and asserted as a PROPERTY rather than as a list

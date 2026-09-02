@@ -129,6 +129,15 @@ module Claricle
         # `byteslice` is deliberately not used: it split a CJK codepoint
         # and Models::Issue then refused the value outright.
         MESSAGE_CHARACTER_LIMIT = 200
+        # A parse error is useless without the offending text, so the
+        # message quotes the document -- but the quoted bytes are
+        # operator-supplied, and a raw ESC reaching a terminal or a CI
+        # log is an injection surface. Measured: `encoding="a\e[2Jb"`
+        # put a live escape sequence in the message, and a newline in
+        # the same position split it across two lines, which is what
+        # "one line" above is supposed to rule out. Collapsed to spaces
+        # rather than deleted, so the text stays legible.
+        CONTROL_CHARACTERS = /[[:cntrl:]]/
         DEPTH_CHANGE = { start_element: 1, end_element: -1 }.freeze
 
         class << self
@@ -145,6 +154,17 @@ module Claricle
             [issue(MULTIPLE_ROOTS_CODE, "document has #{roots} root elements")]
           rescue REXML::ParseException => e
             [parse_failure(e)]
+          # Its own clause: EncodingError is unrelated to ArgumentError,
+          # so neither rescue above reaches it. REXML transcodes lazily
+          # while parsing, so a source whose bytes are truncated
+          # mid-character raises from inside the pull loop rather than
+          # arriving as a ParseException -- measured on 13 bytes, a
+          # UTF-16LE BOM followed by an odd-length PI, which escaped
+          # this method entirely on both source arms. All four of the
+          # Encoding::* errors are genuine "not decodable text", the
+          # same verdict raw binary gets.
+          rescue EncodingError
+            [issue(ENCODING_UNUSABLE_CODE, UNDECODABLE_MESSAGE)]
           rescue ArgumentError => e
             [issue(ENCODING_UNUSABLE_CODE, e.message)]
           end
@@ -223,8 +243,16 @@ module Claricle
           # 100,000-character name produced a 100,018-character message
           # when only `prose` truncated.
           def issue(code, message)
-            Models::Issue.new(severity: "error", code: code,
-                              message: message[0, MESSAGE_CHARACTER_LIMIT])
+            Models::Issue.new(severity: "error", code: code, message: printable(message))
+          end
+
+          # Slice BEFORE scrubbing: slicing is safe on an invalid
+          # encoding and bounds the work, where `gsub` RAISES on one --
+          # measured, ArgumentError -- and scrubbing 8,000,000
+          # characters to keep 200 costs 0.0118s against 0.0000s.
+          # Scrub then repairs whatever the cut left half-formed.
+          def printable(message)
+            message[0, MESSAGE_CHARACTER_LIMIT].scrub.gsub(CONTROL_CHARACTERS, " ")
           end
         end
       end
