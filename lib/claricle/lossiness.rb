@@ -133,6 +133,56 @@ module Claricle
       end
     end
 
+    # Attribute rules, extracted so Scanner stays inside Metrics/ClassLength
+    # without an exemption -- the same route detector.rb takes.
+    #
+    # Every rule here answers by VALUE where a value can carry meaning. A name
+    # proves nothing about what it holds: `fill` admitted `url(...)` and
+    # `width` admitted `50%` while both were whitelisted by name.
+    module AttributeRules
+      module_function
+
+      def feature_for(prefix, name, value)
+        return namespace(value) if name == "xmlns"
+        return nil if prefix == "xmlns"
+        return prefixed(prefix, name) if prefix
+
+        ATTR_FEATURES[name] || valued(name, value)
+      end
+
+      # A default namespace can be rebound on any descendant, so this is
+      # checked on every element rather than only on the root. Value-sensitive:
+      # a redundant redeclaration of the SVG namespace is harmless.
+      def namespace(value)
+        value == SVG_NAMESPACE ? nil : :unclassified
+      end
+
+      def prefixed(prefix, name)
+        ATTR_ALLOWED_PREFIXED[prefix]&.include?(name) ? nil : :unclassified
+      end
+
+      def valued(name, value)
+        return nil if ATTR_HARMLESS.include?(name)
+        return paint(value) if PAINT.include?(name)
+        return geometry(value) if GEOMETRY.include?(name)
+        return viewbox(value) if name == "viewBox"
+
+        :unclassified
+      end
+
+      def paint(value)
+        HEX_COLOUR.match?(value) || RGB_COLOUR.match?(value) ? nil : :unclassified
+      end
+
+      def geometry(value)
+        SELF_CONTAINED.match?(value) ? nil : :unclassified
+      end
+
+      def viewbox(value)
+        VIEWBOX.match?(value) ? nil : :unclassified
+      end
+    end
+
     # One small method per surface, dispatched from the pull loop. Decomposed
     # rather than exempted: only Metrics/BlockLength is configured in
     # .rubocop.yml, so every default limit is live, and every cop exemption in
@@ -205,10 +255,11 @@ module Claricle
 
       def visit_element(event)
         prefix, name = split_name(event[0])
-        visit_root(prefix, name, event[1]) if @depth.zero?
+        root = @depth.zero?
+        visit_root(prefix, name, event[1]) if root
         @depth += 1
         visit_attributes(event[1])
-        feature = element_feature(prefix, name)
+        feature = element_feature(prefix, name, root)
         note(feature) if feature
       end
 
@@ -228,59 +279,36 @@ module Claricle
 
       def visit_attributes(attributes)
         attributes.each do |qualified, value|
-          feature = attribute_feature(qualified, value)
+          feature = AttributeRules.feature_for(*split_name(qualified), value)
           note(feature) if feature
         end
       end
 
-      def attribute_feature(qualified, value)
-        prefix, name = split_name(qualified)
-        return namespace_feature(value) if name == "xmlns"
-        return nil if prefix == "xmlns"
-        return prefixed_attribute_feature(prefix, name) if prefix
+      # Two orderings matter here.
+      #
+      # The prefix test runs BEFORE the IGNORED skip: `<foo:defs/>` strips to
+      # "defs", and being skipped as structural is how a foreign-namespace
+      # element reached a `lossless` verdict.
+      #
+      # And only the CONFIRMED ROOT `<svg>` is structural. A nested `<svg>` is
+      # a new viewport with its own coordinate system, and is unmeasured --
+      # measured, ignoring it by name classified such a document `lossless`
+      # while everything inside the inner viewport went uncounted. So IGNORED
+      # membership is positional, not nominal.
+      def element_feature(prefix, name, root)
+        return :unclassified if prefix && IGNORED.include?(name)
+        return structural_feature(name, root) if IGNORED.include?(name)
 
-        ATTR_FEATURES[name] || valued_attribute_feature(name, value)
+        content_feature(prefix, name)
       end
 
-      # A default namespace can be rebound on any descendant, so this is
-      # checked on every element rather than only on the root. Value-sensitive:
-      # a redundant redeclaration of the SVG namespace is harmless.
-      def namespace_feature(value)
-        value == SVG_NAMESPACE ? nil : :unclassified
-      end
-
-      def prefixed_attribute_feature(prefix, name)
-        ATTR_ALLOWED_PREFIXED[prefix]&.include?(name) ? nil : :unclassified
-      end
-
-      def valued_attribute_feature(name, value)
-        return nil if ATTR_HARMLESS.include?(name)
-        return paint_feature(value) if PAINT.include?(name)
-        return geometry_feature(value) if GEOMETRY.include?(name)
-        return viewbox_feature(value) if name == "viewBox"
+      def structural_feature(name, root)
+        return nil if name == "defs" || root
 
         :unclassified
       end
 
-      def paint_feature(value)
-        HEX_COLOUR.match?(value) || RGB_COLOUR.match?(value) ? nil : :unclassified
-      end
-
-      def geometry_feature(value)
-        SELF_CONTAINED.match?(value) ? nil : :unclassified
-      end
-
-      def viewbox_feature(value)
-        VIEWBOX.match?(value) ? nil : :unclassified
-      end
-
-      # The prefix test runs BEFORE the IGNORED skip: `<foo:defs/>` strips to
-      # "defs", and being skipped as structural is how a foreign-namespace
-      # element reached a `lossless` verdict.
-      def element_feature(prefix, name)
-        return :unclassified if prefix && IGNORED.include?(name)
-        return nil if IGNORED.include?(name)
-
+      def content_feature(prefix, name)
         feature = ELEMENTS.fetch(name, :unclassified)
         prefix && KEPT_FEATURES.include?(feature) ? :unclassified : feature
       end

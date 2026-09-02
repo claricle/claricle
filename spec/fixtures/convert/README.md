@@ -50,6 +50,7 @@ conversion.
 | `geom_percent_rect`, `geom_em_rect`, `geom_mm_rect`, `geom_calc_rect` | `unknown` | geometry proven by name rather than by value |
 | `geom_height_percent`, `geom_y1_percent` | `unknown` | a rule that guards `width` and leaves the rest name-only |
 | `geom_px_rect`, `geom_viewbox_rect` | `lossless` | the geometry rule collapsing into "refuse every unit" |
+| `nested_svg_rect` | `unknown` | a nested `<svg>` viewport ignored by name rather than by position |
 | `second_root`, `epilog_content` | `unknown` | document phase unmodelled. REXML raises on neither |
 | `no_root_dimensions` | `unknown` | absent root dimensions read as harmless while `50%` is refused |
 | `large_trailing_gradient` | `lossy` | a scan bounded to a prefix. Over 8192 bytes, feature at the very end |

@@ -311,6 +311,10 @@ RSpec.describe "conversion lossiness" do
       expect(lossiness::KNOWN_EVENTS.size).to eq(14)
     end
 
+    it "treats a nested svg viewport as a new, unmeasured context" do
+      expect(classify("nested_svg_rect")).to eq("unknown")
+    end
+
     it "never calls a second root or epilog content lossless" do
       expect(classify("second_root")).to eq("unknown")
       expect(classify("epilog_content")).to eq("unknown")
@@ -362,9 +366,7 @@ RSpec.describe "conversion lossiness" do
         define_method(:initialize) { |io| @io = io }
         define_method(:respond_to?) { |m, p = false| permitted.include?(m) && @io.respond_to?(m, p) }
         define_method(:method_missing) do |name, *args, &blk|
-          unless permitted.include?(name)
-            raise "forbidden IO call: #{name}"
-          end
+          raise "forbidden IO call: #{name}" unless permitted.include?(name)
           raise "unbounded read" if name == :read && args.empty?
 
           @io.public_send(name, *args, &blk)
