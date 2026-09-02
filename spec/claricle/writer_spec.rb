@@ -7,6 +7,7 @@
 # plain require off the gem's own load path.
 require "claricle/writer"
 require "fileutils"
+require "pathname"
 require "tmpdir"
 
 RSpec.describe "Claricle::Writer" do
@@ -210,6 +211,20 @@ RSpec.describe "Claricle::Writer" do
       expect(probed).to eq([File.realpath(dir)])
     end
 
+    # A Pathname reaches here in practice -- image.rb converts one for the
+    # same reason -- and both of these worked until the name guards were
+    # added on the object instead of on its name.
+    it "accepts a Pathname destination, guarding on the name not the object" do # E35
+      missing = Pathname.new(File.join(dir, "missing.svg"))
+      zero = Pathname.new(File.join(dir, "zero.svg"))
+      zero.write("")
+
+      expect(writer.new([missing], sources: []).write(payload, to: missing)).to eq(missing)
+      writer.new([zero], sources: [], force: true).write(payload, to: zero)
+
+      expect([missing.binread, zero.binread]).to eq([payload, payload])
+    end
+
     it "refuses a destination that is an input, by hardlink or symlink alias, even with force" do # E1
       source = File.join(dir, "source.svg")
       File.binwrite(source, "SOURCE")
@@ -224,9 +239,14 @@ RSpec.describe "Claricle::Writer" do
       other_source = File.join(dir, "other.svg")
       File.binwrite(other_source, "OTHER")
 
+      trailer = File.join(dir, "trailer.svg")
+
       %w[hard.svg soft.svg].each do |name|
-        expect { writer.new([innocent, File.join(dir, name)], sources: [other_source, source], force: true) }
-          .to raise_error(Claricle::InvocationError, /overwrite an input/)
+        offender = File.join(dir, name)
+        [[offender], [innocent, offender, trailer]].each do |destinations|
+          expect { writer.new(destinations, sources: [other_source, source], force: true) }
+            .to raise_error(Claricle::InvocationError, /overwrite an input/)
+        end
       end
       expect(File.binread(source)).to eq("SOURCE")
       expect(Dir.children(dir)).not_to include("innocent.svg")
@@ -404,9 +424,13 @@ RSpec.describe "Claricle::Writer" do
       # of the iteration property E1 and E2 carry for the later passes.
       innocent = File.join(dir, "innocent.svg")
 
+      trailer = File.join(dir, "trailer.svg")
+
       [plain, dangling].each do |dest|
-        expect { writer.new([innocent, dest], sources: []) }
-          .to raise_error(Claricle::InvocationError, /exists/)
+        [[dest], [innocent, dest, trailer]].each do |destinations|
+          expect { writer.new(destinations, sources: []) }
+            .to raise_error(Claricle::InvocationError, /exists/)
+        end
       end
     end
 

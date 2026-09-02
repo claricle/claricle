@@ -141,15 +141,25 @@ module Claricle
 
       # File.dirname and File.basename silently drop a trailing separator,
       # so "build/" was examined as "build", accepted whenever nothing of
-      # that name existed, and then failed out of File.link at exit 4 with
-      # the STAGE FILENAME in the message -- the exact leak the directory
-      # refusal exists to prevent, reached by a shape that skipped it. An
-      # empty destination failed the same way for the same reason.
+      # that name existed, and then failed out of File.link with the STAGE
+      # FILENAME in the message -- the leak the directory refusal exists to
+      # prevent, reached by a shape that skipped it. That one was already
+      # exit 2, since cli.rb:308 maps ENOENT; the neighbouring EISDIR case
+      # is the one that reached exit 4. An empty destination leaked the
+      # same way. Both are refused here, before any bytes exist.
+      #
+      # Guard on the NAME, never on the object: a caller may pass a
+      # Pathname -- image.rb converts one for the same reason -- and
+      # Pathname#empty? tests whether the FILE is empty rather than the
+      # string, while Pathname has no #end_with? at all. Guarding on the
+      # object refused a zero-byte destination as "empty" and crashed on a
+      # missing one with NoMethodError, both of which worked before.
       def examine(dest)
-        raise InvocationError, "output path is empty" if dest.empty?
-        raise InvocationError, "output path names a directory: #{dest}" if dest.end_with?(File::SEPARATOR)
+        name = dest.to_s
+        raise InvocationError, "output path is empty" if name.empty?
+        raise InvocationError, "output path names a directory: #{name}" if name.end_with?(File::SEPARATOR)
 
-        parent = File.dirname(dest)
+        parent = File.dirname(name)
         raise InvocationError, "output directory is not a directory: #{parent}" unless directory_stat(parent).directory?
 
         entry = entry_at(dest)
