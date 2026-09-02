@@ -138,7 +138,6 @@ module Claricle
         # "one line" above is supposed to rule out. Collapsed to spaces
         # rather than deleted, so the text stays legible.
         CONTROL_CHARACTERS = /[[:cntrl:]]/
-        DEPTH_CHANGE = { start_element: 1, end_element: -1 }.freeze
 
         class << self
           # At most one issue, which is what is currently KNOWABLE
@@ -148,7 +147,7 @@ module Claricle
           # first. The Array return keeps room for a later non-fatal
           # check, which would coexist with the root count.
           def scan(source)
-            roots = parse(decoded(source))
+            roots = count_roots(tagged(source))
             return [] unless roots > 1
 
             [issue(MULTIPLE_ROOTS_CODE, "document has #{roots} root elements")]
@@ -178,7 +177,7 @@ module Claricle
           # measured, a multibyte ROOT NAME reads back as "no root
           # element" from a binary-tagged source and parses from a
           # UTF-8-tagged one.
-          def decoded(source)
+          def tagged(source)
             bytes = source.respond_to?(:read) ? source.read : source.dup
             bytes.force_encoding(Encoding::UTF_8)
           end
@@ -190,16 +189,14 @@ module Claricle
           # The root count is Claricle's own. REXML accepts four of the
           # five second-root shapes measured -- only `<svg/><g></g>`
           # raises -- so nothing here can be delegated to it.
-          def parse(text)
+          def count_roots(text)
             parser = REXML::Parsers::BaseParser.new(text)
             roots = 0
             depth = 0
-            loop do
-              type = parser.pull[0]
-              break if type == :end_document
-
+            while (type = parser.pull[0]) != :end_document
               roots += 1 if type == :start_element && depth.zero?
-              depth += DEPTH_CHANGE.fetch(type, 0)
+              depth += 1 if type == :start_element
+              depth -= 1 if type == :end_element
             end
             roots
           end

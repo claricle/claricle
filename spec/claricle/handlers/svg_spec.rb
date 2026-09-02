@@ -94,39 +94,6 @@ RSpec.describe "Claricle SVG handler" do
     end
   end
 
-  # Drains the pull parser the way the scan does, so an example can say
-  # "REXML itself raises nothing here" without duplicating the loop.
-  def drain(source)
-    parser = REXML::Parsers::BaseParser.new(source.dup.force_encoding(Encoding::UTF_8))
-    loop { break if parser.pull[0] == :end_document }
-  end
-
-  # GC is DISABLED across the measurement, not run after it. Measured:
-  # with a trailing `GC.start` a mutant that built a whole DOM inside the
-  # scan and dropped it scored zero, because the tree was collected
-  # before it was counted. Disabling GC counts every Element the work
-  # created, retained or not.
-  def elements_created
-    GC.start
-    GC.disable
-    before = ObjectSpace.each_object(REXML::Element).count
-    yield
-    ObjectSpace.each_object(REXML::Element).count - before
-  ensure
-    GC.enable
-  end
-
-  # The final entity expands to MARKUP, so a parser that expanded the
-  # chain would produce a document this scan judges differently. Without
-  # that the bomb is indistinguishable from ordinary text.
-  def billion_laughs
-    entities = ("a".."f").each_cons(2).map do |from, to|
-      %(<!ENTITY #{to} "#{"&#{from};" * 10}">)
-    end.join
-    %(<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY a "</svg><g/>">#{entities}]>) +
-      %(<svg xmlns="#{svg_ns}">&f;</svg>)
-  end
-
   describe "dimensions" do
     it "reads a plain number as user units" do
       expect(inspect_svg(svg(%(width="100" height="50"))))
@@ -765,6 +732,39 @@ RSpec.describe "Claricle SVG handler" do
     def system_entity_document(target)
       %(<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY x SYSTEM "#{target}">]>) +
         %(<svg xmlns="#{svg_ns}">&x;</svg>)
+    end
+
+    # Drains the pull parser the way the scan does, so an example can say
+    # "REXML itself raises nothing here" without duplicating the loop.
+    def drain(source)
+      parser = REXML::Parsers::BaseParser.new(source.dup.force_encoding(Encoding::UTF_8))
+      loop { break if parser.pull[0] == :end_document }
+    end
+
+    # GC is DISABLED across the measurement, not run after it. Measured:
+    # with a trailing `GC.start` a mutant that built a whole DOM inside the
+    # scan and dropped it scored zero, because the tree was collected
+    # before it was counted. Disabling GC counts every Element the work
+    # created, retained or not.
+    def elements_created
+      GC.start
+      GC.disable
+      before = ObjectSpace.each_object(REXML::Element).count
+      yield
+      ObjectSpace.each_object(REXML::Element).count - before
+    ensure
+      GC.enable
+    end
+
+    # The final entity expands to MARKUP, so a parser that expanded the
+    # chain would produce a document this scan judges differently. Without
+    # that the bomb is indistinguishable from ordinary text.
+    def billion_laughs
+      entities = ("a".."f").each_cons(2).map do |from, to|
+        %(<!ENTITY #{to} "#{"&#{from};" * 10}">)
+      end.join
+      %(<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY a "</svg><g/>">#{entities}]>) +
+        %(<svg xmlns="#{svg_ns}">&f;</svg>)
     end
 
     def triples(issues)
