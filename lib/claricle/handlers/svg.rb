@@ -347,8 +347,10 @@ module Claricle
           # encoding and bounds the work, where scanning the whole
           # string RAISES on one -- measured, ArgumentError -- and
           # scrubbing 8,000,000 characters to keep 200 costs 0.0118s
-          # against 0.0000s. Scrub then repairs whatever the cut left
-          # half-formed, which `Models::Issue` refuses outright.
+          # against 0.0000s. The slice is by CHARACTER, not byte, so it
+          # cannot itself leave anything half-formed; scrub guards
+          # against a message that was already invalid before the cut,
+          # which `Models::Issue` refuses outright.
           def printable(message)
             message[0, MESSAGE_CHARACTER_LIMIT].scrub
           end
