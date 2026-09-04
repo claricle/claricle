@@ -1200,6 +1200,22 @@ RSpec.describe "Claricle SVG handler" do
       end
     end
 
+    # The THIRD family the class comment names, unrelated to `Text.check`:
+    # a CDATA section at top level AFTER the root is the one false
+    # NEGATIVE in this group -- `count_roots` sees a :cdata event and
+    # ignores it, so this scans clean where xmllint calls it "Extra
+    # content at the end of the document". The other two rows are the
+    # comment's contrast cases, both ALREADY caught, so this example
+    # proves the gap is exactly as narrow as the comment claims rather
+    # than a stand-in for "anything after the root is missed."
+    it "misses a CDATA section after the root but catches its neighbours" do
+      expect(scan(%(<svg xmlns="#{svg_ns}"/><![CDATA[x]]>).b)).to eq([])
+      expect(pairs(scan(%(<svg xmlns="#{svg_ns}"/>text).b)))
+        .to eq([["error", "svg.not_well_formed"]])
+      expect(pairs(scan(%(<![CDATA[x]]><svg xmlns="#{svg_ns}"/>).b)))
+        .to eq([["error", "svg.not_well_formed"]])
+    end
+
     # The neighbouring limit is a DIFFERENT case and this proves it: the
     # DOM ACCEPTS an undefined general entity, so that limit records a
     # place the DOM agrees with us rather than one it catches and we
