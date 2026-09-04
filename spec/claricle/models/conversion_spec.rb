@@ -371,18 +371,14 @@ RSpec.describe "conversion lossiness" do
       expect(classify_source(StringIO.new(clean))).to eq("lossless")
     end
 
-    # `readline` is the one delegated call REXML itself wraps in a "treat
-    # any failure as end of stream" rescue (`IOSource#read`, rexml
-    # source.rb:245-264) -- the exact mechanism that already makes a
-    # malformed String classify `unknown` instead of raising. A `readline`
-    # that always fails, however broken, is indistinguishable from outside
-    # REXML from REXML's OWN read strategy hitting that same rescue against
-    # a perfectly ordinary File -- measured on 7 real fixtures (DOCTYPE
-    # internal subsets, UTF-16), where `readline` fails only after 6-10
-    # PRIOR successful `readline` calls on the very same object. So this
-    # fault is never escalated: doing so broke ordinary, already-shipped
-    # fixtures (see "classifies a File source unknown" above), and `unknown`
-    # is always the safe direction here regardless of which case it was.
+    # Why this is safe rather than merely convenient: the canonical
+    # explanation lives on `TaggedSource`'s `rescue StandardError`
+    # (lib/claricle/lossiness.rb) -- REXML absorbs any `readline` fault as
+    # "end of stream" for every source shape already, so this asserts the
+    # OUTCOME of that carve-out. The example below it asserts the MECHANISM
+    # directly (the fault reaches REXML unwrapped, rather than being
+    # absorbed inside this gem) -- an in-house absorption would satisfy this
+    # one just as well without doing what the comment above claims.
     it "absorbs a fault in the caller's own readline as unknown, matching REXML's own contract" do
       clean = File.binread(path_for("rect_and_line"))
       always_broken = Class.new(StringIO) do
@@ -390,6 +386,34 @@ RSpec.describe "conversion lossiness" do
       end
 
       expect(classify_source(always_broken.new(clean))).to eq("unknown")
+    end
+
+    # The example above asserts the OUTCOME ("unknown"), which an in-house
+    # absorption inside `TaggedSource` itself (say, rescuing and returning
+    # `nil`) would satisfy just as well -- measured, that alternative also
+    # passes every example in this file. This one asserts the MECHANISM the
+    # comments above claim: the `readline` fault is not tagged or converted
+    # at all, so it is REXML's own `IOSource#read` rescue that absorbs it,
+    # exactly as it already does for a String. `TaggedSource` is reached
+    # directly (it is `private_constant`, the same door
+    # `spec/claricle/registry_spec.rb:6` uses for `Registry`).
+    it "lets a readline fault through TaggedSource unwrapped, unlike every other method" do
+      tagged_source = Claricle.const_get(:Lossiness).const_get(:TaggedSource)
+      source_fault = Claricle.const_get(:Lossiness).const_get(:SourceFault)
+      broken = Class.new(StringIO) do
+        define_method(:readline) { |*| raise "boom" }
+        define_method(:read) { |*| raise "boom" }
+      end.new("<svg/>")
+
+      tagged = tagged_source.new(broken)
+      expect { tagged.readline }.to raise_error(RuntimeError, "boom")
+      expect(tagged.fault).to be_nil, "a readline fault must never be recorded either"
+
+      # The other direction, on the same wrapper: `read` still gets tagged
+      # and converted, so this is a property of the METHOD, not of the
+      # object being broken.
+      expect { tagged.read }.to raise_error(source_fault)
+      expect(tagged.fault).to be_a(RuntimeError)
     end
 
     it "refuses a source of the wrong type instead of answering about it" do
