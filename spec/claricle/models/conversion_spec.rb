@@ -416,6 +416,43 @@ RSpec.describe "conversion lossiness" do
       expect(tagged.fault).to be_a(RuntimeError)
     end
 
+    # A `readline` fault that lands EXACTLY where a root closes (depth back
+    # to 0) is the one shape `note_truncation` cannot see anything wrong
+    # with -- it looks identical to a document that genuinely ends there.
+    # Measured: a two-root document (REXML accepts a second root without
+    # raising), first root alone `lossless`-capable, second root carrying a
+    # `lost` feature -- a `readline` fault landing right after the first
+    # root's closing tag classified `lossless`, when the real, untruncated
+    # document is `unknown`. Not specific to a hostile IO: a plain String
+    # truncated at the identical byte, no fault or IO involved at all,
+    # reproduces it -- this pins the fix (forcing `unknown` on ANY absorbed
+    # `readline` fault, in `scan`) against the adversarial case that fix
+    # exists for, at every point a fault could land, not just the one this
+    # comment describes.
+    it "never turns a readline fault that lands at a root boundary into a false lossless" do
+      second_root = %(<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><linearGradient/></svg>)
+      doc = "#{control_document}\n#{second_root}"
+      expect(classify_source(doc)).to eq("unknown"), "control: untruncated two-root document"
+
+      (1..12).each do |fail_after|
+        hostile = Class.new(StringIO) do
+          define_method(:initialize) do |str|
+            super(str)
+            @count = 0
+          end
+          define_method(:readline) do |*args|
+            @count += 1
+            raise "hostile fault ##{@count}" if @count > fail_after
+
+            super(*args)
+          end
+        end
+        verdict = classify_source(hostile.new(doc.dup))
+        expect(verdict).not_to eq("lossless"),
+                               "fail_after=#{fail_after} produced lossless from a truncated read"
+      end
+    end
+
     it "refuses a source of the wrong type instead of answering about it" do
       [nil, 42, [], {}, :sym, 1.5].each do |bad|
         expect { classify_source(bad) }

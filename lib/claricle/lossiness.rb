@@ -176,17 +176,35 @@ module Claricle
       # a verdict and not wrapped in one of ours.
       def scan(source)
         tagged = TaggedSource.new(source)
-        verdict = Scanner.new(tagged).run
-        # Checked AFTER the scan, not raised through it. REXML's
-        # `IOSource#read` rescues `Exception` and treats the source as ended
-        # (rexml source.rb:260-262), so a fault from the caller's `readline`
-        # never propagates -- the scan completes and returns a verdict about
-        # a document their own broken reader truncated. Only the recording
-        # survives that rescue. A `read`, `eof?` or `pos` fault DOES
-        # propagate, and the rescue below carries it out unwrapped.
+        found = Scanner.new(tagged).run
+        # Checked AFTER the scan, not raised through it. A `read`, `eof?` or
+        # `pos` fault propagates out of `Scanner#run` on its own (REXML never
+        # wraps those calls in a rescue -- see `TaggedSource`), so this only
+        # ever fires for the rare case that somehow reaches here anyway; the
+        # rescue below carries it out unwrapped either way.
         raise tagged.fault if tagged.fault
 
-        verdict
+        # A `readline` fault is deliberately never escalated (see
+        # `TaggedSource`), so REXML can absorb it exactly as it would for a
+        # String -- but "absorbed" means the parse stopped wherever the fault
+        # landed, not that it reached the document's real end. Measured: two
+        # SVG roots, the second carrying a `lost` feature, with a `readline`
+        # fault landing right as the first root closes (depth back to 0, so
+        # `note_truncation` sees nothing wrong) -- the scan completes on the
+        # first root ALONE and calls it `lossless`, while the real, untruncated
+        # document is `unknown`. This is not specific to a hostile caller: the
+        # identical result comes from literally truncating a plain String at
+        # the same byte, with no IO or fault involved at all -- a pre-existing
+        # gap this fix must not make newly reachable through the one route it
+        # deliberately stops escalating. So ANY absorbed `readline` fault
+        # forces the same `[root_ok, present]` shape `verdict` already reads
+        # as `unknown` for a bad root (`false`, empty), never whatever
+        # `Scanner` computed from the partial content it saw before the fault
+        # -- the governing rule at the top of this file: wherever the
+        # evidence runs out, including RIGHT here, the answer is `unknown`.
+        return [false, []] if tagged.readline_faulted
+
+        found
       rescue SourceFault => e
         raise e.original
       end
@@ -408,9 +426,17 @@ module Claricle
       end
 
       # Recorded as well as raised, for the calls that reach here at all --
-      # `readline` never sets this. See the `rescue StandardError` below for
-      # why, and for the REXML citation both share.
+      # `readline` never sets this, it sets `readline_faulted` instead. See
+      # the `rescue StandardError` below for why, and for the REXML citation
+      # both share.
       attr_reader :fault
+
+      # Set (never unset) the moment a `readline` fault is deliberately let
+      # through unescalated -- `scan`, above, reads this to force `unknown`
+      # rather than trust a verdict computed from a parse that stopped
+      # early. See the `rescue StandardError` below for why a `readline`
+      # fault is left through in the first place.
+      attr_reader :readline_faulted
 
       def method_missing(name, *, &)
         # `__send__`, never `public_send`: a bounded source may be a bare
@@ -425,24 +451,38 @@ module Claricle
         # comment in this class and its specs points here rather than
         # restating it.
         #
-        # `readline` is the one delegated call REXML itself wraps in a
-        # "treat any failure as end of stream" rescue (`IOSource#read`,
-        # rexml source.rb:245-264, the `rescue Exception, NameError` at
-        # :260-262) on every source shape, String included -- that rescue is
-        # what already makes a malformed String classify `unknown` instead
-        # of raising. A caller's `readline` that always fails is
-        # indistinguishable, from outside REXML, from REXML's OWN read
-        # strategy hitting that same rescue against a perfectly ordinary
-        # File: measured, `readline` fails on 7 real, already-shipped
-        # fixtures (DOCTYPE internal subsets, UTF-16) only after 6-10 PRIOR
-        # successful `readline` calls on the very same object -- tagging
-        # this raised `EOFError`/`ArgumentError` as a caller fault and
-        # re-reporting it after the scan (see `scan` above) turned those
-        # ordinary fixtures into a raw exception instead of the `unknown`
-        # their String form correctly gets. Left untagged, whatever REXML
-        # does with it here is exactly what it does for a String -- `unknown`
-        # is always the safe answer regardless of which case this was.
-        raise e if name == :readline
+        # `readline` is a delegated call REXML absorbs rather than lets
+        # escape, on every source shape, String included -- that absorption
+        # is what already makes a malformed String classify `unknown`
+        # instead of raising. Two mechanisms do it, not one: most of the
+        # time it's `IOSource#read`'s own `rescue Exception, NameError`
+        # (rexml source.rb:245-264, the rescue at :260-262); when `readline`
+        # is instead called from `read_until` (source.rb:266-282, reachable
+        # when a comment/attribute/text run holds a literal `>` before its
+        # real terminator), THAT call is unguarded and it is
+        # `BaseParser#pull_event`'s bare `rescue` (baseparser.rb:527-529)
+        # that converts it to a `REXML::ParseException` instead, which
+        # `Scanner#next_event`'s own rescue then catches. Either way REXML
+        # ends the parse rather than raising past its own boundary, so a
+        # caller's `readline` that always fails is indistinguishable, from
+        # outside REXML, from REXML's OWN read strategy hitting one of these
+        # on a perfectly ordinary File: measured, `readline` fails on 7 real,
+        # already-shipped fixtures (DOCTYPE internal subsets, UTF-16) only
+        # after 6-10 PRIOR successful `readline` calls on the very same
+        # object -- tagging this raised `EOFError`/`ArgumentError` as a
+        # caller fault and re-reporting it after the scan (see `scan` above)
+        # turned those ordinary fixtures into a raw exception instead of the
+        # `unknown` their String form correctly gets.
+        #
+        # Left through unescalated, REXML does with this exactly what it
+        # does for a String. That is not, on its own, enough to trust
+        # whatever verdict the scan then computes -- see `readline_faulted`
+        # and `scan`'s use of it -- but it is enough to guarantee the scan
+        # completes instead of crashing, which is this whole carve-out's job.
+        if name == :readline
+          @readline_faulted = true
+          raise e
+        end
 
         @fault ||= e
         raise SourceFault, e
