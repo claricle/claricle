@@ -3,9 +3,39 @@
 require_relative "base"
 require_relative "../models/inspection"
 require_relative "../models/issue"
+require_relative "../models/location"
+require_relative "../models/report"
 
 module Claricle
   module Handlers
+    # A conformance issue's `code` has no upstream equivalent --
+    # png_conform's own hash carries no discriminant beyond the free-text
+    # `message` -- so one is derived from the message's fixed wording with
+    # every value-shaped detail stripped: parenthetical asides (`"(9, must
+    # be one of 0, 2, 3, 4, 6)"`), and bare numbers such as the "1.0" in a
+    # gAMA note. What is left is stable across which file produced the
+    # issue; it changes only if a png_conform release changes the wording
+    # a message ships with.
+    #
+    # A sibling module, not nested inside `Png`, for the same reason
+    # `EmfPlus` sits beside `Metafile` rather than inside it: the concern
+    # is unrelated to PNG metadata interpretation, and keeping it apart
+    # keeps both easier to read.
+    module IssueCode
+      PREFIX = "png."
+      STRIP = [/\([^)]*\)/, /\d+(\.\d+)?/].freeze
+      DEFAULT = "conform_finding"
+
+      def self.for(message)
+        slug = STRIP.reduce(message.to_s.downcase) { |text, pattern| text.gsub(pattern, " ") }
+                    .gsub(/[^a-z]+/, "_")
+                    .gsub(/\A_+|_+\z/, "")
+        "#{PREFIX}#{slug.empty? ? DEFAULT : slug}"
+      end
+    end
+
+    private_constant :IssueCode
+
     # Reads PNG metadata. It deliberately does not validate: png_conform's
     # ValidationService would hand us a parsed ImageInfo for free, but it
     # runs conformance checks along the way, so `inspect` would mean
@@ -192,6 +222,109 @@ module Claricle
         end
       end
 
+      # Builds the `Report` a conform operation returns, kept apart from
+      # PNG metadata interpretation for the same reason `ChunkReader`
+      # above is -- and, like it, a nested class rather than a sibling:
+      # `report` is PNG conformance specifically, where `IssueCode` above
+      # is free-text-message slugging that owes nothing to PNG at all.
+      class ConformanceMapper
+        # png_conform's own `ValidationContext#add_error` hash, keyed
+        # exactly this way -- measured against the installed 0.1.4 gem,
+        # not assumed. `chunk_type` is a String on every reachable row (a
+        # real 4-byte chunk name, or the pseudo-name "SIGNATURE" for the
+        # whole-file signature check); `offset` is nil wherever the check
+        # runs before a chunk is even located, e.g. a missing IEND.
+        ISSUE_KEYS = %i[chunk_type message severity offset].freeze
+
+        # A chunk declaring a length near the 32-bit ceiling sends the
+        # delegate's own `io.read(length)` past what a single read
+        # syscall accepts, and that fails at the OS boundary before any
+        # `ValidationContext` result exists at all -- measured,
+        # `Errno::EINVAL` from `io_fread`, on declared lengths at and
+        # above 0x80000000. Every other malformed shape tried against the
+        # real gem -- a short file, a garbage tail, 300 random byte
+        # streams, every truncation of two real PNGs -- returned a normal
+        # result instead of raising. This is the PNG analogue of the EMF
+        # row in 03-conform.md: the delegate's *reporting style* is an
+        # exception, but the meaning is the same nonconformance a
+        # returned issue would carry, so it goes on the allowlist rather
+        # than the generic exit 4.
+        MALFORMED_INPUT = [Errno::EINVAL].freeze
+        MALFORMED_CODE = "#{IssueCode::PREFIX}chunk_length_unreadable".freeze
+        MALFORMED_MESSAGE = "a chunk declared a length the file could not supply"
+
+        # Never `validate_file` (03-conform.md): it hands back a
+        # `FileAnalysis` with chunk and offset already discarded, and
+        # both it and `result.validation_result.errors` report
+        # `chunk_type: nil, chunk_offset: nil` for the same input.
+        # Location survives only on the `ValidationContext` this builds
+        # by hand.
+        #
+        # All three buckets, not `all_errors` alone: a conformant file
+        # still carries `all_info` (a gAMA note, measured on a real
+        # PngSuite fixture), and reading errors only would silently drop
+        # it -- which breaks D8's tri-state, since info must never
+        # disappear from a clean file's report.
+        def self.report(image)
+          report_for(image, mapped_issues(image))
+        rescue *MALFORMED_INPUT
+          report_for(image, [malformed_issue])
+        end
+
+        def self.report_for(image, issues)
+          Models::Report.new(source_path: image.path, format: image.format.to_s, issues: issues)
+        end
+
+        # `image.with_path`, not `image.with_source`: the delegate's own
+        # `FullLoadReader` takes a path or an IO and opens its own handle
+        # either way (03-conform.md's Design table names the path
+        # constructor), so nothing here needs to hand over an
+        # already-open file.
+        def self.mapped_issues(image)
+          context = image.with_path { |path| validated_context(path) }
+
+          (context.all_errors + context.all_warnings + context.all_info).map { |raw| issue_from(raw) }
+        end
+
+        def self.validated_context(path)
+          reader = ::PngConform::Readers::FullLoadReader.new(path)
+          service = ::PngConform::Services::ValidationService.new(reader, path)
+          service.validate
+          service.context
+        ensure
+          reader&.close
+        end
+
+        def self.issue_from(raw)
+          chunk_type, message, severity, offset = raw.values_at(*ISSUE_KEYS)
+
+          Models::Issue.new(
+            severity: severity.to_s, code: IssueCode.for(message), message: message,
+            location: location_for(chunk_type, offset)
+          )
+        end
+
+        # nil rather than an all-nil Location: chunk_type is populated on
+        # every row reachable through this delegate (measured), but
+        # nothing here should invent a location for a hash shape a later
+        # png_conform release might still hand back with neither field
+        # set.
+        def self.location_for(chunk_type, offset)
+          return nil if chunk_type.nil? && offset.nil?
+
+          Models::Location.new(chunk: chunk_type, byte_offset: offset)
+        end
+
+        def self.malformed_issue
+          Models::Issue.new(severity: "error", code: MALFORMED_CODE, message: MALFORMED_MESSAGE)
+        end
+
+        private_class_method :report_for, :mapped_issues, :validated_context,
+                             :issue_from, :location_for, :malformed_issue
+      end
+
+      private_constant :ConformanceMapper
+
       private_constant :IHDR_LAYOUT, :IHDR_BYTES, :PHYS_LAYOUT, :PHYS_BYTES,
                        :METRE_UNIT, :METRES_PER_INCH, :WANTED_CHUNKS,
                        :COLOR_SPACES, :MAX_CHUNK_READ, :DRAIN_BUFFER,
@@ -204,6 +337,14 @@ module Claricle
         return unreadable(image) unless usable_ihdr?(ihdr)
 
         readable(image, ihdr, chunks)
+      end
+
+      # The mapping itself, and why it must never be `validate_file`, are
+      # documented on `ConformanceMapper.report` above.
+      def conformance_report(image)
+        require "png_conform"
+
+        ConformanceMapper.report(image)
       end
 
       private

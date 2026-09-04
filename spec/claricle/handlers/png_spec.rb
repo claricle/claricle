@@ -688,4 +688,118 @@ RSpec.describe "Claricle PNG handler" do
       end
     end
   end
+
+  describe "conformance_report" do
+    def conform_fixture(name)
+      File.join(__dir__, "..", "..", "fixtures", "conform", name)
+    end
+
+    # basn2c08.png, from PngSuite (schaik.com/pngsuite): a real,
+    # conformant truecolor 8-bit PNG. png_conform still reports one INFO
+    # entry for it -- a gAMA note -- which is what proves the info bucket
+    # is actually read: a Report built from `all_errors` alone would
+    # report zero issues here and this example would not catch it.
+    it "reports a conformant PNG, info bucket included" do
+      image = Claricle::Image.from_path(conform_fixture("valid.png"))
+      report = image.conformance_report
+
+      expect(report.valid).to eq(:yes)
+      expect(report.issues).to contain_exactly(
+        have_attributes(
+          severity: "info", code: "png.gama", message: "gAMA: 1.0 (linear)",
+          location: have_attributes(chunk: "gAMA", byte_offset: 33)
+        )
+      )
+    end
+
+    # FullLoadReader.new(path) opens its own File handle (@owns_io = true)
+    # and exposes #close for exactly that reason -- leaving it open leaks a
+    # file descriptor per conformance check until GC finalizes it.
+    it "closes the reader's file handle rather than leaking it" do
+      opened_reader = nil
+      allow(PngConform::Readers::FullLoadReader).to receive(:new).and_wrap_original do |method, *args|
+        opened_reader = method.call(*args)
+      end
+
+      Claricle::Image.from_path(conform_fixture("valid.png")).conformance_report
+
+      expect(opened_reader.io).to be_closed
+    end
+
+    # missing_idat.png is PngSuite's xdtn0g01.png: a PNG missing its IDAT
+    # chunk entirely. One fixture, two rows, deliberately -- one issue
+    # carries a real chunk offset and the other carries none, so both
+    # sides of "location is nullable" are proven without a second file.
+    describe "a corrupt-but-recognised PNG" do
+      let(:report) { Claricle::Image.from_path(conform_fixture("missing_idat.png")).conformance_report }
+
+      it "is not conformant" do
+        expect(report.valid).to eq(:no)
+      end
+
+      it "maps a real png_conform error with its chunk and offset" do
+        expect(report.issues).to include(
+          have_attributes(
+            severity: "error", code: "png.iend_chunk_before_idat",
+            message: "IEND chunk before IDAT",
+            location: have_attributes(chunk: "IEND", byte_offset: 49)
+          )
+        )
+      end
+
+      # Never invented: png_conform's own sequence check runs before any
+      # IDAT chunk is located, so it has no offset to report.
+      it "leaves the offset nil rather than inventing one" do
+        expect(report.issues).to include(
+          have_attributes(
+            severity: "error", code: "png.missing_idat_chunk",
+            message: "Missing IDAT chunk (at least one required)",
+            location: have_attributes(chunk: "IDAT", byte_offset: nil)
+          )
+        )
+      end
+    end
+
+    it "carries the image's own path and format" do
+      path = conform_fixture("valid.png")
+      report = Claricle::Image.from_path(path).conformance_report
+
+      expect(report.source_path).to eq(path)
+      expect(report.format).to eq("png")
+    end
+
+    # A chunk declaring a length near the 32-bit ceiling breaks the
+    # delegate's own read before any ValidationContext result exists --
+    # measured, `Errno::EINVAL` from `io_fread`. The user-visible meaning
+    # is the same nonconformance a returned issue would carry, so this
+    # must come back as an ordinary nonconformant Report, not an
+    # exception the caller has to know to rescue.
+    it "reports nonconformance rather than raising when a chunk's declared length breaks the read" do
+      signature = [137, 80, 78, 71, 13, 10, 26, 10].pack("C*")
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "huge.png")
+        File.binwrite(path, signature + [0xFFFFFFFF].pack("N") + "IHDR".b)
+
+        report = Claricle::Image.from_path(path).conformance_report
+
+        expect(report.valid).to eq(:no)
+        expect(report.issues).to contain_exactly(
+          have_attributes(severity: "error", code: "png.chunk_length_unreadable", location: nil)
+        )
+      end
+    end
+
+    # The allowlist has to be narrow, or a real defect in this handler
+    # would silently read as an ordinary nonconformant file (exit 1)
+    # instead of the internal-error code (exit 4) that says something
+    # needs fixing. Stubbing the delegate itself, since nothing else in
+    # 300 randomised inputs and every truncation of two real PNGs raised
+    # anything off `Errno::EINVAL`.
+    it "does not rescue an exception off its malformed-input allowlist" do
+      allow(PngConform::Services::ValidationService).to receive(:new).and_raise(RuntimeError, "boom")
+      image = Claricle::Image.from_path(conform_fixture("valid.png"))
+
+      expect { image.conformance_report }.to raise_error(RuntimeError, "boom")
+    end
+  end
 end
