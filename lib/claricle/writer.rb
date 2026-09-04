@@ -426,22 +426,33 @@ module Claricle
     def initialize(destinations, sources:, stdout: $stdout, force: false)
       @stdout = stdout
       @force = force
-      @planned = destinations.reject { |dest| dest == STDOUT_DESTINATION }
+      @planned = destinations.reject { |dest| stdout_destination?(dest) }
+      @planned_names = @planned.map { |dest| File.path(dest) }
       Preflight.new(@planned, sources: sources, force: force).check
     end
 
     # Returns the destination exactly as the caller spelled it, or nil for
-    # stdout. The canonical form exists only to compare names.
+    # stdout. The canonical form exists only to compare names: `Preflight`
+    # already normalizes with `File.path` (Pathname/String both answer it),
+    # so a destination planned as one and written as the other -- or a
+    # `Pathname.new("-")` standing in for `"-"` -- compares equal here too,
+    # rather than raising a false "not preflighted".
     def write(bytes, to:)
-      return write_stdout(bytes) if to == STDOUT_DESTINATION
+      return write_stdout(bytes) if stdout_destination?(to)
 
-      raise ArgumentError, "destination was not preflighted: #{to.inspect}" unless @planned.include?(to)
+      unless @planned_names.include?(File.path(to))
+        raise ArgumentError, "destination was not preflighted: #{to.inspect}"
+      end
 
       Publisher.new(to, force: @force).publish(bytes)
       to
     end
 
     private
+
+    def stdout_destination?(dest)
+      File.path(dest) == STDOUT_DESTINATION
+    end
 
     # Never puts, which appends a newline to bytes that do not already end
     # in one and corrupts binary output. binmode first, or a stdout with an

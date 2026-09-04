@@ -2,9 +2,9 @@
 
 # A NEW pattern in spec/, and stated as new: claricle.rb does not require
 # writer.rb yet (that wiring is a later step), so spec_helper's
-# `require "claricle"` does not load it. There is no require_relative
-# precedent in spec/ -- grep returns zero hits repo-wide -- so this is a
-# plain require off the gem's own load path.
+# `require "claricle"` does not load it. `require_relative` is the norm
+# under lib/ (44 hits there), but has no precedent under spec/ -- so this
+# is a plain require off the gem's own load path instead.
 require "claricle/writer"
 require "fileutils"
 require "pathname"
@@ -787,6 +787,24 @@ RSpec.describe "Claricle::Writer" do
       expect { writer.new([], sources: []).write(payload, to: File.join(dir, "stranger.svg")) }
         .to raise_error(ArgumentError, /not preflighted/)
     end
+
+    it "accepts a Pathname destination planned as an equivalent String" do
+      dest = File.join(dir, "planned_as_string.svg")
+
+      result = writer.new([dest], sources: []).write(payload, to: Pathname.new(dest))
+
+      expect(result).to eq(Pathname.new(dest))
+      expect(File.binread(dest)).to eq(payload)
+    end
+
+    it "accepts a String destination planned as an equivalent Pathname" do
+      dest = File.join(dir, "planned_as_pathname.svg")
+
+      result = writer.new([Pathname.new(dest)], sources: []).write(payload, to: dest)
+
+      expect(result).to eq(dest)
+      expect(File.binread(dest)).to eq(payload)
+    end
   end
 
   describe "stdout" do
@@ -796,6 +814,22 @@ RSpec.describe "Claricle::Writer" do
 
       begin
         expect(writer.new([stdout_destination], sources: [], stdout: output).write(fixture, to: "-")).to be_nil
+        output.close
+        expect(reader.read.b).to eq(fixture)
+      ensure
+        reader.close unless reader.closed?
+        output.close unless output.closed?
+      end
+    end
+
+    it "treats a Pathname spelling of \"-\" as stdout too" do
+      fixture = "<svg/>".b
+      reader, output = IO.pipe
+
+      begin
+        expect(
+          writer.new([], sources: [], stdout: output).write(fixture, to: Pathname.new(stdout_destination))
+        ).to be_nil
         output.close
         expect(reader.read.b).to eq(fixture)
       ensure
