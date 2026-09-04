@@ -565,12 +565,27 @@ RSpec.describe "Claricle::Writer" do
     # characters -- the two spellings are visually identical, and a
     # literal pair is normalized in transit by an editor, silently making
     # the row a no-op.
-    it "refuses a pure normalization pair whatever this volume does about case" do # E36
+    #
+    # Positions vary -- first, last, mid with a trailer -- for the same
+    # reason U15 does: a single-group fixture cannot tell "walks every
+    # group" from "found the only group there was", and pass 2's own
+    # iteration (`each_value`) is exactly as truncatable as pass 3's.
+    it "refuses a pure normalization pair wherever its group sits among several" do # E36
       nfc = File.join(dir, "Logo\u00E9.svg") # NFC: one codepoint for e-acute
       nfd = File.join(dir, "Logoe\u0301.svg") # NFD: e + combining acute accent
+      solo_a = File.join(dir, "solo-a.svg")
+      solo_b = File.join(dir, "solo-b.svg")
 
-      expect { writer.new([nfc, nfd], sources: []) }
-        .to raise_error(Claricle::InvocationError, /different Unicode spellings/)
+      arrangements = [
+        [nfc, nfd, solo_a],           # collision first
+        [solo_a, nfc, nfd],           # collision last
+        [solo_a, nfc, nfd, solo_b]    # collision mid, with a trailer
+      ]
+
+      arrangements.each do |destinations|
+        expect { writer.new(destinations, sources: []) }
+          .to raise_error(Claricle::InvocationError, /different Unicode spellings/)
+      end
     end
   end
 

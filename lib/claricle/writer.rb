@@ -261,15 +261,13 @@ module Claricle
       # a file be silently overwritten on a case-sensitive, normalizing
       # filesystem.
       def refuse_normalization_collisions(keys)
-        planned(keys)
-          .group_by { |_dest, key| [File.dirname(key), Naming.normalize(File.basename(key))] }
-          .each_value do |group|
-            next if group.size == 1
+        grouped_by(keys) { |name| Naming.normalize(name) }.each_value do |group|
+          next if group.size == 1
 
-            raise InvocationError,
-                  "two outputs are the same name in different Unicode spellings: " \
-                  "#{group.map(&:first).join(", ")}"
-          end
+          raise InvocationError,
+                "two outputs are the same name in different Unicode spellings: " \
+                "#{group.map(&:first).join(", ")}"
+        end
       end
 
       def refuse_fold_collisions(keys)
@@ -286,17 +284,25 @@ module Claricle
       # linkdir/q.svg where linkdir -> out land in different groups, and
       # the second write destroys the first.
       #
-      # No filtering beyond `planned`: pass 2 already refused the whole
+      # No filtering beyond `not_on_disk`: pass 2 already refused the whole
       # batch on any normalization collision, so everything reaching here
       # is normalization-distinct by construction.
       def fold_groups(keys)
-        planned(keys).group_by { |_dest, key| [File.dirname(key), Naming.fold(File.basename(key))] }
+        grouped_by(keys) { |name| Naming.fold(name) }
       end
 
-      # Shared between pass 2 and pass 3 (fold_groups). A String key means
-      # File.stat did not resolve, which is what "planned, not yet on disk"
-      # means here.
-      def planned(keys)
+      # Shared between pass 2 and pass 3 (fold_groups): filters to entries
+      # not yet on disk, then groups by [resolved dirname, transformed
+      # basename]. The transform -- normalize for pass 2, fold for pass 3
+      # -- is the one thing that differs between them, so it is the one
+      # thing left to the caller.
+      def grouped_by(keys)
+        not_on_disk(keys).group_by { |_dest, key| [File.dirname(key), yield(File.basename(key))] }
+      end
+
+      # A String key means File.stat did not resolve, which is what "not
+      # yet on disk" means here.
+      def not_on_disk(keys)
         keys.select { |_dest, key| key.is_a?(String) }
       end
 
