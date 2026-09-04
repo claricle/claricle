@@ -164,6 +164,32 @@ RSpec.describe "Claricle::Batch" do
         expect(result.items.map(&:path)).to eq(%w[a.png b.svg])
       end
     end
+
+    # The group count alone does not bound the danger: a handful of groups
+    # with many alternatives each multiplies just as badly as many groups
+    # with few. Eight groups of eight alternatives stays under MAX_BRACES
+    # and never returned before this cap existed -- measured.
+    it "refuses a pattern under the brace-group cap but over the combination cap" do
+      tree do
+        alternatives = (1..8).map { |n| "x#{n}" }.join(",")
+        pattern = "{#{alternatives}}" * 8
+
+        expect { run(batch, [], pattern: pattern, classify: clean, &report) }
+          .to raise_error(Claricle::InvocationError, /too many/)
+      end
+    end
+
+    # A single group with many alternatives is linear, not exponential, and
+    # is exactly the legitimate shape the brace cap's own comment cites.
+    it "still accepts a single group with many alternatives" do
+      tree do
+        File.write("a.png", "x")
+        pattern = "a.{png,svg,eps,pdf,gif,bmp,tiff,webp}"
+
+        expect(run(batch, [], pattern: pattern, classify: clean, &report).items.map(&:path))
+          .to eq(["a.png"])
+      end
+    end
   end
 
   describe "collecting every outcome" do
@@ -232,6 +258,23 @@ RSpec.describe "Claricle::Batch" do
 
         expect(result.items.map(&:status)).to eq(%w[error ok])
         expect(result.items.first.error.code).to eq("NotImplementedError")
+      end
+    end
+
+    # `Class#name` is nil for an anonymous class, and a delegate raising
+    # `Class.new(StandardError).new(...)` is real Ruby. `BatchError#code`
+    # is required, so an unguarded nil there raised inside the one rescue
+    # that exists to keep a bad file from taking down the batch -- measured,
+    # before the `Class#to_s` fallback existed, this aborted the whole
+    # `Batch.run` call instead of recording one failed item.
+    it "collects a failure whose class has no name" do
+      tree do
+        File.write("a.png", "x")
+        anonymous = Class.new(StandardError)
+        result = run(batch, ["a.png"], classify: clean) { raise anonymous, "boom" }
+
+        expect(result.items.first.status).to eq("error")
+        expect(result.items.first.error.code).to match(/\A#<Class:0x\h+>\z/)
       end
     end
 

@@ -62,11 +62,24 @@ module Claricle
     # 110-character one did not return inside fifteen, entirely before any
     # filesystem match is attempted. A CLI argument is untrusted input, so
     # it must not be able to turn a short string into an unbounded CPU
-    # stall. Eight groups already covers any legitimate extension list
-    # (`*.{png,svg,eps,pdf,gif,bmp,tiff,webp}`) and costs nothing
-    # measurable even at the cap.
+    # stall. Eight groups is a generous cap for a real extension list
+    # (`*.{png,svg,eps,pdf,gif,bmp,tiff,webp}` is one group of eight
+    # alternatives, not eight groups) and costs nothing measurable even at
+    # the cap.
     MAX_BRACES = 8
     private_constant :MAX_BRACES
+
+    # The group count alone is not enough: a FEW groups with MANY
+    # alternatives each multiply just as badly as many groups with few --
+    # measured, eight groups of eight alternatives (`{x1,...,x8}` repeated
+    # eight times, still under MAX_BRACES) never returned. Estimated as the
+    # product of (alternatives + 1) per non-nested `{...}` group -- it
+    # undercounts a nested pattern, but nesting was measured far cheaper
+    # than flat repetition for the same brace count (a 4-level-deep,
+    # 8-alternative-per-level pattern returned in under a millisecond), so
+    # MAX_BRACES is what bounds nesting and this bounds flat alternation.
+    MAX_GLOB_COMBINATIONS = 1024
+    private_constant :MAX_GLOB_COMBINATIONS
 
     class << self
       def run(arguments, classify:, pattern: nil, &operation)
@@ -90,11 +103,18 @@ module Claricle
         Outcome.new(item: failed_item(path, e), error: e)
       end
 
+      # `Class#name` is nil for an anonymous class -- rare, but a delegate
+      # raising `Class.new(StandardError).new(...)` is real Ruby, and
+      # `BatchError#code` is required: an unguarded nil there raised
+      # `ValidationError` building THIS envelope, uncaught, aborting the
+      # whole batch from inside the one rescue that exists to keep a
+      # single bad file from doing exactly that. `Class#to_s` is never nil.
       def failed_item(path, error)
         Models::BatchItem.new(
           path: path,
           exit_code: Fault.exit_code(error),
-          error: Models::BatchError.new(code: error.class.name, message: Fault.message(error))
+          error: Models::BatchError.new(code: error.class.name || error.class.to_s,
+                                        message: Fault.message(error))
         )
       end
 
@@ -128,7 +148,17 @@ module Claricle
                 "glob #{text.inspect} has too many { groups (max #{MAX_BRACES})"
         end
 
+        if glob_combinations(text) > MAX_GLOB_COMBINATIONS
+          raise InvocationError,
+                "glob #{text.inspect} would expand to too many combinations " \
+                "(max #{MAX_GLOB_COMBINATIONS})"
+        end
+
         Dir.glob(text)
+      end
+
+      def glob_combinations(text)
+        text.scan(/\{[^{}]*\}/).reduce(1) { |total, group| total * (group.count(",") + 1) }
       end
 
       # Two different mistakes, so two different sentences: naming nothing
