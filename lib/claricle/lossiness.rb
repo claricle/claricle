@@ -389,12 +389,14 @@ module Claricle
     end
     private_constant :SourceFault
 
-    # Forwards to the caller's source and tags anything it raises. EVERY
-    # source is wrapped, including a String: a String cannot raise while
-    # being read, so the special case that skipped it was a branch nothing
-    # could distinguish -- measured, always wrapping passes the whole suite.
-    # REXML reaches a String through `to_str` and then reads a StringIO, so
-    # the wrapper sees two or three delegated calls and nothing after.
+    # Forwards to the caller's source and tags anything it raises, for every
+    # delegated call EXCEPT `readline` -- see the rescue below for why that
+    # one is deliberately left untagged. Every other source is wrapped,
+    # including a String: a String cannot raise while being read, so the
+    # special case that skipped it was a branch nothing could distinguish --
+    # measured, always wrapping passes the whole suite. REXML reaches a
+    # String through `to_str` and then reads a StringIO, so the wrapper sees
+    # two or three delegated calls and nothing after.
     class TaggedSource
       def initialize(source) = @source = source
 
@@ -402,11 +404,13 @@ module Claricle
         @source.respond_to?(name, include_private)
       end
 
-      # Recorded as well as raised. REXML's `IOSource#read` rescues
-      # `Exception` and treats the source as ended (rexml source.rb:260-262),
-      # so a fault raised by the caller's `readline` is swallowed INSIDE the
-      # gem and reappears as a short document -- no wrapper can let it
-      # propagate. Recording it is the only way it survives that rescue.
+      # Recorded as well as raised, for the calls that reach here at all.
+      # REXML's `IOSource#read` rescues `Exception` and treats the source as
+      # ended (rexml source.rb:260-262), so a fault raised by the caller's
+      # `read`/`eof?`/`pos` is swallowed INSIDE the gem and reappears as a
+      # short document -- no wrapper can let it propagate. Recording it is
+      # the only way it survives that rescue. `readline` never sets this: see
+      # the rescue below.
       attr_reader :fault
 
       def method_missing(name, *, &)
@@ -418,6 +422,24 @@ module Claricle
       rescue SourceFault
         raise
       rescue StandardError => e
+        # `readline` is the one delegated call REXML itself wraps in a
+        # "treat any failure as end of stream" rescue (`IOSource#read`,
+        # rexml source.rb:245-264) on every source shape, String included --
+        # that rescue is what already makes a malformed String classify
+        # `unknown` instead of raising. A caller's `readline` that always
+        # fails is indistinguishable, from outside REXML, from REXML's OWN
+        # read strategy hitting that same rescue against a perfectly
+        # ordinary File: measured, `readline` fails on 7 real, already-
+        # shipped fixtures (DOCTYPE internal subsets, UTF-16) only after 6-10
+        # PRIOR successful `readline` calls on the very same object -- tagging
+        # this raised `EOFError`/`ArgumentError` as a caller fault and
+        # re-reporting it after the scan (see `scan` above) turned those
+        # ordinary fixtures into a raw exception instead of the `unknown`
+        # their String form correctly gets. Left untagged, whatever REXML
+        # does with it here is exactly what it does for a String -- `unknown`
+        # is always the safe answer regardless of which case this was.
+        raise e if name == :readline
+
         @fault ||= e
         raise SourceFault, e
       end

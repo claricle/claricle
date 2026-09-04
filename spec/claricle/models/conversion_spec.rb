@@ -185,6 +185,50 @@ RSpec.describe "conversion lossiness" do
       end
     end
 
+    # Widened from the three fixtures above to every committed fixture, both
+    # targets -- 132 pairs. The three-fixture version stayed green while
+    # `d471aa9` made a File source raise on 7 fixtures the String source
+    # classified `unknown` for: none of DOCTYPE-bearing or UTF-16 fixtures
+    # this regression needs was among the three it checked. This is the
+    # check that must catch the next one, not just this one.
+    it "agrees between String and File source across every fixture and target" do
+      names = Dir[File.join(fixtures, "*.svg")].map { |path| File.basename(path, ".svg") }
+      disagreements = []
+      names.each do |name|
+        %i[eps emf].each do |target|
+          string_verdict = begin
+            classify(name, to: target)
+          rescue StandardError => e
+            "raised #{e.class}"
+          end
+          io_verdict = begin
+            classify_io(name, to: target)
+          rescue StandardError => e
+            "raised #{e.class}"
+          end
+          next if string_verdict == io_verdict
+
+          disagreements << "#{name} -> #{target}: String=#{string_verdict} File=#{io_verdict}"
+        end
+      end
+      expect(disagreements).to be_empty
+    end
+
+    # The 7 fixtures `d471aa9` broke, pinned individually and by name so a
+    # future regression names the exact fixture rather than a count. Every
+    # one carries a DOCTYPE internal subset or UTF-16 content, and every one
+    # already classifies `unknown` from a String -- a File must match, per
+    # the "String or open IO" contract `classify`'s own docstring states.
+    it "classifies a File source unknown, not a raise, on DOCTYPE and UTF-16 fixtures" do
+      %w[attlist_default_opacity entity_bomb entity_gradient external_entity_ref
+         public_doctype_attlist system_dtd_rect utf16_gradient].each do |name|
+        %i[eps emf].each do |target|
+          expect(classify_io(name, to: target)).to eq("unknown"),
+                                                   "#{name} -> #{target} via File should classify unknown, not raise"
+        end
+      end
+    end
+
     it "calls a document lossless only when every feature present is proven kept" do
       expect(classify("rect_and_line")).to eq("lossless")
       expect(classify("rect_and_line", to: :emf)).to eq("lossless")
@@ -305,10 +349,15 @@ RSpec.describe "conversion lossiness" do
     # True of construction only. Location does not preserve origin, so the
     # fault is tagged where it is raised instead of inferred from where the
     # rescue sits.
+    # `readline` dropped from this loop -- see the example below. `read` and
+    # `eof?` are untouched: REXML never wraps either in a rescue of its own
+    # (rexml source.rb:232 and :271/:325 call them outside any exception
+    # handler), so a fault there is unambiguously the caller's own object
+    # misbehaving, and it still must reach them raised, not as a level.
     it "does not report a fault in the caller's own IO as a verdict" do
       clean = File.binread(path_for("rect_and_line"))
 
-      %i[read readline eof?].each do |method|
+      %i[read eof?].each do |method|
         faulty = Class.new(StringIO) do
           define_method(method) { |*| raise("caller fault via #{method}") }
         end
@@ -320,6 +369,27 @@ RSpec.describe "conversion lossiness" do
       # The other direction: an IO that behaves still gets a verdict, so the
       # tagging cannot be turning every IO read into an escape.
       expect(classify_source(StringIO.new(clean))).to eq("lossless")
+    end
+
+    # `readline` is the one delegated call REXML itself wraps in a "treat
+    # any failure as end of stream" rescue (`IOSource#read`, rexml
+    # source.rb:245-264) -- the exact mechanism that already makes a
+    # malformed String classify `unknown` instead of raising. A `readline`
+    # that always fails, however broken, is indistinguishable from outside
+    # REXML from REXML's OWN read strategy hitting that same rescue against
+    # a perfectly ordinary File -- measured on 7 real fixtures (DOCTYPE
+    # internal subsets, UTF-16), where `readline` fails only after 6-10
+    # PRIOR successful `readline` calls on the very same object. So this
+    # fault is never escalated: doing so broke ordinary, already-shipped
+    # fixtures (see "classifies a File source unknown" above), and `unknown`
+    # is always the safe direction here regardless of which case it was.
+    it "absorbs a fault in the caller's own readline as unknown, matching REXML's own contract" do
+      clean = File.binread(path_for("rect_and_line"))
+      always_broken = Class.new(StringIO) do
+        define_method(:readline) { |*| raise "caller fault via readline" }
+      end
+
+      expect(classify_source(always_broken.new(clean))).to eq("unknown")
     end
 
     it "refuses a source of the wrong type instead of answering about it" do
