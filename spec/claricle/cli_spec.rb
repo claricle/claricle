@@ -4,6 +4,7 @@ require "English"
 require "fileutils"
 require "stringio"
 require "tmpdir"
+require_relative "../support/pdf_builder"
 
 RSpec.describe Claricle::Cli::Runner do
   status = described_class::Status
@@ -586,16 +587,22 @@ RSpec.describe Claricle::Cli::Runner do
 
     # The command must not advertise an operation that is still a stub.
     # Asserting the whole line, because "prints no conform" would also
-    # pass if the command printed nothing at all.
-    it "does not claim conform or convert yet" do
+    # pass if the command printed nothing at all. pdf is the first (and
+    # so far only) format that claims conform, and it claims it alone --
+    # this handler implements conform only, no inspect. Nothing claims
+    # convert yet.
+    it "claims conform only for pdf, and convert for nothing yet" do
       expect { described_class.run(["formats"]) }
-        .to output("emf\tinspect\neps\tinspect\npng\tinspect\n" \
+        .to output("emf\tinspect\neps\tinspect\npdf\tconform\npng\tinspect\n" \
                    "ps\tinspect\nsvg\tinspect\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
-      rows = %w[emf eps png ps svg].map do |format|
-        %({"format":"#{format}","inspect":true,"conform":false,"convert":false,"convert_to":[]})
+      inspects = { "emf" => true, "eps" => true, "pdf" => false, "png" => true, "ps" => true, "svg" => true }
+      conforms = { "emf" => false, "eps" => false, "pdf" => true, "png" => false, "ps" => false, "svg" => false }
+      rows = %w[emf eps pdf png ps svg].map do |format|
+        %({"format":"#{format}","inspect":#{inspects.fetch(format)},) +
+          %("conform":#{conforms.fetch(format)},"convert":false,"convert_to":[]})
       end
       expected = "[#{rows.join(",")}]\n"
 
@@ -603,15 +610,27 @@ RSpec.describe Claricle::Cli::Runner do
     end
   end
 
-  # No handler implements conformance_report yet, so every format answers
-  # UnsupportedFormat and the reachable codes are 2 and 3. Exit 0 and 1
-  # arrive end to end with the first handler.
+  # pdf implements conformance_report now; the rest of these formats never
+  # touched their handlers in this branch, so they carry the exit-3
+  # UnsupportedFormat story on. Exit 0 and 1 arrive end to end through pdf,
+  # the first handler.
   describe "conform" do
     fixtures = File.join(__dir__, "..", "fixtures", "inspect")
 
     workspace = lambda do |*names, &block|
       Dir.mktmpdir do |dir|
         names.each { |name, source| FileUtils.cp(File.join(fixtures, source), File.join(dir, name)) }
+        Dir.chdir(dir, &block)
+      end
+    end
+
+    # A parallel workspace for pdf: its fixtures are built on demand by
+    # `PdfBuilder`, not sourced from `spec/fixtures/inspect`, so `source`
+    # here is already the absolute path `PdfBuilder.path` returns rather
+    # than a filename to join against `fixtures`.
+    pdf_workspace = lambda do |*names, &block|
+      Dir.mktmpdir do |dir|
+        names.each { |name, source| FileUtils.cp(source, File.join(dir, name)) }
         Dir.chdir(dir, &block)
       end
     end
@@ -644,6 +663,35 @@ RSpec.describe Claricle::Cli::Runner do
         expect(described_class.run(%w[conform a.png], output: StringIO.new)).to eq(3)
         expect { described_class.run(%w[conform a.png], output: StringIO.new) }
           .to output(/:png is not supported for conform/).to_stderr
+      end
+    end
+
+    # The first real conformance verdicts to reach the CLI end to end: pdf
+    # implements conformance_report now, so 0 and 1 are reachable without a
+    # stub.
+    it "exits 0 for a conformant PDF, and prints its verdict" do
+      pdf_workspace.call(["a.pdf", PdfBuilder.path(name: "cli-valid")]) do
+        expect(described_class.run(%w[conform a.pdf], output: StringIO.new)).to eq(0)
+        expect { described_class.run(%w[conform a.pdf], output: StringIO.new) }
+          .to output("a.pdf: yes\n").to_stdout
+      end
+    end
+
+    # The specific mapped issue (severity, code, message, location) is
+    # pinned in pdf_spec.rb; this end-to-end check is only that the
+    # error line for a real nonconformant file reaches stdout with the
+    # RIGHT code. Anchored to the full code, not a `PDF_STRUCTURE`
+    # prefix match: the handler defines two codes, `PDF_STRUCTURE` (a
+    # string `Validator.validate` returned) and
+    # `PDF_STRUCTURE_UNREADABLE` (a raise it caught) -- a catalog-less
+    # fixture hits the second, and an unanchored prefix match cannot
+    # tell the two apart.
+    it "exits 1 for a nonconformant PDF, with an error line on stdout" do
+      catalog_less = PdfBuilder.path(name: "cli-catalog-less", trailer: "<< /Size 4 >>")
+      pdf_workspace.call(["a.pdf", catalog_less]) do
+        expect(described_class.run(%w[conform a.pdf], output: StringIO.new)).to eq(1)
+        expect { described_class.run(%w[conform a.pdf], output: StringIO.new) }
+          .to output(/\Aa\.pdf: no\n {2}error \[PDF_STRUCTURE_UNREADABLE\]/).to_stdout
       end
     end
 
@@ -742,6 +790,21 @@ RSpec.describe Claricle::Cli::Runner do
           expect(rows.first["status"]).to eq("error")
           expect(rows.first["exit_code"]).to eq(3)
           expect(rows.first["error"]["code"]).to eq("Claricle::UnsupportedFormat")
+        end
+      end
+
+      # A conformant file's real envelope, contrasted with the failure
+      # shape above: `result` carries the Report, `error` stays nil.
+      it "carries the whole envelope for a conformant file" do
+        pdf_workspace.call(["a.pdf", PdfBuilder.path(name: "cli-json-valid")]) do
+          rendered = capture_stdout { described_class.run(%w[conform a.pdf --json]) }
+          rows = JSON.parse(rendered)
+
+          expect(rows.length).to eq(1)
+          expect(rows.first["status"]).to eq("ok")
+          expect(rows.first["exit_code"]).to eq(0)
+          expect(rows.first["error"]).to be_nil
+          expect(rows.first["result"]["valid"]).to eq("yes")
         end
       end
 
