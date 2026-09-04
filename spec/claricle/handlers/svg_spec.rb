@@ -1127,10 +1127,25 @@ RSpec.describe "Claricle SVG handler" do
     # is what pins the encoding retag: both arms arrive binary-tagged --
     # `Image#initialize` normalises content to ASCII-8BIT and a path is
     # opened "rb" -- and without the retag that row alone goes red.
+    #
+    # `large_sound_document` matters specifically: every other row here is
+    # under 100 bytes, so a mutant that capped the IO arm's read at 8192
+    # bytes -- the exact bound `Detector.read_root` uses elsewhere in this
+    # file -- would pass every one of them. 21046 bytes is comfortably past
+    # that bound and past `inspection`'s own 8192-byte prefix read, so a
+    # regression toward that bound truncates a genuinely well-formed
+    # document mid-element and the IO arm reports it broken while the
+    # String arm still reports it sound -- the two arms disagree, which is
+    # exactly what this example exists to catch. Do not shrink it.
+    def large_sound_document
+      %(<svg xmlns="#{svg_ns}">#{"<rect/>" * 3000}</svg>)
+    end
+
     it "reaches the same verdict from a String and from a file" do
       documents = sound_documents.values +
                   malformed_documents.values.map(&:first) +
-                  [%(<svg xmlns="#{svg_ns}"/><g/>), %(<漢 xmlns="#{svg_ns}"/>)]
+                  [%(<svg xmlns="#{svg_ns}"/><g/>), %(<漢 xmlns="#{svg_ns}"/>),
+                   large_sound_document]
 
       documents.each do |source|
         expect(triples(scan_file(source.b))).to eq(triples(scan(source.b))), "for #{source[0, 40].inspect}"
