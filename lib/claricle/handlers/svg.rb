@@ -282,7 +282,10 @@ module Claricle
           # the wrapped class is either an ArgumentError or an
           # Encoding::InvalidByteSequenceError -- both are ENCODING
           # failures rather than well-formedness ones, and
-          # UNDECODABLE_CAUSES names both. Routing on the OUTER
+          # UNDECODABLE_CAUSES names ArgumentError and the wider
+          # EncodingError, which InvalidByteSequenceError subclasses, so
+          # a sibling EncodingError REXML has not been measured wrapping
+          # yet is still caught. Routing on the OUTER
           # exception class alone would file them under
           # svg.not_well_formed.
           #
