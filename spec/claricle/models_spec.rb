@@ -1557,6 +1557,175 @@ RSpec.describe Claricle::Models do
     end
   end
 
+  # One homogeneous envelope per file in a batch, so a consumer switches on
+  # `status` rather than testing whether `error` happens to be present.
+  describe "BatchItem" do
+    report = ->(**rest) { models::Report.new(source_path: "a.png", **rest) }
+    failure = ->(**rest) { models::BatchError.new(code: "Claricle::UnknownFormat", **rest) }
+
+    describe "#status" do
+      it "is ok for a result classified zero" do
+        item = models::BatchItem.new(path: "a.png", exit_code: 0, result: report.call)
+        expect(item.status).to eq("ok")
+      end
+
+      # The operation ran and answered no. A stored status could disagree
+      # with the code beside it; a derived one cannot.
+      it "is failed for a result classified non-zero" do
+        item = models::BatchItem.new(path: "a.png", exit_code: 1, result: report.call)
+        expect(item.status).to eq("failed")
+      end
+
+      it "is error when the operation could not run at all" do
+        item = models::BatchItem.new(path: "a.png", exit_code: 3,
+                                     error: failure.call(message: "no signature"))
+        expect(item.status).to eq("error")
+      end
+
+      # The mutation a plain `exit_code.zero?` test cannot catch: an
+      # operational failure that happens to carry a zero code is still an
+      # error, not a success.
+      it "is error even when the code is zero" do
+        item = models::BatchItem.new(path: "a.png", exit_code: 0,
+                                     error: failure.call(message: "no signature"))
+        expect(item.status).to eq("error")
+      end
+
+      it "is serialized as a string" do
+        item = models::BatchItem.new(path: "a.png", exit_code: 1, result: report.call)
+        expect(JSON.parse(item.to_json)["status"]).to eq("failed")
+      end
+
+      # Recomputed on the way back in, so a document cannot assert a status
+      # its own fields contradict.
+      it "recomputes rather than trusting an incoming status" do
+        lying = %({"path":"a.png","status":"ok","exit_code":3,) +
+                %("error":{"code":"Claricle::UnknownFormat","message":"no signature"}})
+        reloaded = models::BatchItem.from_json(lying)
+
+        expect(reloaded.status).to eq("error")
+        expect(JSON.parse(reloaded.to_json)["status"]).to eq("error")
+      end
+
+      # The other door. `status` is a stored attribute, so a caller can hand
+      # one in directly -- and the value they hand in must not survive
+      # either, or the field means whatever the last writer said.
+      it "recomputes rather than trusting a supplied status" do
+        item = models::BatchItem.new(path: "a.png", exit_code: 1,
+                                     status: "ok", result: report.call)
+
+        expect(item.status).to eq("failed")
+        expect(JSON.parse(item.to_json)["status"]).to eq("failed")
+      end
+    end
+
+    describe "exit_code" do
+      # lutaml's own :integer casts before anything can look at the value --
+      # measured on 0.8.19: "3" becomes 3, true becomes 1, -0.5 becomes 0 and
+      # 1.9 becomes 1 -- so a range check running after that would validate a
+      # number the caller never gave. Location has the same problem and the
+      # same answer.
+      ["3", true, -0.5, 1.9].each do |value|
+        it "refuses #{value.inspect}, which lutaml would have coerced" do
+          expect { models::BatchItem.new(path: "a.png", exit_code: value) }
+            .to raise_error(
+              Lutaml::Model::ValidationError,
+              /exit_code expects an Integer in 0\.\.255, got #{Regexp.escape(value.inspect)}/
+            )
+        end
+      end
+
+      # Both ends, because a process status has to be a byte -- the same
+      # range Cli::Runner::Status enforces.
+      [-1, 256].each do |value|
+        it "refuses #{value}, outside a byte" do
+          expect { models::BatchItem.new(path: "a.png", exit_code: value) }
+            .to raise_error(Lutaml::Model::ValidationError, /0\.\.255/)
+        end
+      end
+
+      [0, 255].each do |value|
+        it "accepts #{value}, at the edge of a byte" do
+          expect(models::BatchItem.new(path: "a.png", exit_code: value).exit_code).to eq(value)
+        end
+      end
+
+      it "refuses a document carrying a coercible string" do
+        expect { models::BatchItem.from_json(%({"path":"a.png","exit_code":"3"})) }
+          .to raise_error(Lutaml::Model::ValidationError, /exit_code/)
+      end
+    end
+
+    describe "required attributes" do
+      it "refuses an item with no path" do
+        expect { models::BatchItem.new(exit_code: 0) }
+          .to raise_error(Lutaml::Model::ValidationError, /path/)
+      end
+
+      it "refuses an item with no exit code" do
+        expect { models::BatchItem.new(path: "a.png") }
+          .to raise_error(Lutaml::Model::ValidationError, /exit_code/)
+      end
+
+      it "refuses an error with no code" do
+        expect { models::BatchError.new(message: "m") }
+          .to raise_error(Lutaml::Model::ValidationError, /code/)
+      end
+
+      it "refuses an error with no message" do
+        expect { models::BatchError.new(code: "c") }
+          .to raise_error(Lutaml::Model::ValidationError, /message/)
+      end
+    end
+
+    it "carries a nested report through a round trip" do
+      item = models::BatchItem.new(path: "a.png", exit_code: 1,
+                                   result: report.call(issues: [issue["error"]]))
+      reloaded = models::BatchItem.from_json(item.to_json)
+
+      expect(reloaded.result.valid).to eq(:no)
+      expect(reloaded.result.issues.map(&:message)).to eq(["m"])
+    end
+
+    it "carries a nested error through a round trip" do
+      item = models::BatchItem.new(path: "a.png", exit_code: 3,
+                                   error: failure.call(message: "no signature"))
+      reloaded = models::BatchItem.from_json(item.to_json)
+
+      expect([reloaded.error.code, reloaded.error.message])
+        .to eq(["Claricle::UnknownFormat", "no signature"])
+    end
+
+    # nested_models wiring: without it the lifecycle stops at the envelope
+    # and a nested model is handed back mutable. A hand-built item cannot
+    # tell this apart from a bug: `report.call`/`failure.call` are already
+    # sealed by their OWN construction before BatchItem ever sees them, so
+    # the assertion holds whether or not `nested_models` lists them --
+    # measured, deleting it leaves the suite green. Deserialization is
+    # where the cascade is load-bearing: `Base#initialize` skips its own
+    # `finalize` while the DESERIALIZING flag is set and relies on the
+    # parent's `nested_models.each(&:validate_deeply)` to seal the
+    # children, so only a round trip can catch this dropping.
+    it "seals what it carries, not only itself" do
+      item = models::BatchItem.new(path: "a.png", exit_code: 3,
+                                   result: report.call, error: failure.call(message: "m"))
+      reloaded = models::BatchItem.from_json(item.to_json)
+
+      expect([reloaded, reloaded.result, reloaded.error]).to all(be_frozen)
+    end
+
+    # A single result and a batch have to look the same to a consumer, so
+    # the collection form is what both the CLI and a Ruby caller render.
+    it "serializes a collection as a JSON array" do
+      items = [models::BatchItem.new(path: "a.png", exit_code: 0, result: report.call),
+               models::BatchItem.new(path: "b.png", exit_code: 3,
+                                     error: failure.call(message: "no signature"))]
+
+      expect(JSON.parse(models::BatchItem.to_json(items)).map { |row| row["path"] })
+        .to eq(%w[a.png b.png])
+    end
+  end
+
   describe "public surface" do
     # Written out rather than looped, because `const_get` walks straight
     # past private_constant and only a literal reference raises.
@@ -1577,7 +1746,8 @@ RSpec.describe Claricle::Models do
     end
 
     it "lists none of them among its constants" do
-      expect(described_class.constants).to contain_exactly(:Location, :Issue, :Report, :Inspection)
+      expect(described_class.constants)
+        .to contain_exactly(:BatchError, :BatchItem, :Inspection, :Issue, :Location, :Report)
     end
 
     # `meta` still hands back a plain Hash, so hiding the type takes
