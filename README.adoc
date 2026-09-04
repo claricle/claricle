@@ -216,13 +216,14 @@ lib/claricle/
   version.rb           # VERSION
   detector.rb          # magic-byte and XML-root format detection
   image.rb             # the object every operation takes
+  lossiness.rb         # what a conversion loses, read from the source document
   registry.rb          # frozen format -> handler map
   handlers/base.rb     # what a handler subclasses
   handlers/metafile.rb # EMF header metadata
   handlers/png.rb      # PNG metadata
   handlers/postscript.rb # EPS and PS DSC header metadata
   handlers/svg.rb      # SVG root metadata
-  models/              # Location, Issue, Report, Inspection
+  models/              # Location, Issue, Report, Inspection, Conversion
   errors.rb            # Error, UnknownFormat, UnsupportedFormat, ...
   cli.rb               # Thor CLI and the exit-code Runner
 ----
@@ -249,8 +250,8 @@ Not one file. A new format costs:
   per-handler sniffer, because the probes are heterogeneous and their
   order is load-bearing
 . for an inbound conversion, an entry in the source handler's target
-  list together with its feature-loss rules. Neither exists in `lib/`
-  yet; both arrive with `convert`
+  list together with its feature-loss rules. The loss rules live in
+  `lossiness.rb`; the target list arrives with `convert`
 
 == Installation
 
@@ -274,6 +275,24 @@ Or install it yourself as:
 ----
 $ gem install claricle
 ----
+
+== Conversion lossiness
+
+Whether a conversion loses anything is decided per conversion, from what the
+source document actually contains -- not from a table of format pairs. The same
+edge is clean for a rectangle and destructive for a gradient, so a per-edge
+label would call the second one lossless on the first one's evidence.
+
+A verdict is one of `lossless`, `lossy` or `unknown`, published as
+`Models::Conversion::LOSSINESS_LEVELS`. `unknown` is the default: a `lossless`
+verdict is a positive claim and is made only when every feature the document
+contains has been shown to survive that target. `lossy` and `unknown` both tell
+you to look; only `lossless` tells you not to, so only `lossless` can hide a
+loss.
+
+The model class `Models::Conversion` and its vocabulary
+`Conversion::LOSSINESS_LEVELS` are public. `Lossiness` and
+`Models::BinaryContent` are private constants.
 
 == Development
 
