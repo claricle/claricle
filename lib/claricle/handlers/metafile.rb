@@ -5,7 +5,6 @@ require "emf"
 require_relative "base"
 require_relative "../models/inspection"
 require_relative "../models/issue"
-require_relative "../models/location"
 
 module Claricle
   module Handlers
