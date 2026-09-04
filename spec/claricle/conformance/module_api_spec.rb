@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "tmpdir"
+require "fileutils"
 
 RSpec.describe "Claricle conformance API" do
   fixtures = File.expand_path("../../fixtures/inspect", __dir__)
