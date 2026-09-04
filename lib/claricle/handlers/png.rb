@@ -281,14 +281,18 @@ module Claricle
         # constructor), so nothing here needs to hand over an
         # already-open file.
         def self.mapped_issues(image)
-          context = image.with_path do |path|
-            reader = ::PngConform::Readers::FullLoadReader.new(path)
-            service = ::PngConform::Services::ValidationService.new(reader, path)
-            service.validate
-            service.context
-          end
+          context = image.with_path { |path| validated_context(path) }
 
           (context.all_errors + context.all_warnings + context.all_info).map { |raw| issue_from(raw) }
+        end
+
+        def self.validated_context(path)
+          reader = ::PngConform::Readers::FullLoadReader.new(path)
+          service = ::PngConform::Services::ValidationService.new(reader, path)
+          service.validate
+          service.context
+        ensure
+          reader&.close
         end
 
         def self.issue_from(raw)
@@ -315,7 +319,8 @@ module Claricle
           Models::Issue.new(severity: "error", code: MALFORMED_CODE, message: MALFORMED_MESSAGE)
         end
 
-        private_class_method :report_for, :mapped_issues, :issue_from, :location_for, :malformed_issue
+        private_class_method :report_for, :mapped_issues, :validated_context,
+                             :issue_from, :location_for, :malformed_issue
       end
 
       private_constant :ConformanceMapper

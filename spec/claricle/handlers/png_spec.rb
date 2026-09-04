@@ -712,6 +712,20 @@ RSpec.describe "Claricle PNG handler" do
       )
     end
 
+    # FullLoadReader.new(path) opens its own File handle (@owns_io = true)
+    # and exposes #close for exactly that reason -- leaving it open leaks a
+    # file descriptor per conformance check until GC finalizes it.
+    it "closes the reader's file handle rather than leaking it" do
+      opened_reader = nil
+      allow(PngConform::Readers::FullLoadReader).to receive(:new).and_wrap_original do |method, *args|
+        opened_reader = method.call(*args)
+      end
+
+      Claricle::Image.from_path(conform_fixture("valid.png")).conformance_report
+
+      expect(opened_reader.io).to be_closed
+    end
+
     # missing_idat.png is PngSuite's xdtn0g01.png: a PNG missing its IDAT
     # chunk entirely. One fixture, two rows, deliberately -- one issue
     # carries a real chunk offset and the other carries none, so both
