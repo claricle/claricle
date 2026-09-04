@@ -12,33 +12,59 @@ module Claricle
   class Writer
     STDOUT_DESTINATION = "-"
 
-    # The three ways a name is compared, and they are not interchangeable:
-    # `fold` compares spellings, `raw_canonical` compares locations, and
-    # `key_for` compares files.
+    # The comparisons a name goes through, and the authorities that answer
+    # them. `normalize` folds Unicode spellings and is UNCONDITIONAL --
+    # comparing canonicalized strings costs nothing and needs no probe.
+    # `fold` additionally folds case, which is a filesystem property the
+    # probe must be asked about. Collapsing the two into one function and
+    # letting a single probe verdict settle both is R-10: on a case-
+    # sensitive, normalizing filesystem a pair differing only in Unicode
+    # spelling was silently accepted as distinct and one file overwrote the
+    # other, exit 0, no warning. `fold` calls `normalize` rather than
+    # repeating its guard, so the totality proof has one copy and cannot
+    # drift between the two. `raw_canonical` compares locations and
+    # `key_for` compares files -- neither is either of these.
     module Naming
       module_function
 
       # TOTAL, and the property is what makes it total rather than a list
-      # of cases. `unicode_normalize` and `downcase(:fold)` are defined for
-      # exactly those strings whose BYTES are valid UTF-8 read as UTF-8;
-      # everything else raises Encoding::CompatibilityError (a non-Unicode
-      # encoding) or ArgumentError (an invalid byte sequence). So the guard
-      # reinterprets the bytes as UTF-8 and tests validity THERE -- one
-      # predicate covering both failure modes. Testing the name AS TAGGED
-      # is not enough: "Logo.svg".b is valid ASCII-8BIT and still raises.
+      # of cases. `unicode_normalize` is defined for exactly those strings
+      # whose BYTES are valid UTF-8 read as UTF-8; everything else raises
+      # Encoding::CompatibilityError (a non-Unicode encoding) or
+      # ArgumentError (an invalid byte sequence). So the guard reinterprets
+      # the bytes as UTF-8 and tests validity THERE -- one predicate
+      # covering both failure modes. Testing the name AS TAGGED is not
+      # enough: "Logo.svg".b is valid ASCII-8BIT and still raises.
       #
-      # The fallback ASCII-case-folds rather than returning the name raw.
-      # Returning it raw misses a collision the card forbids -- A\xFF.svg
-      # and a\xFF.svg are one file on a case-folding volume. Full Unicode
-      # folding is undefined on invalid bytes; ASCII case folding is
-      # defined on any byte string, and it cannot over-reject, because
-      # folding decides only GROUPING and a grouped pair is then handed to
-      # the probe, which answers "distinct" on a case-sensitive volume.
-      def fold(name)
+      # The fallback returns the raw bytes UNCHANGED -- no case folding
+      # here. Case folding belongs to `fold` alone; doing it here too would
+      # let the two equivalences drift back into one, which is R-10.
+      def normalize(name)
         utf8 = name.dup.force_encoding(Encoding::UTF_8)
-        return name.b.tr("A-Z", "a-z") unless utf8.valid_encoding?
+        return name.b unless utf8.valid_encoding?
 
-        utf8.unicode_normalize(:nfc).downcase(:fold)
+        utf8.unicode_normalize(:nfc)
+      end
+
+      # `normalize`'s guard-and-NFC half, plus case folding. The fallback
+      # ASCII-case-folds rather than returning the name raw. Returning it
+      # raw misses a collision the card forbids -- A\xFF.svg and a\xFF.svg
+      # are one file on a case-folding volume. Full Unicode folding is
+      # undefined on invalid bytes; ASCII case folding is defined on any
+      # byte string, and it cannot over-reject, because folding decides
+      # only GROUPING and a grouped pair is then handed to the probe, which
+      # answers "distinct" on a case-sensitive volume.
+      #
+      # `normalized.encoding == Encoding::BINARY` is the fallback
+      # discriminator, and it is faithful rather than clever: `normalize`
+      # returns UTF-8 on the Unicode path (`unicode_normalize` always does)
+      # and ASCII-8BIT on the fallback path (`name.b` always does), so the
+      # encoding records which branch ran and cannot disagree with it.
+      def fold(name)
+        normalized = normalize(name)
+        return normalized.tr("A-Z", "a-z") if normalized.encoding == Encoding::BINARY
+
+        normalized.downcase(:fold)
       end
 
       # File.realdirpath is unusable here: it resolved /var to /private/var
@@ -134,6 +160,7 @@ module Claricle
         keys = @destinations.map { |dest| [dest, Naming.key_for(dest)] }
         refuse_sources(keys)
         refuse_duplicates(keys)
+        refuse_normalization_collisions(keys)
         refuse_fold_collisions(keys)
       end
 
@@ -226,6 +253,25 @@ module Claricle
         end
       end
 
+      # Pass 2, by NORMALIZED spelling. UNCONDITIONAL -- no probe is
+      # consulted and none is possible: the case probe answers a question
+      # about CASE, and a pair that differs only in Unicode spelling is not
+      # distinguished by case at all. Collapsing this into the fold pass
+      # (pass 3) and letting one probe verdict settle both is R-10: it let
+      # a file be silently overwritten on a case-sensitive, normalizing
+      # filesystem.
+      def refuse_normalization_collisions(keys)
+        planned(keys)
+          .group_by { |_dest, key| [File.dirname(key), Naming.normalize(File.basename(key))] }
+          .each_value do |group|
+            next if group.size == 1
+
+            raise InvocationError,
+                  "two outputs are the same name in different Unicode spellings: " \
+                  "#{group.map(&:first).join(", ")}"
+          end
+      end
+
       def refuse_fold_collisions(keys)
         fold_groups(keys).each do |(dir, _folded), group|
           next if group.size == 1
@@ -239,9 +285,19 @@ module Claricle
       # raw dirname makes both passes miss the same file: out/Q.svg and
       # linkdir/q.svg where linkdir -> out land in different groups, and
       # the second write destroys the first.
+      #
+      # No filtering beyond `planned`: pass 2 already refused the whole
+      # batch on any normalization collision, so everything reaching here
+      # is normalization-distinct by construction.
       def fold_groups(keys)
+        planned(keys).group_by { |_dest, key| [File.dirname(key), Naming.fold(File.basename(key))] }
+      end
+
+      # Shared between pass 2 and pass 3 (fold_groups). A String key means
+      # File.stat did not resolve, which is what "planned, not yet on disk"
+      # means here.
+      def planned(keys)
         keys.select { |_dest, key| key.is_a?(String) }
-            .group_by { |_dest, key| [File.dirname(key), Naming.fold(File.basename(key))] }
       end
 
       # fetch with a block, never `||=`: `measure` returns FALSE on a

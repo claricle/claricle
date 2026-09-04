@@ -99,6 +99,19 @@ RSpec.describe "Claricle::Writer" do
         .to eq([true, true, true, true, false, true, true, true, true])
     end
 
+    it "normalizes Unicode spellings without folding case" do # U14
+      # The unit pin for the tier split: this is what stops `normalize`
+      # quietly drifting back into `fold`, which is R-10. Hardcoded oracle,
+      # no filesystem involved, identical on every platform.
+      nfc = "\u00E9" # e with acute accent, NFC: one codepoint
+      nfd = "e\u0301" # the same letter, NFD: e + combining acute accent
+
+      expect(naming.normalize(nfc)).to eq(naming.normalize(nfd))
+      expect(naming.normalize("Q")).not_to eq(naming.normalize("q"))
+      expect(naming.normalize("A\xFF".b)).not_to eq(naming.normalize("a\xFF".b))
+      expect(naming.normalize("\xFE\xFF.svg".b)).to eq("\xFE\xFF.svg".b)
+    end
+
     it "ASCII-case-folds a non-UTF-8 name without over-folding a different letter" do # U2
       expect(naming.fold("A\xFF.svg".b)).to eq(naming.fold("a\xFF.svg".b))
       expect(naming.fold("B\xFF.svg".b)).not_to eq(naming.fold("A\xFF.svg".b))
@@ -211,6 +224,29 @@ RSpec.describe "Claricle::Writer" do
       expect(probed).to eq([File.realpath(dir)])
     end
 
+    # Every previous fold example has exactly ONE group, so any one-group
+    # truncation of the iteration kept the only group there was and
+    # survived. The probe is stubbed to true (as U12/U13 already stub it)
+    # so this holds on a case-sensitive volume too, where a real probe
+    # answers "distinct" and nothing would be raised in either direction.
+    it "refuses a fold collision wherever its group sits among several" do # U15
+      allow(case_probe).to receive(:measure).and_return(true)
+      colliding = ["Q1.svg", "q1.svg"].map { |name| File.join(dir, name) }
+      solo_a = File.join(dir, "solo-a.svg")
+      solo_b = File.join(dir, "solo-b.svg")
+
+      arrangements = [
+        colliding + [solo_a], # collision first
+        [solo_a] + colliding,                 # collision last
+        [solo_a] + colliding + [solo_b]       # collision mid, with a trailer
+      ]
+
+      arrangements.each do |destinations|
+        expect { writer.new(destinations, sources: []) }
+          .to raise_error(Claricle::InvocationError, /collide on a case-insensitive filesystem/)
+      end
+    end
+
     # A Pathname reaches here in practice -- image.rb converts one for the
     # same reason -- and both of these worked until the name guards were
     # added on the object instead of on its name.
@@ -252,8 +288,13 @@ RSpec.describe "Claricle::Writer" do
       %w[hard.svg soft.svg].each do |name|
         offender = File.join(dir, name)
         [[offender], [innocent, offender, trailer]].each do |destinations|
-          expect { writer.new(destinations, sources: [other_source, source], force: true) }
-            .to raise_error(Claricle::InvocationError, /overwrite an input/)
+          # The aliasing source appears both last and first among
+          # @sources -- an `@sources.last(1).to_h` truncation survived
+          # while it was always last.
+          [[other_source, source], [source, other_source]].each do |sources|
+            expect { writer.new(destinations, sources: sources, force: true) }
+              .to raise_error(Claricle::InvocationError, /overwrite an input/)
+          end
         end
       end
       expect(File.binread(source)).to eq("SOURCE")
@@ -261,19 +302,27 @@ RSpec.describe "Claricle::Writer" do
     end
 
     it "refuses two destinations that are the same file, even with force" do # E2
-      # Both pairs sit AFTER an innocent destination, for the reason
-      # given in E1.
       innocent = File.join(dir, "innocent.svg")
       repeat = File.join(dir, "fresh.svg")
-      expect { writer.new([innocent, repeat, repeat], sources: [], force: true) }
-        .to raise_error(Claricle::InvocationError, /same file/)
+      trailer = File.join(dir, "trailer.svg")
+
+      # The colliding group appears both last (behind an innocent
+      # destination) and first (ahead of a trailing innocent one) -- a
+      # `.values.last(1)` truncation survived while the group was always
+      # last.
+      [[innocent, repeat, repeat], [repeat, repeat, trailer]].each do |destinations|
+        expect { writer.new(destinations, sources: [], force: true) }
+          .to raise_error(Claricle::InvocationError, /same file/)
+      end
 
       one = File.join(dir, "one.svg")
       File.binwrite(one, "X")
       two = File.join(dir, "two.svg")
       File.link(one, two)
-      expect { writer.new([innocent, one, two], sources: [], force: true) }
-        .to raise_error(Claricle::InvocationError, /same file/)
+      [[innocent, one, two], [one, two, trailer]].each do |destinations|
+        expect { writer.new(destinations, sources: [], force: true) }
+          .to raise_error(Claricle::InvocationError, /same file/)
+      end
     end
 
     it "treats a Logo.svg/logo.svg pair as this volume treats it" do # E3
@@ -506,6 +555,22 @@ RSpec.describe "Claricle::Writer" do
       lower = File.join(dir, "a\xFF.svg".b)
 
       expect(outcome_of.call([upper, lower])).to eq(folds_case.call(dir) ? :refused : :constructed)
+    end
+
+    # R-10's blocker: a PURE normalization pair, identical case, refused
+    # WHATEVER this volume does about case -- pass 2 takes no probe, so
+    # this deliberately does not branch on folds_case the way E3/E4/E28 do.
+    # A branching assertion here would re-introduce exactly the filesystem
+    # dependence that caused the silent overwrite. Escapes, never literal
+    # characters -- the two spellings are visually identical, and a
+    # literal pair is normalized in transit by an editor, silently making
+    # the row a no-op.
+    it "refuses a pure normalization pair whatever this volume does about case" do # E36
+      nfc = File.join(dir, "Logo\u00E9.svg") # NFC: one codepoint for e-acute
+      nfd = File.join(dir, "Logoe\u0301.svg") # NFD: e + combining acute accent
+
+      expect { writer.new([nfc, nfd], sources: []) }
+        .to raise_error(Claricle::InvocationError, /different Unicode spellings/)
     end
   end
 
