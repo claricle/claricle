@@ -224,11 +224,12 @@ module Claricle
       # leak raw contradicted the contract these comments state. It is raised
       # here, outside the parse, for the same reason they are.
       def refuse_unreadable(source)
-        # `respond_to?` first, and `String ===` rather than `source.is_a?`:
-        # a caller may hand over a bare BasicObject exposing only the reader
-        # methods, and asking such a source `is_a?` is itself a forbidden
-        # call -- measured, it broke the bounded-IO example. `Module#===`
-        # tests the object without dispatching a method to it.
+        # `respond_to?` first, then the ORIGINAL `Object#is_a?` bound and
+        # called via `bind_call`, never `source.is_a?`: a caller may hand
+        # over a bare BasicObject exposing only the reader methods, and
+        # dispatching `is_a?` straight to it is itself a forbidden call --
+        # measured, it broke the bounded-IO example. `bind_call` runs the
+        # real method without depending on `source` still having it.
         return if source.respond_to?(:read) || CORE_INSTANCE.bind_call(source, ::String)
 
         raise InvocationError, "source must be a String or a readable IO"
