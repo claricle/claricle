@@ -5,9 +5,54 @@ require "emf"
 require_relative "base"
 require_relative "../models/inspection"
 require_relative "../models/issue"
+require_relative "../models/location"
 
 module Claricle
   module Handlers
+    # Record framing: where a record starts and stops, and which one ends the
+    # stream.
+    #
+    # Beside `EmfPlus` rather than inside it: `EmfPlus` is about what an EMF+
+    # carrier holds -- which record type carries it, the signature, and how
+    # much payload to count -- while this is the vocabulary that walking the
+    # records consults. `EmfStructure` walks the same vocabulary to a
+    # different end, so a rule here changes both walks, which is why it is
+    # stated once and in neither of them.
+    module EmfRecords
+      # EMR_EOF closes the stream.
+      EOF_RECORD = 14
+      # EMR_EOF is Type, Size, nPalEntries, offPalEntries and SizeLast,
+      # so a shorter type-14 record is not an end of stream at all. The
+      # delegate records such a record as Raw and keeps going, and a
+      # carrier after it is real: measured, with nSize 8, 12 or 16 the
+      # gem still finds 12 bytes of EMF+ where stopping finds none.
+      EOF_RECORD_BYTES = 20
+      RECORD_HEADER_BYTES = 8
+      ALIGNMENT = 4
+
+      # A record must declare a size that is aligned, at least a header
+      # long, and inside what is left. Anything else means the framing is
+      # broken and neither walk can continue: `EmfPlus` stops totalling, and
+      # the structural pre-pass reports `emf.record_framing` at this offset.
+      # The minimum also guarantees forward progress: a record declaring zero
+      # would otherwise pin the walk on one offset forever.
+      def self.record_at(content, offset)
+        return nil if content.bytesize - offset < RECORD_HEADER_BYTES
+
+        type, size = content.byteslice(offset, RECORD_HEADER_BYTES).unpack("VV")
+        return nil if size < RECORD_HEADER_BYTES || !(size % ALIGNMENT).zero?
+        return nil if size > content.bytesize - offset
+
+        [type, size]
+      end
+
+      # 20 bytes is the MINIMUM, not the size -- a writer may pad an EMR_EOF,
+      # and a bigger one still closes the stream.
+      def self.eof?(type, size)
+        type == EOF_RECORD && size >= EOF_RECORD_BYTES
+      end
+    end
+
     # Finds EMF+ by walking the record framing, because the delegate
     # cannot answer the question. emf 0.1.0 does not parse EMF+ at all --
     # its EMF+ parser is unimplemented, and its full pass only recognises
@@ -24,22 +69,13 @@ module Claricle
     # header field. Only the marker hunt is local, and only because
     # upstream's path for it is broken.
     module EmfPlus
-      # EMR_EOF closes the stream and EMR_COMMENT is the only record type
-      # EMF+ travels in. A comment's own header is iType, nSize and
-      # cbData, so its declared payload begins twelve bytes in, and the
-      # signature occupies the first four of those.
-      EOF_RECORD = 14
-      # EMR_EOF is Type, Size, nPalEntries, offPalEntries and SizeLast,
-      # so a shorter type-14 record is not an end of stream at all. The
-      # delegate records such a record as Raw and keeps going, and a
-      # carrier after it is real: measured, with nSize 8, 12 or 16 the
-      # gem still finds 12 bytes of EMF+ where stopping finds none.
-      EOF_RECORD_BYTES = 20
+      # EMR_COMMENT is the only record type EMF+ travels in. A comment's
+      # own header is iType, nSize and cbData, so its declared payload
+      # begins twelve bytes in, and the signature occupies the first four
+      # of those.
       COMMENT_RECORD = 70
-      RECORD_HEADER_BYTES = 8
       COMMENT_HEADER_BYTES = 12
       SIGNATURE = "EMF+".b.freeze
-      ALIGNMENT = 4
 
       # A distinct marker rather than a zero advance. Overloading zero
       # would make a malformed record declaring no size look like a clean
@@ -64,12 +100,12 @@ module Claricle
       # growing past it.
       #
       # The iteration budget handed to `walk` is derived, not chosen. It
-      # exists only so a defect in `record_at` cannot spin the walk on
-      # one offset forever: `record_at` refuses a record declaring fewer
-      # than RECORD_HEADER_BYTES, so every step advances at least that
+      # exists only so a defect in `EmfRecords.record_at` cannot spin the
+      # walk on one offset forever: it refuses a record declaring fewer
+      # than its eight-byte header, so every step advances at least that
       # far, and the content is at most `limit` bytes -- so
-      # `limit / RECORD_HEADER_BYTES` steps always outlast the bytes and
-      # the budget can never bind first.
+      # `limit / EmfRecords::RECORD_HEADER_BYTES` steps always outlast the
+      # bytes and the budget can never bind first.
       #
       # It used to be a flat 500,000 and that WAS a ceiling a real file
       # could hit. EMR_SETMETARGN is a valid parameterless 8-byte record
@@ -87,7 +123,7 @@ module Claricle
       def self.size(content, declared, limit)
         return nil if content.bytesize > limit
 
-        walk(content, declared, limit / RECORD_HEADER_BYTES)
+        walk(content, declared, limit / EmfRecords::RECORD_HEADER_BYTES)
       end
 
       # Broken framing stops the walk and keeps what came before it.
@@ -101,9 +137,9 @@ module Claricle
       # The line after the loop is the budget running out. With the budget
       # derived from the byte limit it cannot be reached at all: offset
       # starts at `declared`, every step adds at least
-      # RECORD_HEADER_BYTES, and `budget` is the byte limit divided by
-      # that, so the end of the content always arrives first. It stays
-      # written for a budget that CAN bind, which is why it still asks
+      # `EmfRecords::RECORD_HEADER_BYTES`, and `budget` is the byte limit
+      # divided by that, so the end of the content always arrives first.
+      # It stays written for a budget that CAN bind, which is why it asks
       # where the offset landed -- a last budgeted step that finished the
       # stream walked it completely and keeps its total, while one that
       # stopped short answers nil, because the remainder it never reached
@@ -134,26 +170,11 @@ module Claricle
       # One record: `[payload, advance]`, `END_OF_STREAM` at EMR_EOF, or
       # nil when the framing is broken.
       def self.step_at(content, offset)
-        type, size = record_at(content, offset)
+        type, size = EmfRecords.record_at(content, offset)
         return nil unless size
-        return END_OF_STREAM if type == EOF_RECORD && size >= EOF_RECORD_BYTES
+        return END_OF_STREAM if EmfRecords.eof?(type, size)
 
         [payload_of(content, offset, type, size), size]
-      end
-
-      # A record must declare a size that is aligned, at least a header
-      # long, and inside what is left. Anything else means the framing is
-      # broken and the walk cannot continue. The minimum also guarantees
-      # forward progress: a record declaring zero would otherwise pin the
-      # walk on one offset forever.
-      def self.record_at(content, offset)
-        return nil if content.bytesize - offset < RECORD_HEADER_BYTES
-
-        type, size = content.byteslice(offset, RECORD_HEADER_BYTES).unpack("VV")
-        return nil if size < RECORD_HEADER_BYTES || !(size % ALIGNMENT).zero?
-        return nil if size > content.bytesize - offset
-
-        [type, size]
       end
 
       # Only the bytes the comment declares are inspected, and only the
@@ -200,7 +221,8 @@ module Claricle
         return 0 unless type == COMMENT_RECORD
         return 0 if size < COMMENT_HEADER_BYTES
 
-        declared = content.byteslice(offset + RECORD_HEADER_BYTES, 4).unpack1("V")
+        declared = content.byteslice(offset + EmfRecords::RECORD_HEADER_BYTES, 4)
+                          .unpack1("V")
         return 0 if declared > size - COMMENT_HEADER_BYTES
         return 0 if declared < SIGNATURE.bytesize
 
@@ -210,10 +232,93 @@ module Claricle
         declared - SIGNATURE.bytesize
       end
 
-      private_class_method :walk, :step_at, :record_at, :payload_of
+      private_class_method :walk, :step_at, :step_forward, :payload_of
     end
 
-    private_constant :EmfPlus
+    # Structural pre-pass: how the record stream ends. Three ways it does not
+    # end properly -- framing breaks, the stream runs out before an EMR_EOF,
+    # or bytes follow the EMR_EOF -- reported as issues the conform report
+    # will carry. Bytes are never read here beyond what `EmfRecords.record_at`
+    # slices; the caller owns the read and its bound.
+    module EmfStructure
+      # `declared` is the caller's contract, not this method's to police: it
+      # arrives from `declared_size`, which yields an Integer, 4-aligned and
+      # at least MINIMUM_HEADER. Non-negative is the property this walk rests
+      # on, and it is worth being exact about what a negative would cost,
+      # because it does not fail one way. Measured on `valid.emf`: -1 raises
+      # NoMethodError, -16 raises Lutaml::Model::ValidationError from a
+      # negative `byte_offset`, and only -88 produces the quiet nonsense of a
+      # `byteslice` counting from the end. Two of those three escape a method
+      # whose contract is to RETURN issues. That is a reason to keep the
+      # contract, not to add a check for an input the handler cannot deliver.
+      #
+      # `declared` is NOT guaranteed to be inside the bytes on hand.
+      # `declared_size` bounds it by `available`, which is the read's own
+      # length under the scan limit but the file's stat above it -- so a stat
+      # reading high admits a declaration the content cannot hold, the
+      # residual written down at `declared_size` itself. No guard is needed
+      # for that either: the loop condition is false from the first step and
+      # the answer is `[missing_eof]`.
+      #
+      # nil means "not examined": over the byte limit nothing was read, and
+      # `[]` would be the stronger claim that the stream ends properly. The
+      # guard is deliberately the same idiom as `EmfPlus.size`'s -- same `>`,
+      # same figure, same reason. That the two walks therefore refuse the same
+      # streams is a claim no spec can pin while this module has no caller;
+      # the PR that wires it owns pinning it.
+      #
+      # The walk's bound is the loop condition, so `record_at` is never
+      # called at `offset == content.bytesize`: a stream ending exactly on a
+      # record boundary is a missing EOF, not broken framing.
+      #
+      # No iteration budget, unlike `EmfPlus.walk`. That budget exists to stop
+      # a defect pinning the walk on one offset forever; here `EmfRecords.record_at`
+      # already refuses a record declaring fewer than its eight-byte header, so
+      # every step advances at least eight bytes and the byte bound is
+      # sufficient on its own.
+      def self.issues(content, declared, limit)
+        return nil if content.bytesize > limit
+
+        offset = declared
+        while offset < content.bytesize
+          type, size = EmfRecords.record_at(content, offset)
+          return [framing(offset)] if size.nil?
+          return trailing(content, offset + size) if EmfRecords.eof?(type, size)
+
+          offset += size
+        end
+        [missing_eof]
+      end
+
+      def self.trailing(content, at)
+        return [] if at >= content.bytesize
+
+        count = content.bytesize - at
+        noun = count == 1 ? "byte follows" : "bytes follow"
+        [issue("emf.trailing_bytes", "#{count} #{noun} the EMR_EOF record",
+               Models::Location.new(byte_offset: at, byte_length: count))]
+      end
+
+      # `record_at` refuses for four different reasons and returns a bare nil
+      # carrying none of them, so the message names the offset and no reason.
+      def self.framing(at)
+        issue("emf.record_framing", "EMF record framing breaks at byte #{at}",
+              Models::Location.new(byte_offset: at))
+      end
+
+      def self.missing_eof
+        issue("emf.missing_eof", "EMF record stream ends without an EMR_EOF record", nil)
+      end
+
+      def self.issue(code, message, location)
+        Models::Issue.new(severity: "error", code: code, message: message,
+                          location: location)
+      end
+
+      private_class_method :trailing, :framing, :missing_eof, :issue
+    end
+
+    private_constant :EmfRecords, :EmfPlus, :EmfStructure
 
     # Reads an EMF header. WMF is deliberately absent: the released emf
     # parser reports "WMF parser not yet implemented" (D14), so nothing
