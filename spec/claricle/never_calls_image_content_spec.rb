@@ -17,8 +17,9 @@
 # cannot arrive without one. Where a format has a file the detector accepts
 # and the handler then fails on, it brings that file too: a handler that
 # slurps only on the failure path would pass on good input alone. eps, ps
-# and svg bring none, because their handlers answer "ok" for every byte
-# string the detector accepts as that format.
+# and svg bring a good file only -- no FAILING file exists for them,
+# because their handlers answer "ok" for every byte string the detector
+# accepts as that format.
 registry = Claricle.const_get(:Registry)
 
 # Only the formats whose handler implements inspect. A convert-only
