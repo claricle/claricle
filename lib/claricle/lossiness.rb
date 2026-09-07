@@ -4,6 +4,13 @@ require "rexml/parsers/pullparser"
 require "rexml/xmltokens"
 
 require_relative "errors"
+# `CharacterRules#unaccounted_text?` calls `AttributeReferences`, which lives
+# in `detector.rb`. `lib/claricle.rb` loads the detector later in its own list,
+# so the whole gem works whether or not this line is here -- but requiring this
+# file on its own left the call site raising `NameError: uninitialized constant
+# Claricle::Lossiness::CharacterRules::AttributeReferences`. Measured, not
+# assumed. No cycle: `detector.rb` never names `Lossiness`.
+require_relative "detector"
 
 module Claricle
   # Decides whether one conversion loses anything, from what the SOURCE

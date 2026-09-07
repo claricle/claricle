@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "English"
 require "stringio"
 require "tempfile"
 
@@ -1104,6 +1105,45 @@ RSpec.describe "conversion lossiness" do
         expect(wrapper.largest_read).to eq(small.largest_read)
         expect(wrapper.largest_read).to be < File.size(path_for("rect_and_line"))
       end
+    end
+  end
+
+  # spec_helper loads the whole gem, and `lib/claricle.rb` requires the
+  # detector somewhere after lossiness -- so nothing running in-process can
+  # see a dependency lossiness.rb names but never requires. One such
+  # dependency existed: the call site raised `NameError: uninitialized
+  # constant Claricle::Lossiness::CharacterRules::AttributeReferences` when
+  # the file was loaded alone, while every one of this suite's examples
+  # stayed green. A fresh process is the only place that is visible. Same
+  # shape as spec/claricle/registry_spec.rb's "loading a file on its own".
+  #
+  # SCOPE, deliberately narrower than "lossiness.rb owns its dependencies":
+  # this walks ONE call path, so it catches a missing require on that path
+  # and nothing else. Measured -- a second unmet dependency injected into
+  # `Lossiness.classify`, which this path never reaches, leaves the example
+  # GREEN while the file is genuinely broken standalone. Closing that needs
+  # a check derived from the constants the file NAMES rather than a path
+  # someone picked; that is real machinery and it is tracked as follow-up
+  # #15, not smuggled in here. A Ripper walk of all 44 constant references
+  # confirms `AttributeReferences` is currently the only one defined outside
+  # lossiness.rb, errors.rb and rexml, so there is no gap today.
+  describe "loading lossiness.rb on its own" do
+    lib = File.join(root, "lib")
+
+    it "resolves AttributeReferences without the entry point loading the detector first" do
+      script = 'require "claricle/lossiness"; ' \
+               "print Claricle.const_get(:Lossiness).const_get(:CharacterRules).unaccounted_text?('plain').inspect"
+      output = IO.popen([RbConfig.ruby, "-I#{lib}", "-e", script], err: %i[child out], &:read)
+
+      # stderr is folded into stdout so a failure carries its own diagnosis,
+      # which means anything ELSE that writes to stderr lands in `output` too.
+      # Measured 2026-09-07 in a ruby:3.3-slim container: rubygems shelled out
+      # to git and prepended two `fatal: not a git repository` lines, and an
+      # `eq(output)` against the whole buffer failed on a run that was working
+      # perfectly. The value is the last line; the rest is diagnostics. This is
+      # still an exact assertion, not a relaxation to `include`.
+      expect($CHILD_STATUS.success?).to be(true), "subprocess failed: #{output}"
+      expect(output.lines.last).to eq("false"), "subprocess output was: #{output.inspect}"
     end
   end
 end
