@@ -238,10 +238,23 @@ module Claricle
 
         # A chunk declaring a length near the 32-bit ceiling sends the
         # delegate's own `io.read(length)` past what a single read
-        # syscall accepts, and that fails at the OS boundary before any
+        # syscall accepts, and on a platform that rejects the length
+        # outright that fails at the OS boundary before any
         # `ValidationContext` result exists at all -- measured,
         # `Errno::EINVAL` from `io_fread`, on declared lengths at and
-        # above 0x80000000. Every other malformed shape tried against the
+        # above 0x80000000.
+        #
+        # WHICH platform is load-bearing, and it is why this list can
+        # look dead on a green CI run. macOS `read(2)` refuses a length
+        # above INT_MAX; Linux caps the transfer at 0x7ffff000 and
+        # returns short instead, so the delegate never raises there and
+        # reports ordinary nonconformance. Measured both ways on the same
+        # 16-byte input: `arm64-darwin25` raised `Errno::EINVAL`,
+        # `x86_64-linux` (ruby:3.3.12, CI's platform) returned 16 bytes.
+        # The spec pins the mapping below by raising the errno directly
+        # rather than by finding an input that produces it here.
+        #
+        # Every other malformed shape tried against the
         # real gem -- a short file, a garbage tail, 300 random byte
         # streams, every truncation of two real PNGs -- returned a normal
         # result instead of raising. This is the PNG analogue of the EMF
@@ -391,7 +404,9 @@ module Claricle
         chunks
       # `gather` no longer hands a declared length to `#read` unbounded,
       # so `Errno::EINVAL` (what a chunk declaring 0x8000000d bytes used
-      # to produce asking the OS for that many) and the reader's own
+      # to produce asking the OS for that many, on a platform whose
+      # `read(2)` refuses a length above INT_MAX -- macOS does, Linux
+      # does not) and the reader's own
       # `IOError: data truncated` cannot happen from THIS path any more
       # -- measured against png_conform 0.1.4 rather than assumed. This
       # is scoped to malformed input, not "impossible in general": an
