@@ -45,7 +45,7 @@ RSpec.describe "Claricle::Registry" do
     it "reports only the capabilities each handler has implemented" do
       expect(registry.capabilities_for(:emf)).to eq([:inspect])
       expect(registry.capabilities_for(:eps)).to eq([:inspect])
-      expect(registry.capabilities_for(:png)).to eq([:inspect])
+      expect(registry.capabilities_for(:png)).to eq(%i[inspect conform])
       expect(registry.capabilities_for(:ps)).to eq([:inspect])
       expect(registry.capabilities_for(:svg)).to eq([:inspect])
     end
