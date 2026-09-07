@@ -38,6 +38,20 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
 
   spec.add_dependency "emf", "~> 0.1.0"
+  # Constrained to json 2.x. Every lutaml-model this gemspec admits passes a
+  # `register:` keyword down to `JSON.generate` (it enters at
+  # format_conversion.rb:207, reaches JSON at
+  # key_value/adapter/json/standard_adapter.rb:34, and 0.8.19 and 0.8.22 are
+  # identical there). json 2.x ignores unknown keywords; 3.0.0 raises
+  # `ArgumentError: unknown keyword: register`, killing every lutaml-backed
+  # `to_json` -- `claricle inspect --json` included, so this is a shipped
+  # runtime path and not only the suite.
+  # `~> 2.7` and not a bare `< 3.0`: Ruby 3.3 already bundles 2.7.x and 3.4
+  # bundles 2.9.1, so on those the constraint asks for nothing new; the Ruby
+  # 4.0 leg CI runs is untested against it. Widen the constraint -- do not
+  # delete the line, three files require json directly -- once lutaml-model
+  # stops passing `register:`.
+  spec.add_dependency "json", "~> 2.7"
   spec.add_dependency "lutaml-model", "~> 0.8.19"
   spec.add_dependency "png_conform", "~> 0.1.4"
   spec.add_dependency "postscript", "~> 0.2.0"
