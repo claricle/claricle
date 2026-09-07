@@ -1019,15 +1019,35 @@ RSpec.describe "Claricle PDF handler" do
     # 1.7. A lower version presented as a good read is worse than a
     # "failed", so both halves are asserted -- the status alone would not
     # have caught the wrong number.
+    # The warm-up is what makes this example MEAN anything, and it is not
+    # tidiness. pdfrb is required lazily inside the timed section, and that
+    # first require costs 0.190s against a 0.001s warm inspection -- measured
+    # on this fixture. So an unwarmed run at `with_deadline(0.2)` was racing
+    # the require, not the version read: the deadline fired before
+    # `structure_gate` had set `progress.node`, both the old code and the new
+    # reported `failed`, and the example passed against the very code it
+    # exists to catch. `mutation-check.sh` said STAYED GREEN and was right.
+    #
+    # Warmed, the old code answers `ok` with the header's "1.4" at every
+    # deadline down to 0.05 -- a 200x margin rather than a coin flip -- which
+    # is the wrong-version-as-a-good-read this reports `failed` for.
     it "reports failed when it expires while reading the catalog version" do
+      inspect_pdf(pdf) # pay the delegate's lazy require outside the deadline
+
       with_deadline(0.2)
       allow(handler).to receive(:catalog_version) { sleep 5 }
       path = pdf(objects: objects(cat: "<< /Type /Catalog /Pages 2 0 R /Version /1.7 >>"))
 
       inspection = inspect_pdf(path)
-      expect([inspection.parse_status, inspection.issues.first.code])
-        .to eq(["failed", "pdf.timeout"])
+
+      # Asserted separately and in this order so a regression NAMES itself.
+      # The pre-fix defect is `ok` plus the header's "1.4", and the paired
+      # form said `undefined method 'code' for nil` instead -- true, useless,
+      # and pointing at the spec rather than at the handler. `map(&:code)` is
+      # nil-safe, so the third row reads `[] != ["pdf.timeout"]`.
+      expect(inspection.parse_status).to eq("failed")
       expect(inspection.meta.to_h["version"]).to be_nil
+      expect(inspection.issues.map(&:code)).to eq(["pdf.timeout"])
     end
   end
 
