@@ -886,24 +886,32 @@ module PngBounded
 
   module_function
 
-  # Bytes read = 8 x headers examined. Rows 2 to 4 are what make that
-  # non-trivial: one CARRIES 10 MiB it never reads, one DECLARES 10 MiB
-  # it never reads, and one has a 10 MiB tail past IEND. Row 5 is the
-  # only one reaching the clean-end exit.
+  # Bytes read = 8 x headers examined, PLUS one byte for `reached?`, which
+  # confirms the stream really holds the last record the walk counted. That
+  # one byte is what stops a file ending inside its final chunk from being
+  # reported clean, and it is a CONSTANT: rows 2 to 4 are what make the
+  # claim non-trivial, since one CARRIES 10 MiB it never reads, one
+  # DECLARES 10 MiB it never reads, and one has a 10 MiB tail past IEND.
+  # All three still read under 34 bytes.
+  #
+  # The truncated row is 16 and not 17 because `terminate` answers a
+  # truncation before `reached?` is asked -- the walk already knows the
+  # bytes are missing, so confirming it a second time would be a read that
+  # cannot change the verdict.
   def bounded = bounded_clean.merge(bounded_edge)
 
   def bounded_clean
     {
-      "clean, small" => [png(ihdr, idat("x" * 18), iend), 24],
-      "clean, 10 MiB payload" => [png(ihdr, idat(payload_10_mib), iend), 24]
+      "clean, small" => [png(ihdr, idat("x" * 18), iend), 25],
+      "clean, 10 MiB payload" => [png(ihdr, idat(payload_10_mib), iend), 25]
     }
   end
 
   def bounded_edge
     {
       "truncated, declares 10 MiB" => [png(ihdr, header(10_485_760, "IDAT"), "zzzz"), 16],
-      "clean plus a 10 MiB tail" => [png(ihdr, idat("x" * 18), iend) + payload_10_mib, 32],
-      "ends cleanly with no IEND" => [png(ihdr, idat("x" * 18)), 16]
+      "clean plus a 10 MiB tail" => [png(ihdr, idat("x" * 18), iend) + payload_10_mib, 33],
+      "ends cleanly with no IEND" => [png(ihdr, idat("x" * 18)), 17]
     }
   end
 end
@@ -931,6 +939,65 @@ RSpec.describe "Claricle PNG structural scanner" do
 
   def scan(bytes)
     scanner_class.new(StringIO.new(bytes.b)).issues
+  end
+
+  # A stream that holds `bytes` while reporting `claimed` as its size, built
+  # on the same allowlist shape as `CapabilityIO`: read, seek and size and
+  # nothing else, so a walk that reached for any other route would raise
+  # rather than quietly succeed.
+  def scan_claiming(bytes, claimed)
+    io = Class.new do
+      def initialize(bytes, claimed)
+        @io = StringIO.new(bytes.b)
+        @claimed = claimed
+      end
+
+      def read(length = nil) = @io.read(length)
+      def seek(*args) = @io.seek(*args)
+      def size = @claimed
+    end.new(bytes, claimed)
+
+    scanner_class.new(io).issues
+  end
+
+  # `record_fits?` proves a record fits inside `io.size`. It never proves
+  # those bytes EXIST -- nothing in this walk reads a chunk's payload or its
+  # CRC, only headers. So a stream that ends INSIDE the last record walks
+  # straight to a clean verdict.
+  #
+  # Measured before the guard: a complete PNG with the four CRC bytes of its
+  # IEND removed, presented with the whole file's size, returned NO issues at
+  # all. The IEND header at offset 33 reads fine; bytes 41 to 44 are simply
+  # absent and nobody looks. A conformance scanner calling a truncated file
+  # CLEAN is the one direction that matters, which is why this is a guard and
+  # not a note in the PR body.
+  #
+  # `io.size` lying is how the case is REACHED here, not what it is about:
+  # the same hole opens whenever a file is truncated after its size is read,
+  # and the production path captures that number once and walks afterwards.
+  describe "a stream that ends inside the record it claims to have" do
+    let(:whole) { png(chunk("IHDR", ihdr), chunk("IEND", "")) }
+
+    it "refuses to call it clean" do
+      cut = whole[0, whole.bytesize - 4] # IEND's CRC, and nothing else
+
+      expect(scan_claiming(cut, whole.bytesize).map(&:code))
+        .to eq(["png.chunk_truncated"])
+    end
+
+    # The positive control, and it is not decoration: a guard keyed off
+    # `io.size` rather than off what the walk consumed would fail this row,
+    # because an over-reporting size on a WHOLE file must stay
+    # `png.trailing_data`. Getting that wrong turns a good file into a
+    # truncated one, which is the mirror of the bug above.
+    it "still reports trailing data when the whole file is there" do
+      expect(scan_claiming(whole, whole.bytesize + 10_000).map(&:code))
+        .to eq(["png.trailing_data"])
+    end
+
+    it "leaves an honest whole file clean" do
+      expect(scan_claiming(whole, whole.bytesize)).to be_empty
+    end
   end
 
   def tuples(bytes)

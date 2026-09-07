@@ -63,7 +63,8 @@ module Claricle
         # different units and tells the reader nothing.
         chunk_overruns: "chunk needs %d bytes but only %d remain in the file",
         header_residue: "%s left, too few for a chunk header",
-        shorter_than_signature: "file is shorter than the PNG signature"
+        shorter_than_signature: "file is shorter than the PNG signature",
+        ends_inside_record: "file ends inside the last chunk it declares"
       }.freeze
 
       # Headroom over IHDR_BYTES (13) and PHYS_BYTES (9): neither
@@ -287,11 +288,32 @@ module Claricle
         end
 
         def terminate(stop)
+          return @found << truncated(stop) if stop.state == :truncated
+          return @found << rangeless("png.chunk_truncated", :ends_inside_record) unless reached?(stop.offset)
+
           case stop.state
           when :ended then @found << rangeless("png.missing_iend", :missing_iend, chunk: "IEND")
-          when :truncated then @found << truncated(stop)
           when :complete then trailing(stop.offset)
           end
+        end
+
+        # `record_fits?` proves a record fits inside `io.size`. It never
+        # proves those bytes EXIST: this walk reads headers and nothing
+        # else, so a stream ending INSIDE its last record walks to a clean
+        # verdict. Measured before this guard -- a 45-byte PNG cut to 41,
+        # losing only IEND's CRC, reported no issues at all: the header at
+        # offset 33 read fine and bytes 41 to 44 were never asked for.
+        #
+        # Keyed off what the WALK consumed, never off `@size`. A guard on
+        # `@size` would call an over-reporting whole file truncated, which
+        # is the same defect pointing the other way.
+        #
+        # One byte settles it, and it costs one seek on a clean file.
+        def reached?(offset)
+          return true if offset.zero?
+
+          @io.seek(offset - 1)
+          @io.read(1)&.bytesize == 1
         end
 
         # Only a COMPLETE repeat counts. The bounds test above returns
