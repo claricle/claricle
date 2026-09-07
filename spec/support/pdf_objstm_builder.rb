@@ -39,8 +39,17 @@ module PdfObjstmBuilder
 
   module_function
 
+  # Same rule as `PdfBuilder.merged`: an unknown keyword is a typo and is
+  # refused, so a misspelled override cannot pass as the valid baseline.
+  def merged(parts)
+    unknown = parts.keys - DEFAULTS.keys
+    raise ArgumentError, "unknown PDF fixture part: #{unknown.join(", ")}" if unknown.any?
+
+    DEFAULTS.merge(parts)
+  end
+
   def document(**parts)
-    part = DEFAULTS.merge(parts)
+    part = merged(parts)
     stream = objstm(part)
     objstm_at = HEADER.bytesize
     xref_at = objstm_at + stream.bytesize

@@ -72,11 +72,10 @@ The name reflects what the library is for:
   page-tree walking the parser does not offer. The count is omitted
   whenever it cannot be read as a non-negative whole number of at most
   1,024 decimal digits -- including when the reference holding it is
-  refused. A deadline expiry after the page-tree structure is read leaves
-  the file inspecting as `ok` with the count omitted. An earlier expiry
-  with no failure cause already established reports `parse_status:
-  "failed"` with code `pdf.timeout`; an established failure keeps its own
-  code
+  refused. A deadline expiry after the version is settled leaves the file
+  inspecting as `ok` with the count omitted. An earlier expiry with no
+  failure cause already established reports `parse_status: "failed"` with
+  code `pdf.timeout`; an established failure keeps its own code
 * `formats`, listing each format and what Claricle can do with it
 * `Claricle::Image`, built from a path or from bytes
 * A unified issue and report model, serialising to and from JSON
@@ -98,6 +97,13 @@ The name reflects what the library is for:
   region leaves the parser reading no trailer at all, so those files
   inspect as `failed` with `pdf.structure_unreadable` rather than `ok`.
   Most common in PDFs produced by macOS and Quartz
+* **A memory bound for PDF.** The five second deadline bounds TIME only.
+  A small crafted file can still make the parser build a very large
+  string before the clock fires -- measured, a 190 KB file whose object
+  stream decodes to 200 MB spent that memory inside the window and then
+  timed out. So `inspect` for PDF is not safe to run on untrusted input
+  in a long-lived server process. Run it on files you trust, or in a
+  separate process you can cap and kill
 * `conform` and `convert` for every format. No handler implements
   either yet, so both raise `Claricle::UnsupportedFormat`. `claricle
   formats` reports this per format, and it reads the handlers rather

@@ -171,6 +171,17 @@ module Claricle
       end
       private_constant :VersionGate
 
+      # THE DELEGATE BOUNDARY: every call that crosses into pdfrb, and the
+      # single rescue that covers them.
+      #
+      # Grouped here so the rescue can sit around ONE delegate expression
+      # at a time. While `guarded` wrapped whole handler methods, the
+      # allowlist also covered Claricle's own code, and a bug in this file
+      # was reported as a corrupt PDF instead of crashing.
+      #
+      # Included rather than `module_function`, so `guarded` is one
+      # instance method every read here and in `MetadataGate` shares.
+      #
       # pdfrb resolves by object NUMBER alone -- measured, `/MediaBox 4 9 R`
       # returns object `4 0`, and a compressed object addressed `1 1 R`
       # resolves happily because `add_compressed` never records a
@@ -181,7 +192,93 @@ module Claricle
         RESOLVABLE = %i[in_use compressed].freeze
         private_constant :RESOLVABLE
 
-        module_function
+        private
+
+        # One list, named once, because it is one policy. NOT a hoisted
+        # constant: `::Pdfrb::Error` cannot be resolved at class-definition
+        # time while the require is lazy -- measured, a
+        # `PARSE_FAILURES = [::Pdfrb::Error, ...]` constant makes
+        # `require "claricle"` itself die with
+        # `uninitialized constant Pdfrb (NameError)`. The sibling
+        # `metafile.rb:239` can hold its equivalent as a constant only
+        # because `metafile.rb:3` requires `emf` at the top of the file.
+        # A method defers the lookup to call time, when pdfrb is loaded.
+        #
+        # `Errno::EINVAL` is deliberately NOT in the list. It is reachable
+        # only from a negative `/Prev` consumed during `open`, so it
+        # belongs to that rescue alone; adding it to `guarded` would widen
+        # the gates for a class they cannot see.
+        def parse_failures
+          [::Pdfrb::Error, NoMethodError, TypeError, RangeError,
+           ArgumentError, SystemStackError]
+        end
+
+        # Returns nil when the DELEGATE could not read what was asked for.
+        #
+        # Every call wraps ONE pdfrb expression. The shape checks are what
+        # make that possible: `typed` refuses anything whose `.value` is
+        # not a Hash rather than letting `7[](:Type)` raise, and the `&.`
+        # on every value `resolve` may refuse stops those raising at all.
+        #
+        # `NoMethodError` stays on the list for pdfrb itself. Everywhere
+        # else it signals a broken delegate; here pdfrb raises it for
+        # ordinary corrupt files -- a free object-stream xref entry, a
+        # trailing backslash in a compressed body -- and nothing at the
+        # call site distinguishes the two. Crashing on a corrupt PDF is
+        # worse.
+        def guarded
+          yield
+        rescue *parse_failures
+          nil
+        end
+
+        # What proves a document exists at all. A header-only `%PDF-1.4\n`
+        # passes the version gate -- the version is genuinely readable --
+        # and opens without complaint; only this refuses it.
+        #
+        # The trailer nil check is part of the gate, not a rescue.
+        # Measured: `document.trailer` is nil on a header-only file, on an
+        # empty one, on garbage and on one truncated mid-body, so
+        # `trailer[:Root]` raises `NoMethodError` before any check runs.
+        # Resting the refusal on that would rest it on this handler's own
+        # missing nil check rather than on pdfrb's error handling.
+        #
+        # Returns BOTH checked objects, so the Catalog survives to be
+        # asked for its `/Version` instead of being resolved a second
+        # time.
+        #
+        # The node stays the flag, and the DESTRUCTURE at the call site is
+        # what keeps it so: `catalog, progress.node =` reads nil out of a
+        # nil return and out of `[catalog, nil]` alike, so a Catalog that
+        # resolves while its `/Pages` does not still leaves `progress.node`
+        # nil and reports "failed".
+        def structure_gate(document)
+          trailer = guarded { document.trailer }
+          return unless trailer
+
+          catalog = typed(resolve(document, guarded { trailer[:Root] }), :Catalog)
+          return unless catalog
+
+          [catalog, typed(resolve(document, catalog.value[:Pages]), :Pages)]
+        end
+
+        # The `&.` is load-bearing, not defensive noise: `resolve` returns
+        # nil on every refusal, and a bare `.value` would raise
+        # `NoMethodError`.
+        #
+        # The Hash check is what keeps this handler's own logic out of
+        # `guarded`. A dictionary's `.value` is a plain Hash, but an
+        # indirect `/Root` resolving to a scalar used to make this
+        # `7[](:Type)` -- measured, a `TypeError` raised by THIS handler
+        # and swallowed as if pdfrb had refused the file. The outcome is
+        # the same `structure_unreadable` either way; the difference is
+        # that a real bug here now escapes instead of hiding behind it.
+        def typed(object, name)
+          value = object&.value
+          return unless value.is_a?(::Hash)
+
+          object if value[:Type] == name
+        end
 
         # Anything that is not a Reference is refused DETERMINISTICALLY
         # rather than left to raise downstream. `Document#object` returns
@@ -201,6 +298,10 @@ module Claricle
         # the value with the number that was asked for. That is a
         # limitation of object numbers, not of generations.
         def resolve(document, value)
+          guarded { checked(document, value) }
+        end
+
+        def checked(document, value)
           return unless value.is_a?(::Pdfrb::Model::Reference)
 
           entry = document.xref&.[](value.oid)
@@ -210,11 +311,18 @@ module Claricle
           document.object(value)
         end
       end
+      include Resolver
+
       private_constant :Resolver
 
       # The publication boundary for both body-derived metadata values.
-      # Kept as private instance methods so each delegate read stays inside
-      # its existing `guarded` call and can still fail independently.
+      # Kept as private instance methods, so each read reaches the
+      # handler's own guarded `resolve` and can still fail independently.
+      #
+      # A module rather than two more methods in the class body: this
+      # file's other two helper groups are modules for the same reason,
+      # and folding these back into `Pdf` puts it over the project's
+      # RuboCop class-length budget.
       module MetadataGate
         private
 
@@ -222,7 +330,7 @@ module Claricle
         # Name. Read RAW through `.value`, like every other key here: the
         # typed `Dictionary#[]` coerces and mutates the node in place.
         #
-        # A Reference goes through `Resolver.resolve`, never
+        # A Reference goes through the guarded `resolve`, never
         # `document.object`, or the generation guard is bypassed for this
         # key alone -- pdfrb resolves by object number and would hand back
         # an object the file never authorised.
@@ -232,7 +340,7 @@ module Claricle
         # which is the whole reason this handler reads the bytes itself.
         def catalog_version(document, catalog)
           raw = catalog.value[:Version]
-          raw = Resolver.resolve(document, raw)&.value if raw.is_a?(::Pdfrb::Model::Reference)
+          raw = resolve(document, raw)&.value if raw.is_a?(::Pdfrb::Model::Reference)
           return unless raw.is_a?(::Symbol)
 
           token = raw.name
@@ -260,7 +368,7 @@ module Claricle
         # the publication bound: at most HEADER_SCAN_BYTES decimal digits.
         def count_read(document, node)
           raw = node.value[:Count]
-          raw = Resolver.resolve(document, raw)&.value if raw.is_a?(::Pdfrb::Model::Reference)
+          raw = resolve(document, raw)&.value if raw.is_a?(::Pdfrb::Model::Reference)
           raw if raw.is_a?(::Integer) && !raw.negative? && raw <= MAX_PAGE_COUNT
         end
       end
@@ -272,7 +380,7 @@ module Claricle
       # never an ivar: `image.rb:233` builds a handler per call precisely
       # so it holds no per-call state, and the outer rescue has to tell
       # an expiry BEFORE the structure gate from one after it.
-      Progress = Struct.new(:version, :node, :page_count, :code)
+      Progress = Struct.new(:version, :node, :page_count, :code, :version_settled)
       private_constant :Progress
 
       # One deadline over every potentially unbounded step in the normal
@@ -280,10 +388,11 @@ module Claricle
       # one per stage: five stages each granted five seconds is a
       # twenty-five second worst case wearing a five-second label.
       #
-      # A post-structure expiry still returns `ok`. That recovery result is
-      # necessarily built after the clock has fired, but only after its
-      # page count is cleared; the remaining published strings are capped
-      # at HEADER_SCAN_BYTES, so the recovery has bounded input size.
+      # An expiry after the VERSION IS SETTLED still returns `ok`. That
+      # recovery result is necessarily built after the clock has fired, but
+      # only after its page count is cleared; the remaining published
+      # strings are capped at HEADER_SCAN_BYTES, so the recovery has
+      # bounded input size.
       #
       # The expiry is caught OUTSIDE the block, and the default form is
       # not a style choice. Measured on Ruby 3.4.8: `Timeout.timeout(n)`
@@ -309,32 +418,47 @@ module Claricle
       # deadline exists to bound reading an untrusted FILE; loading our
       # own dependency is fixed work that no input controls.
       #
-      # The node is the flag. Nil means the deadline expired before the
-      # structure gate passed, which is "failed"; non-nil means it expired
-      # afterwards, while reading an optional field or constructing the
-      # result, which is "ok" with the count omitted. A separate boolean
-      # would shadow a value that already carries the same information.
+      # `version_settled` is the flag, and it is the VERSION rather than
+      # the structure gate's node. The reported version is the numeric
+      # maximum of the header and the Catalog's `/Version`, so a clock
+      # that fires while the Catalog is being read leaves only half the
+      # answer. The node was true by then, so the old flag reported "ok"
+      # and published the header version -- measured, "1.4" for a file
+      # whose Catalog says 1.7. A wrong version called a good read is
+      # worse than a "failed", so anything before the version is settled
+      # is now `pdf.timeout`.
+      #
+      # Only the count read and the result construction happen after the
+      # flag is set, and both are recoverable: the count is simply
+      # omitted.
       def inspection(image)
         progress = Progress.new
         require "pdfrb"
-        result = begin
-          Timeout.timeout(DEADLINE_SECONDS) { run_stages(image, progress) }
-        rescue Timeout::Error
-          # `||=`, because a code already set names a cause the run
-          # actually reached. A structure gate that refused sets
-          # STRUCTURE_CODE with the node still nil, and a deadline
-          # expiring during the unwind after it would otherwise relabel
-          # that refusal `pdf.timeout` -- one code per cause, reporting
-          # the wrong one.
-          progress.code ||= TIMEOUT_CODE unless progress.node
-          progress.page_count = nil
+        result = bounded(progress) { run_stages(image, progress) }
+        if progress.code
+          return failed_inspection(image, code: progress.code,
+                                          message: MESSAGES.fetch(progress.code))
         end
-        return failure(image, progress.code) if progress.code
 
         result || readable(image, progress)
       end
 
       private
+
+      # The clock, and what an expiry is allowed to conclude. Returns nil
+      # on an expiry, so the caller falls back to the recovery result.
+      #
+      # `||=`, because a code already set names a cause the run actually
+      # reached. A structure gate that refused sets STRUCTURE_CODE with
+      # the version still unsettled, and a deadline expiring during the
+      # unwind after it would otherwise relabel that refusal
+      # `pdf.timeout` -- one code per cause, reporting the wrong one.
+      def bounded(progress, &)
+        Timeout.timeout(DEADLINE_SECONDS, &)
+      rescue Timeout::Error
+        progress.code ||= TIMEOUT_CODE unless progress.version_settled
+        progress.page_count = nil
+      end
 
       # Every read happens inside `with_path`. The handler never calls
       # `image.content` itself: `with_path` calls it once for a
@@ -344,7 +468,10 @@ module Claricle
       def run_stages(image, progress)
         image.with_path do |path|
           progress.version = VersionGate.version(path)
-          next progress.code = HEADER_CODE unless progress.version
+          unless progress.version
+            progress.code = HEADER_CODE
+            next
+          end
 
           open_document(path, progress)
         end
@@ -362,104 +489,51 @@ module Claricle
       # holding the handle, so a file deleted between the header read and
       # this call raises it -- and reporting "failed" would claim the PDF
       # is unreadable when it is simply gone.
+      #
+      # `opened` narrows this rescue to the OPEN itself. The block form is
+      # required (see above), so the rescue would otherwise also cover the
+      # stages inside the block, where this handler's own code runs: a bug
+      # there was reported as `pdf.unreadable` instead of crashing. Once
+      # pdfrb has yielded, every delegate call inside is guarded on its
+      # own, so anything still escaping is ours and is re-raised.
       def open_document(path, progress)
+        opened = false
         ::Pdfrb::Document.open(path) do |document|
-          catalog, progress.node = guarded { structure_gate(document) }
-          next progress.code = STRUCTURE_CODE unless progress.node
-
-          read_optional_fields(document, catalog, progress)
+          opened = true
+          read_document(document, progress)
         end
       rescue *parse_failures, Errno::EINVAL
+        raise if opened
+
         progress.code = OPEN_CODE
       end
 
-      # One list, named once, because it is one policy. NOT a hoisted
-      # constant: `::Pdfrb::Error` cannot be resolved at class-definition
-      # time while the require is lazy -- measured, a
-      # `PARSE_FAILURES = [::Pdfrb::Error, ...]` constant makes
-      # `require "claricle"` itself die with
-      # `uninitialized constant Pdfrb (NameError)`. The sibling
-      # `metafile.rb:239` can hold its equivalent as a constant only
-      # because `metafile.rb:3` requires `emf` at the top of the file.
-      # A method defers the lookup to call time, when pdfrb is loaded.
-      #
-      # `Errno::EINVAL` is deliberately NOT in the list. It is reachable
-      # only from a negative `/Prev` consumed during `open`, so it
-      # belongs to that rescue alone; adding it to `guarded` would widen
-      # the gates for a class they cannot see.
-      def parse_failures
-        [::Pdfrb::Error, NoMethodError, TypeError, RangeError,
-         ArgumentError, SystemStackError]
+      # The stages that run once pdfrb has handed the document over. A
+      # method of its own so the rescue above covers the open and nothing
+      # else.
+      def read_document(document, progress)
+        catalog, progress.node = structure_gate(document)
+        unless progress.node
+          progress.code = STRUCTURE_CODE
+          return
+        end
+
+        read_optional_fields(document, catalog, progress)
       end
 
-      # Returns nil when the DELEGATE could not read what was asked for.
+      # Everything the gate did NOT have to prove. Each delegate read is
+      # guarded on its own, so a Catalog that will not give up its
+      # `/Version` still reports the header's, and a `/Count` that raises
+      # still leaves the version intact.
       #
-      # This wraps a whole method, not one delegate expression, so the
-      # allowlist also catches classes this handler's own logic could
-      # raise and a bug here would be reported as a corrupt PDF. That is
-      # a known cost, not a closed hole. The `&.` on every value the
-      # resolver may refuse does NOT move that handling outside this
-      # region -- it is inside it. What it does is stop those values
-      # raising here at all, which NARROWS the region without closing it.
-      #
-      # Stated in that direction because the stronger claim is false.
-      # `typed` ends in `object&.value&.[](:Type)`, and an indirect
-      # `/Root` resolving to a scalar makes that `7.[](:Type)` --
-      # measured, a `TypeError` raised by THIS handler and swallowed
-      # here. The reported outcome is still right (`structure_unreadable`
-      # either way), so this is left as a stated cost rather than closed
-      # with a shape check: that check would add a branch no observable
-      # behaviour could ever distinguish.
-      #
-      # `NoMethodError` on the list is the real cost. Everywhere else it
-      # signals a broken delegate; here pdfrb raises it for ordinary
-      # corrupt files -- a free object-stream xref entry, a trailing
-      # backslash in a compressed body -- and nothing at the call site
-      # distinguishes the two. Crashing on a corrupt PDF is worse.
-      def guarded
-        yield
-      rescue *parse_failures
-        nil
-      end
-
-      # Everything the gate did NOT have to prove. Each is guarded on its
-      # own, so a Catalog that will not give up its `/Version` still
-      # reports the header's, and a `/Count` that raises still leaves the
-      # version intact.
+      # The flag is set BETWEEN the two reads. Everything above it decides
+      # the published version, so a deadline there must report "failed";
+      # everything below it only adds the count, which the recovery drops.
       def read_optional_fields(document, catalog, progress)
         progress.version = highest_version(progress.version,
-                                           guarded { catalog_version(document, catalog) })
-        progress.page_count = guarded { count_read(document, progress.node) }
-      end
-
-      # What proves a document exists at all. A header-only `%PDF-1.4\n`
-      # passes the version gate -- the version is genuinely readable --
-      # and opens without complaint; only this refuses it.
-      #
-      # The trailer nil check is part of the gate, not a rescue.
-      # Measured: `document.trailer` is nil on a header-only file, on an
-      # empty one, on garbage and on one truncated mid-body, so
-      # `trailer[:Root]` raises `NoMethodError` before any check runs.
-      # Resting the refusal on that would rest it on this handler's own
-      # missing nil check rather than on pdfrb's error handling.
-      #
-      # Returns BOTH checked objects, so the Catalog survives to be asked
-      # for its `/Version` instead of being resolved a second time.
-      #
-      # The node stays the flag, and the DESTRUCTURE at the call site is
-      # what keeps it so: `catalog, progress.node =` reads nil out of a
-      # nil return and out of `[catalog, nil]` alike, so a Catalog that
-      # resolves while its `/Pages` does not still leaves `progress.node`
-      # nil and reports "failed". Guarding this method's own return on
-      # the node as well was tried and measured to change nothing -- a
-      # branch that cannot alter an outcome, so it is not here.
-      def structure_gate(document)
-        return unless document.trailer
-
-        catalog = typed(Resolver.resolve(document, document.trailer[:Root]), :Catalog)
-        return unless catalog
-
-        [catalog, typed(Resolver.resolve(document, catalog.value[:Pages]), :Pages)]
+                                           catalog_version(document, catalog))
+        progress.version_settled = true
+        progress.page_count = count_read(document, progress.node)
       end
 
       # The NUMERIC MAXIMUM, and every word of that is load-bearing.
@@ -474,18 +548,6 @@ module Claricle
         return header unless catalog
 
         [header, catalog].max_by { |version| version.split(".").map(&:to_i) }
-      end
-
-      # The `&.` is load-bearing, not defensive noise: `Resolver.resolve`
-      # returns nil on every refusal, and a bare `.value` would raise
-      # `NoMethodError` to be caught by `guarded` and reported as a
-      # rescued delegate failure -- right by accident.
-      def typed(object, name)
-        object if object&.value&.[](:Type) == name
-      end
-
-      def failure(image, code)
-        failed_inspection(image, code: code, message: MESSAGES.fetch(code))
       end
 
       # `width`, `height`, `dpi` and `color_space` stay nil, and a nil

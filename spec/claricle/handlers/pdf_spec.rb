@@ -999,7 +999,7 @@ RSpec.describe "Claricle PDF handler" do
       expect(order).to eq(%i[require timeout])
     end
 
-    # The node local is the flag: non-nil means the deadline expired
+    # The settled version is the flag: set means the deadline expired
     # reading an OPTIONAL field, so the answer stays "ok" with the count
     # omitted rather than discarding a structure that was read.
     it "reports ok with no count when it expires at the count read" do
@@ -1009,6 +1009,25 @@ RSpec.describe "Claricle PDF handler" do
       inspection = inspect_pdf(pdf)
       expect(inspection.parse_status).to eq("ok")
       expect(inspection.meta).to eq("version" => "1.4")
+    end
+
+    # The version is the higher of the header and the Catalog's
+    # `/Version`, so an expiry inside that read leaves only half the
+    # answer. The structure gate has already passed here, which is
+    # exactly the case the old node flag called recoverable: it reported
+    # "ok" and published the header's 1.4 for a file whose Catalog says
+    # 1.7. A lower version presented as a good read is worse than a
+    # "failed", so both halves are asserted -- the status alone would not
+    # have caught the wrong number.
+    it "reports failed when it expires while reading the catalog version" do
+      with_deadline(0.2)
+      allow(handler).to receive(:catalog_version) { sleep 5 }
+      path = pdf(objects: objects(cat: "<< /Type /Catalog /Pages 2 0 R /Version /1.7 >>"))
+
+      inspection = inspect_pdf(path)
+      expect([inspection.parse_status, inspection.issues.first.code])
+        .to eq(["failed", "pdf.timeout"])
+      expect(inspection.meta.to_h["version"]).to be_nil
     end
   end
 
@@ -1034,6 +1053,24 @@ RSpec.describe "Claricle PDF handler" do
     expect(pdf_class.constants(false)).to be_empty
   end
 
+  # The fixtures are the evidence for every example above, so a typo in
+  # an override is not a small thing: the builder used to merge the
+  # unknown key and hand back the VALID baseline, and the example passed
+  # while checking nothing it meant to check.
+  describe "the fixture builders" do
+    it "refuses a keyword that is not one of its parts" do
+      [PdfBuilder, PdfObjstmBuilder].each do |builder|
+        expect { builder.document(nosuchpart: "x") }
+          .to raise_error(ArgumentError, /nosuchpart/), builder.to_s
+      end
+    end
+
+    it "still builds the baseline from its real parts" do
+      expect(inspect_pdf(pdf(first_line: "%PDF-1.6")).meta["version"]).to eq("1.6")
+      expect(inspect_pdf(objstm(root: "1 0 R")).parse_status).to eq("ok")
+    end
+  end
+
   describe "what it refuses to swallow" do
     # Stage B, not stage A. A handler that wrote `rescue StandardError`
     # inside `guarded` would still pass an Interrupt-from-open example,
@@ -1050,6 +1087,35 @@ RSpec.describe "Claricle PDF handler" do
       allow(Pdfrb::Document).to receive(:open).and_raise(Interrupt)
 
       expect { inspect_pdf(pdf) }.to raise_error(Interrupt)
+    end
+
+    # The allowlist is for the DELEGATE, not for this handler. Each of
+    # these classes is on the list, and each is raised by the handler's
+    # own stage rather than by pdfrb -- a bug, which must crash instead
+    # of being reported as a corrupt PDF. `guarded` used to wrap whole
+    # methods and the open rescue used to cover the whole block, so all
+    # three answered "failed" and the bug stayed hidden.
+    it "propagates an allowlisted error raised by its own stages" do
+      { count_read: NoMethodError, catalog_version: TypeError,
+        structure_gate: ArgumentError }.each do |stage, klass|
+        allow(handler).to receive(stage).and_raise(klass, "our bug")
+
+        expect { inspect_pdf(pdf) }.to raise_error(klass, "our bug"), stage.to_s
+      end
+    end
+
+    # An indirect /Root resolving to a scalar made `typed` call
+    # `7[](:Type)`. The TypeError was Claricle's own and was swallowed as
+    # if pdfrb had refused the file. The answer is the same "failed"; the
+    # shape check is what makes it deliberate, so nothing is rescued.
+    it "refuses a /Root resolving to a scalar without rescuing anything" do
+      path = pdf(objects: objects(cat: "<< /Type /Catalog /Pages 2 0 R >>",
+                                  extra: [[4, 0, "7"]]),
+                 trailer: "<< /Size 5 /Root 4 0 R >>")
+
+      caught = recording_handler.last
+      expect(inspect_pdf(path).parse_status).to eq("failed")
+      expect(caught).to be_empty
     end
 
     # A file that is simply gone is not an unreadable PDF, so reporting

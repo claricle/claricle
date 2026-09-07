@@ -45,8 +45,18 @@ module PdfBuilder
 
   module_function
 
+  # A keyword that is not a part is a typo, not an override. Merging it
+  # blindly built the valid baseline instead, so the example passed while
+  # checking nothing it meant to check. Raising names the bad key.
+  def merged(parts)
+    unknown = parts.keys - DEFAULTS.keys
+    raise ArgumentError, "unknown PDF fixture part: #{unknown.join(", ")}" if unknown.any?
+
+    DEFAULTS.merge(parts)
+  end
+
   def document(**parts)
-    part = DEFAULTS.merge(parts)
+    part = merged(parts)
     head = "#{part[:first_line]}#{part[:eol]}"
     body, offsets = serialise(part[:objects], head.bytesize)
     "#{head}#{body}#{tail(part, offsets, head.bytesize + body.bytesize)}".b
