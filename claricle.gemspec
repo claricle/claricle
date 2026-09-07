@@ -38,6 +38,18 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
 
   spec.add_dependency "emf", "~> 0.1.0"
+  # Declared, and held below 3.0, because every model here serialises
+  # through lutaml-model's standard JSON adapter, and that adapter
+  # forwards its own options straight into the json gem:
+  # `JSON.generate(value, register: :default)` on the way out and
+  # `JSON.parse(text, create_additions: false)` on the way back in.
+  # json 2.x ignores a keyword it does not know; json 3.0.0 raises
+  # `ArgumentError: unknown keyword`, so `claricle inspect --json` on a
+  # real PNG prints an error instead of a document. The floor is 2.7
+  # because that is what Ruby 3.3 -- this gem's own floor -- ships as a
+  # default gem, so no supported Ruby needs a network install to satisfy
+  # it. Lift the ceiling once lutaml-model stops forwarding those two.
+  spec.add_dependency "json", "~> 2.7"
   spec.add_dependency "lutaml-model", "~> 0.8.19"
   spec.add_dependency "png_conform", "~> 0.1.4"
   spec.add_dependency "postscript", "~> 0.2.0"
