@@ -395,17 +395,30 @@ RSpec.describe Claricle::Cli::Runner do
       expect(reached).to eq(%i[say print_table say])
     end
 
-    # `recorded_help` swaps `self.shell` for a recorder and restores it in
-    # an `ensure`. This example and the one after it are the only two that
-    # cover that restore, and the only two anywhere in this file that keep a
-    # `Claricle::Cli` instance and call `help` on it. (One later example
-    # constructs a Cli too, to prove `Object#inspect` survives, but it
-    # discards the instance immediately.) Every other example goes through
-    # `Runner`, which constructs a fresh Cli per invocation, so a shell left
-    # behind is never observed there. `help` is public, so a library caller
-    # CAN hold one instance across two calls -- and without the restore the
-    # second call finds the dead recorder still installed and records into
-    # it instead of printing.
+    # Thor passes the recorder to `Cli.help` and `Cli.command_help`, so a
+    # subclass that overrides either one can call any shell method on it.
+    # Only writing methods are held back; a query like `set_color` goes
+    # straight to the real shell and returns its real answer.
+    it "forwards a non-writing shell method that a subclass asks for" do
+      sink = StringIO.new
+      subclass = Class.new(Claricle::Cli) do
+        def self.help(shell, *)
+          shell.say(shell.set_color("Coloured heading", :green))
+          super
+        end
+      end
+      shell = Thor::Base.shell.new
+      shell.define_singleton_method(:stdout) { sink }
+
+      subclass.new([], {}, shell: shell).help
+
+      expect(sink.string).to include("Coloured heading")
+      expect(sink.string).to include("Commands:")
+    end
+
+    # `help` is public, so a library caller can hold one Cli instance and
+    # call it twice. Without the restore the second call finds the dead
+    # recorder still installed and records into it instead of printing.
     it "restores the caller's shell so a second help still reaches it" do
       sink = StringIO.new
       shell = Thor::Base.shell.new
@@ -420,21 +433,16 @@ RSpec.describe Claricle::Cli::Runner do
       expect(sink.string.bytesize).to eq(first * 2)
     end
 
-    # The restore is an `ensure` rather than a plain trailing line
-    # precisely so a FAILED generation cannot strand the recorder on the
-    # instance. Moving it out of the `ensure` keeps every other example in
-    # this file green, so without this one nothing distinguishes the two.
+    # The restore is an `ensure` so a failed generation cannot leave the
+    # recorder on the instance.
     it "restores the caller's shell even when generation raises" do
       sink = StringIO.new
       shell = Thor::Base.shell.new
       shell.define_singleton_method(:stdout) { sink }
       cli = Claricle::Cli.new([], {}, shell: shell)
 
-      # Raise on the FIRST call only, then fall through to the real
-      # `banner`. `and_wrap_original` is a public API and survives an RSpec
-      # upgrade; reaching into `RSpec::Mocks.space` to undo the stub does
-      # neither, and the point of the example is the second call, not how
-      # the stub was retired.
+      # Raise on the FIRST call only, so the second call can use the real
+      # `banner` and show that the shell came back.
       raised = false
       allow(Claricle::Cli).to receive(:banner).and_wrap_original do |original, *arguments|
         next original.call(*arguments) if raised
