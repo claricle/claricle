@@ -28,10 +28,17 @@ module Claricle
     # generation such as building its banner. Thor exposes both through one
     # `super` call, so rescuing that call hides later generation failures.
     # Record its shell calls first, then replay them inside the output rescue.
+    #
+    # Returns nil on the success path, where Thor's own `help` returned the
+    # last shell call's value. That is a deliberate change: the recorder's
+    # call list is this class's internals and must not become an answer.
+    #
+    # Recording swaps `self.shell`, so a frozen `Cli` instance cannot run
+    # `help`. Freezing a Thor instance was never supported anyway -- Thor
+    # builds its default shell lazily into `@shell` on first use.
     def help(command = nil, subcommand = false) # rubocop:disable Style/OptionalBooleanParameter
-      destination = shell
-      output = recorded_help(destination) { super(command, subcommand) }
-      tolerate_closed_output { output.write_to(destination) }
+      output = recorded_help(shell) { super(command, subcommand) }
+      tolerate_closed_output { output.write_to }
     end
 
     desc "inspect FILE", "Report a file's format and metadata"
@@ -348,48 +355,76 @@ module Claricle
     # write. Recording whole calls preserves the exact destination shell's
     # instance state and singleton behaviour when they are replayed.
     #
-    # Replay dispatches by name rather than through `public_send`, because
+    # Only the writing half of Thor's shell contract is recorded. Everything
+    # else -- `set_color`, `terminal_width`, `padding` and any method a
+    # custom shell adds -- is forwarded to the destination straight away and
+    # returns the destination's own answer. A query has nothing to defer,
+    # and holding it back would return nil to code that needs the value.
+    # Thor hands this recorder to `Cli.help` and `Cli.command_help`, so a
+    # subclass that overrides those and asks the shell for a colour keeps
+    # working.
+    #
+    # Replay dispatches through `__send__`, not `public_send`, because
     # `public_send` is a method Thor never asks a shell for. A shell built
     # on `BasicObject` inherits only the eight methods BasicObject defines
-    # -- `public_send` is not among them, since it comes from Object --
-    # and Thor drives such a shell perfectly well. Routing replay through
-    # reflection would therefore narrow the set of shells this CLI accepts
-    # below the set Thor itself accepts.
+    # -- `__send__` is one of them, `public_send` is not, since it comes
+    # from Object -- and Thor drives such a shell perfectly well. Routing
+    # replay through `public_send` would therefore narrow the set of shells
+    # this CLI accepts below the set Thor itself accepts.
+    #
+    # The recorded arguments are the caller's own objects, not copies. A
+    # shell argument mutated between the call and the replay is printed
+    # with its later value. Copying every argument would cost more than the
+    # case is worth, and Thor's help passes freshly built strings and rows.
     class HelpOutput
-      def initialize
+      # The writing half of Thor::Shell::SHELL_DELEGATED_METHODS. Reading
+      # and colouring methods are missing on purpose: they are forwarded.
+      DEFERRED = %i[
+        say say_error say_status error print_table print_wrapped
+        print_in_columns
+      ].freeze
+      private_constant :DEFERRED
+
+      def initialize(destination)
+        @destination = destination
         @calls = []
-      end
-
-      def say(*arguments, **options, &block)
-        record(:say, arguments, options, block)
-      end
-
-      def print_table(*arguments, **options, &block)
-        record(:print_table, arguments, options, block)
-      end
-
-      def print_wrapped(*arguments, **options, &block)
-        record(:print_wrapped, arguments, options, block)
       end
 
       # Returns nil rather than the `each` receiver. `help` is a public
       # method, so whatever this returns becomes its return value on the
       # success path -- and `@calls` is this class's own internals.
-      def write_to(destination)
+      def write_to
         @calls.each do |method, arguments, options, block|
-          case method
-          when :say then destination.say(*arguments, **options, &block)
-          when :print_table then destination.print_table(*arguments, **options, &block)
-          when :print_wrapped then destination.print_wrapped(*arguments, **options, &block)
-          end
+          @destination.__send__(method, *arguments, **options, &block)
         end
         nil
+      end
+
+      def method_missing(name, *arguments, **options, &block)
+        return record(name, arguments, options, block) if DEFERRED.include?(name)
+
+        @destination.__send__(name, *arguments, **options, &block)
+      end
+
+      def respond_to_missing?(name, include_private = false)
+        DEFERRED.include?(name) ||
+          destination_responds?(name, include_private) ||
+          super
       end
 
       private
 
       def record(method, arguments, options, block)
         @calls << [method, arguments, options, block]
+        nil
+      end
+
+      # A `BasicObject` shell has no `respond_to?` at all, and answering
+      # "no" for it matches what Thor sees when it asks the same question.
+      def destination_responds?(name, include_private)
+        @destination.respond_to?(name, include_private)
+      rescue NoMethodError
+        false
       end
     end
     private_constant :HelpOutput
@@ -399,7 +434,7 @@ module Claricle
     # Restore the invocation's shell before replay so generation failures
     # leave no replacement behind and custom output runs on the exact object.
     def recorded_help(destination)
-      output = HelpOutput.new
+      output = HelpOutput.new(destination)
       self.shell = output
       yield
       output
