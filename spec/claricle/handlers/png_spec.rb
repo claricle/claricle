@@ -1312,6 +1312,27 @@ RSpec.describe "Claricle PNG structural scanner" do
       end
     end
 
+    # A header that READS but whose record is missing is a different path
+    # from a residue too short to hold a header, and `truncated` picks
+    # between them on `if stop.length`. A DECLARED LENGTH OF ZERO is the
+    # case that tests the choice: `0` is truthy in Ruby, so it must take
+    # the span branch, and a guard written as `stop.length&.positive?`
+    # would silently send it to the residue message instead -- which would
+    # then say "8 bytes left, too few for a chunk header" about a header
+    # that was read perfectly well.
+    #
+    # Both lengths are here because one alone proves nothing: 0 is the
+    # boundary and 5 is an ordinary value, and they must produce the SAME
+    # shape of message with different arithmetic.
+    { 0 => 12, 5 => 17 }.each do |declared, needed|
+      it "states the span when a header declaring #{declared} has no record behind it" do
+        bytes = png(chunk("IHDR", ihdr), header(declared, "tEXt"))
+
+        expect(scan(bytes).map(&:message))
+          .to eq(["chunk needs #{needed} bytes but only 8 remain in the file"])
+      end
+    end
+
     it "says the file is shorter than the signature" do
       expect(scan("abc").first.message).to eq("file is shorter than the PNG signature")
     end
