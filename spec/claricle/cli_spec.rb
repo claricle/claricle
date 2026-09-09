@@ -440,7 +440,7 @@ RSpec.describe Claricle::Cli::Runner do
       expect(sink.string).to eq(first * 2)
     end
 
-    # The five examples from here down all pin ONE property: `help` writes
+    # The examples from here down all pin ONE property: `help` writes
     # through the caller's shell as it goes, so every state that shell is
     # holding at the moment of a write still applies to it. Each is a shape
     # that a buffered `help` was measured getting wrong, and together they
