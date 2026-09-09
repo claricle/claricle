@@ -47,7 +47,7 @@ RSpec.describe "Claricle::Registry" do
       expect(registry.capabilities_for(:eps)).to eq([:inspect])
       expect(registry.capabilities_for(:png)).to eq([:inspect])
       expect(registry.capabilities_for(:ps)).to eq([:inspect])
-      expect(registry.capabilities_for(:svg)).to eq([:inspect])
+      expect(registry.capabilities_for(:svg)).to eq(%i[inspect conform])
     end
   end
 

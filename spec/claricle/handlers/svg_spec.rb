@@ -703,4 +703,173 @@ RSpec.describe "Claricle SVG handler" do
       end
     end
   end
+
+  # The conform operation. Every fact these pin was measured against
+  # svg_conform 0.2.2 rather than read off its README -- the gemspec pins
+  # `~> 0.2.2`, so a release that changes any of them fails here rather
+  # than quietly changing what a report says.
+  describe "conformance_report" do
+    let(:conform_fixtures) { File.join(__dir__, "..", "..", "fixtures", "conform") }
+
+    # A `def`, not a `let`: `let` has no arity, so `let(:x) { |name| ... }`
+    # is handed the RSpec Example rather than the argument.
+    def conform(name)
+      handler.conformance_report(Claricle::Image.from_path(File.join(conform_fixtures, "#{name}.svg")))
+    end
+
+    def issue_double(type, id, severity: nil, line: nil, column: nil)
+      instance_double(
+        SvgConform::Errors::ValidationIssue,
+        severity: severity, type: type, requirement_id: id,
+        message: "#{id} said so", line: line, column: column
+      )
+    end
+
+    # Stubs the class, not any instance: `Validator.new` is the only way
+    # the mapper reaches one, so replacing its return value is both
+    # narrower than `allow_any_instance_of` and a real verifying double.
+    def stub_validation(errors: [], warnings: [], validity_errors: [])
+      result = instance_double(
+        SvgConform::ValidationResult,
+        errors: errors, warnings: warnings, validity_errors: validity_errors
+      )
+      validator = instance_double(SvgConform::Validator)
+      allow(validator).to receive(:validate_file).and_return(result)
+      allow(SvgConform::Validator).to receive(:new).and_return(validator)
+    end
+
+    it "reports a conformant document as valid with no issues" do
+      report = conform("valid")
+
+      expect(report).to have_attributes(format: "svg", issues: [], valid: :yes)
+    end
+
+    # A discriminating pair, not one fixture: the two differ by the single
+    # `viewBox` attribute, so a mapping that reported every document clean
+    # -- or every document broken -- fails one of them.
+    it "reports the requirement a nonconformant document breaks" do
+      report = conform("no_viewbox")
+
+      expect(report.valid).to eq(:no)
+      expect(report.issues.map(&:code).uniq).to eq(["viewbox_required"])
+      expect(report.issues.map(&:severity).uniq).to eq(["error"])
+    end
+
+    it "names the file it read and the profile it ran" do
+      report = conform("valid")
+
+      expect(report.source_path).to end_with("conform/valid.svg")
+      expect(report.profile).to eq("base")
+      expect(report.validator_version).to eq(SvgConform::VERSION)
+    end
+
+    # D21 says a generic conform runs `base`. What this catches is the
+    # profile going UNPASSED: svg_conform then runs its own default,
+    # `svg_1_2_rfc`, which reports a `color_restrictions` error against
+    # this very fixture. Passing it to `Validator.new` instead also works
+    # -- the comment on `PROFILE` records why -- so this example does not
+    # pin the route, only that base is what ran.
+    it "runs the base profile rather than svg_conform's own default" do
+      expect(conform("valid").issues).to be_empty
+
+      under_default = SvgConform::Validator.new.validate_file(
+        File.join(conform_fixtures, "valid.svg")
+      )
+      SvgConform::Profiles.clear_cache!
+
+      expect(under_default.errors.map(&:requirement_id)).to include("color_restrictions")
+    end
+
+    # `Profiles.available_profiles` collapses to just the profile last
+    # validated with, so a process that conformed one file would answer a
+    # later `--profile` check against a list of one. Measured on 0.2.2:
+    # six before, `[:base]` after, six again once the cache is cleared.
+    it "leaves every profile still discoverable afterwards" do
+      SvgConform::Profiles.clear_cache!
+      before = SvgConform::Profiles.available_profiles
+
+      conform("valid")
+
+      expect(before.length).to be > 1
+      expect(SvgConform::Profiles.available_profiles).to match_array(before)
+    end
+
+    # The clear has to survive a validation that blew up, or one bad file
+    # poisons the profile list for the rest of the process.
+    it "leaves the profiles discoverable when validation raises" do
+      SvgConform::Profiles.clear_cache!
+      before = SvgConform::Profiles.available_profiles
+      allow(SvgConform::Validator).to receive(:new).and_raise(SvgConform::ValidationError, "boom")
+
+      expect { conform("valid") }.to raise_error(SvgConform::ValidationError)
+      expect(SvgConform::Profiles.available_profiles).to match_array(before)
+    end
+
+    # svg_conform leaves `severity` nil on most issues -- its own
+    # `ValidationIssue#initialize` defaults it, and neither `add_warning`
+    # nor `add_notice` passes one -- so `type` has to be the fallback.
+    # `:validity_error` is the odd one out: it is a SEVERITY that means
+    # error, filed under a third bucket while still stamped `type: :error`.
+    # The first three rows are the ones that DISCRIMINATE, and the table
+    # is worth nothing without them: every row where severity and type
+    # agree is satisfied by reading either field, so a table of only those
+    # would pass a mapping that ignored severity entirely. Measured -- with
+    # only the agreeing rows, dropping `raw.severity ||` left the suite
+    # green.
+    {
+      { severity: :warning, type: :error } => "warning",
+      { severity: :info, type: :error } => "info",
+      { severity: :validity_error, type: :error } => "error",
+      { severity: nil, type: :warning } => "warning",
+      { severity: nil, type: :info } => "info",
+      { severity: :error, type: :error } => "error"
+    }.each do |raw, expected|
+      it "maps severity #{raw[:severity].inspect} / type #{raw[:type].inspect} to #{expected}" do
+        stub_validation(
+          errors: [issue_double(raw[:type], "some_requirement", severity: raw[:severity])]
+        )
+
+        expect(conform("valid").issues.map(&:severity)).to eq([expected])
+      end
+    end
+
+    # A type svg_conform grows past the three it has today. Reporting it
+    # as an error is the choice that cannot understate a finding; dropping
+    # it is the one outcome a report must never have.
+    it "reports an unknown issue type rather than dropping it" do
+      stub_validation(validity_errors: [issue_double(:something_new, "future_requirement")])
+
+      expect(conform("valid").issues.map { |issue| [issue.severity, issue.code] })
+        .to eq([%w[error future_requirement]])
+    end
+
+    # All three buckets, in svg_conform's own order. Reading `errors`
+    # alone would silently drop a warning, and `ValidationResult` keeps
+    # the three apart rather than merging them.
+    it "collects errors, warnings and validity errors alike" do
+      stub_validation(
+        errors: [issue_double(:error, "an_error")],
+        warnings: [issue_double(:warning, "a_warning")],
+        validity_errors: [issue_double(:error, "a_validity_error")]
+      )
+
+      expect(conform("valid").issues.map(&:code))
+        .to eq(%w[an_error a_warning a_validity_error])
+    end
+
+    # nil rather than an all-nil Location. svg_conform reads line and
+    # column off the issue's node, and the SAX path leaves both nil on
+    # every issue measured, so a Location would be a position nobody
+    # reported.
+    it "carries no location when the issue reports no position" do
+      expect(conform("no_viewbox").issues.map(&:location)).to eq([nil, nil])
+    end
+
+    it "carries the position when the issue reports one" do
+      stub_validation(errors: [issue_double(:error, "positioned", line: 4, column: 11)])
+
+      expect(conform("valid").issues.first.location)
+        .to have_attributes(line: 4, column: 11)
+    end
+  end
 end
