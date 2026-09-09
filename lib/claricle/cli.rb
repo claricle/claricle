@@ -33,10 +33,21 @@ module Claricle
     # last shell call's value. That is a deliberate change: the recorder's
     # call list is this class's internals and must not become an answer.
     #
-    # Recording swaps `self.shell`, so a frozen `Cli` instance cannot run
-    # `help`. Freezing a Thor instance was never supported anyway -- Thor
-    # builds its default shell lazily into `@shell` on first use.
+    # A FROZEN instance still gets help, unrecorded. Recording swaps
+    # `self.shell`, which a frozen receiver refuses -- and Thor's own `help`
+    # works on one, so silently losing that would be a regression rather
+    # than a limitation. An earlier comment here justified the loss by
+    # saying Thor builds its shell lazily; that is wrong. Thor assigns
+    # `@shell` during construction (`thor-1.5.0/lib/thor/shell.rb:44-47`),
+    # so the object is frozen with a shell already in it.
+    #
+    # The frozen path gets exactly what it had before this class existed:
+    # Thor's help, written straight out, with no closed-output tolerance.
+    # That is not a silent downgrade -- there is nowhere to record to, and
+    # pretending otherwise would need a mutation the caller forbade.
     def help(command = nil, subcommand = false) # rubocop:disable Style/OptionalBooleanParameter
+      return super if frozen?
+
       output = recorded_help(shell) { super(command, subcommand) }
       tolerate_closed_output { output.write_to }
     end
@@ -394,8 +405,10 @@ module Claricle
       # method, so whatever this returns becomes its return value on the
       # success path -- and `@calls` is this class's own internals.
       def write_to
-        @calls.each do |method, arguments, options, block|
-          @destination.__send__(method, *arguments, **options, &block)
+        @calls.each do |method, arguments, options, block, padding|
+          replaying_at(padding) do
+            @destination.__send__(method, *arguments, **options, &block)
+          end
         end
         nil
       end
@@ -414,9 +427,41 @@ module Claricle
 
       private
 
+      # The padding is captured HERE, with the call, and restored for the
+      # replay. `indent` is forwarded immediately, because it is a state
+      # change rather than a write -- but Thor's `indent` only holds its
+      # padding for the duration of its block, so by the time a recorded
+      # call replays the block has exited and the padding is back to what
+      # it was. Measured on a subclass doing `shell.indent(2) { super }`:
+      # Thor printed "    Commands:" and this printed "Commands:".
+      #
+      # Recording the padding rather than deferring `indent` is deliberate.
+      # `indent` yields, and a deferred yield would run the caller's block
+      # at replay time, in a different order than it asked for.
       def record(method, arguments, options, block)
-        @calls << [method, arguments, options, block]
+        @calls << [method, arguments, options, block, captured_padding]
         nil
+      end
+
+      # nil means "this shell does not report a padding, so do not touch
+      # one" -- a `BasicObject` shell answering only the writing methods is
+      # a shape Thor drives, and it must stay drivable here.
+      def captured_padding
+        return nil unless destination_responds?(:padding, false)
+
+        @destination.padding
+      end
+
+      def replaying_at(padding)
+        return yield if padding.nil? || !destination_responds?(:padding=, false)
+
+        previous = @destination.padding
+        @destination.padding = padding
+        begin
+          yield
+        ensure
+          @destination.padding = previous
+        end
       end
 
       # A `BasicObject` shell has no `respond_to?` at all, and answering

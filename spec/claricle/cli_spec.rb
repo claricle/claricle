@@ -459,6 +459,43 @@ RSpec.describe Claricle::Cli::Runner do
       expect(sink.string).to include("Display Claricle version")
     end
 
+    # Thor's `indent` raises the padding, yields, and lowers it again.
+    # Recording defers every write past that block, so a recorder reading
+    # padding at REPLAY time reads the restored value and prints the line
+    # flush left -- the indentation the caller asked for is silently lost.
+    it "replays a write at the padding that was in force when it recorded" do
+      sink = StringIO.new
+      subclass = Class.new(Claricle::Cli) do
+        def self.help(shell, *)
+          shell.indent(2) { shell.say("Indented heading") }
+          super
+        end
+      end
+      shell = Thor::Base.shell.new
+      shell.define_singleton_method(:stdout) { sink }
+
+      subclass.new([], {}, shell: shell).help
+
+      expect(sink.string).to start_with("    Indented heading\n")
+      expect(sink.string).to include("\nCommands:\n")
+    end
+
+    # Thor assigns `@shell` during construction (thor's shell.rb, in
+    # `initialize`), so a frozen Cli is frozen WITH a shell in it and
+    # Thor's own `help` prints from one happily. Recording assigns
+    # `self.shell`, which a frozen receiver refuses, so the frozen path
+    # skips recording instead of raising FrozenError at a caller that
+    # worked before this class existed.
+    it "prints help on a frozen instance" do
+      sink = StringIO.new
+      shell = Thor::Base.shell.new
+      shell.define_singleton_method(:stdout) { sink }
+      cli = Claricle::Cli.new([], {}, shell: shell).freeze
+
+      expect { cli.help("version") }.not_to raise_error
+      expect(sink.string).to include("Display Claricle version")
+    end
+
     it "writes help through a print/puts/flush-only stream" do
       contents = +""
       sink = Object.new
