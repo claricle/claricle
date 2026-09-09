@@ -20,35 +20,31 @@ module Claricle
       tolerate_closed_output { puts "Claricle version #{Claricle::VERSION}" }
     end
 
-    # Thor supplies this command. Keep a closed consumer of command output
-    # successful without hiding an EPIPE raised by the command's own work.
+    # Thor supplies this command. The rescue is WIDE on purpose: it covers
+    # the text generation as well as the write, so an `Errno::EPIPE` raised
+    # while Thor is still building the help page reports success too.
     #
-    # General help finishes command generation and sorting before it calls
-    # the shell. Command help starts with `shell.say`, then performs more
-    # generation such as building its banner. Thor exposes both through one
-    # `super` call, so rescuing that call hides later generation failures.
-    # Record its shell calls first, then replay them inside the output rescue.
+    # Narrowing it to the write half was tried and abandoned, and the
+    # reason is worth keeping so it is not tried again. Narrowing needs the
+    # writes buffered, which needs Thor's shell calls recorded and replayed
+    # later -- and a replayed call cannot be given back the shell state it
+    # was made in. Three review rounds found seven separate ways that goes
+    # wrong on shells Thor itself drives correctly: a write recorded inside
+    # `indent` replays flush left, one recorded inside `mute` replays and
+    # prints, one recorded while `base.options[:quiet]` was set replays and
+    # prints, restoring padding raises on a frozen shell, a shell that
+    # reports padding without accepting it loses its indentation, writing
+    # some calls immediately and deferring the rest reorders the page, and
+    # a frozen `Cli` cannot have its shell swapped at all.
     #
-    # Returns nil on the success path, where Thor's own `help` returned the
-    # last shell call's value. That is a deliberate change: the recorder's
-    # call list is this class's internals and must not become an answer.
-    #
-    # A FROZEN instance takes the WIDE rescue, which is what this class
-    # narrows for everyone else. Narrowing needs the shell swapped for a
-    # recorder, and a frozen receiver refuses that -- so the choice on this
-    # path is the wide rescue or no rescue, and no rescue would take away
-    # closed-output tolerance a frozen caller already had.
-    #
-    # Thor's own `help` works on a frozen instance because Thor assigns
-    # `@shell` during construction (`thor-1.5.0/lib/thor/shell.rb`, in
-    # `initialize`), so the object is frozen with a shell already in it. An
-    # earlier comment here claimed Thor built that shell lazily and used it
-    # to justify dropping the path; the claim is wrong.
+    # The state a shell carries is Thor's to grow, so that list is not
+    # closeable. What the narrowing would have bought is one distinction --
+    # a broken pipe during generation reporting 4 rather than 0 -- and for
+    # a page the user piped into `head` both answers mean the same thing.
+    # The two specs below pin the wide behaviour so a future change to it
+    # is deliberate rather than accidental.
     def help(command = nil, subcommand = false) # rubocop:disable Style/OptionalBooleanParameter
-      return tolerate_closed_output { super } if frozen?
-
-      output = recorded_help(shell) { super(command, subcommand) }
-      tolerate_closed_output { output.write_to }
+      tolerate_closed_output { super(command, subcommand) }
     end
 
     desc "inspect FILE", "Report a file's format and metadata"
@@ -360,174 +356,7 @@ module Claricle
       end
     end
 
-    # Thor's shell methods are the narrowest output boundary it exposes:
-    # work inside a custom method cannot be separated from that method's
-    # write. Recording whole calls preserves the exact destination shell's
-    # instance state and singleton behaviour when they are replayed.
-    #
-    # Only the writing half of Thor's shell contract is recorded. Everything
-    # else -- `set_color`, `terminal_width`, `padding` and any method a
-    # custom shell adds -- is forwarded to the destination straight away and
-    # returns the destination's own answer. A query has nothing to defer,
-    # and holding it back would return nil to code that needs the value.
-    # Thor hands this recorder to `Cli.help` and `Cli.command_help`, so a
-    # subclass that overrides those and asks the shell for a colour keeps
-    # working.
-    #
-    # Replay dispatches through `__send__`, not `public_send`, because
-    # `public_send` is a method Thor never asks a shell for. A shell built
-    # on `BasicObject` inherits only the eight methods BasicObject defines
-    # -- `__send__` is one of them, `public_send` is not, since it comes
-    # from Object -- and Thor drives such a shell perfectly well. Routing
-    # replay through `public_send` would therefore narrow the set of shells
-    # this CLI accepts below the set Thor itself accepts.
-    #
-    # The recorded arguments are the caller's own objects, not copies. A
-    # shell argument mutated between the call and the replay is printed
-    # with its later value. Copying every argument would cost more than the
-    # case is worth, and Thor's help passes freshly built strings and rows.
-    class HelpOutput
-      # The writing half of Thor::Shell::SHELL_DELEGATED_METHODS. Reading
-      # and colouring methods are missing on purpose: they are forwarded.
-      DEFERRED = %i[
-        say say_error say_status error print_table print_wrapped
-        print_in_columns
-      ].freeze
-      private_constant :DEFERRED
-
-      def initialize(destination)
-        @destination = destination
-        @calls = []
-        @baseline = readable_padding
-      end
-
-      # Returns nil rather than the `each` receiver. `help` is a public
-      # method, so whatever this returns becomes its return value on the
-      # success path -- and `@calls` is this class's own internals.
-      def write_to
-        @calls.each do |method, arguments, options, block, padding|
-          replaying_at(padding) do
-            @destination.__send__(method, *arguments, **options, &block)
-          end
-        end
-        nil
-      end
-
-      # The one rule the deferral runs on: replay a write LATER only when
-      # the shell state it was made in can be put back. Anything else is
-      # written through immediately, which costs that single call its
-      # closed-output tolerance and buys back exact fidelity with what Thor
-      # would have printed. Fidelity wins -- a wrong help page is a defect,
-      # a crash on a closed pipe is the narrow case this class exists for,
-      # and no shape reachable through Claricle's own CLI takes this
-      # branch.
-      #
-      # Two states are known to matter, both measured against thor 1.5.0:
-      #
-      #   mute     `mute` yields with writes suppressed and resets after,
-      #            so a deferred call replays UNMUTED and prints what the
-      #            caller silenced. Forwarding while muted lets the shell
-      #            itself decide which methods mute covers, rather than
-      #            encoding that list here.
-      #
-      #   padding  `indent` raises padding, yields, and lowers it again, so
-      #            a deferred call replays at the OUTER padding and prints
-      #            flush left. Restoring it needs `padding=` on an unfrozen
-      #            shell; where that is missing the call goes through now.
-      def deferrable?(padding)
-        return false if muted?
-
-        padding == @baseline || settable_padding?
-      end
-
-      def method_missing(name, *arguments, **options, &block)
-        return record(name, arguments, options, block) if DEFERRED.include?(name)
-
-        @destination.__send__(name, *arguments, **options, &block)
-      end
-
-      def respond_to_missing?(name, include_private = false)
-        DEFERRED.include?(name) ||
-          destination_responds?(name, include_private) ||
-          super
-      end
-
-      private
-
-      # `indent` and `mute` are forwarded as they happen, because both are
-      # state changes rather than writes, and both yield -- deferring a
-      # yield would run the caller's block at replay time, out of the order
-      # it asked for. What is recorded alongside each write is the state
-      # those blocks had established when the write was made.
-      def record(method, arguments, options, block)
-        padding = readable_padding
-        return forward(method, arguments, options, block) unless deferrable?(padding)
-
-        @calls << [method, arguments, options, block, padding]
-        nil
-      end
-
-      def forward(method, arguments, options, block)
-        @destination.__send__(method, *arguments, **options, &block)
-        nil
-      end
-
-      # nil means "this shell does not report a padding", so there is no
-      # padding to lose -- a `BasicObject` shell answering only the writing
-      # methods is a shape Thor drives, and it must stay drivable here.
-      def readable_padding
-        return nil unless destination_responds?(:padding, false)
-
-        @destination.padding
-      end
-
-      def settable_padding?
-        destination_responds?(:padding=, false) && !@destination.frozen?
-      end
-
-      def muted?
-        destination_responds?(:mute?, false) && @destination.mute?
-      end
-
-      # A shell that will not take a `padding=` is never assigned to --
-      # that is what keeps a frozen shell printable, since writing even
-      # the same value back to one raises `FrozenError` before any output.
-      # `deferrable?` has already refused to defer a write whose padding
-      # such a shell could not reproduce, so nothing is lost by skipping.
-      def replaying_at(padding)
-        return yield if padding.nil? || !settable_padding?
-
-        previous = @destination.padding
-        @destination.padding = padding
-        begin
-          yield
-        ensure
-          @destination.padding = previous
-        end
-      end
-
-      # A `BasicObject` shell has no `respond_to?` at all, and answering
-      # "no" for it matches what Thor sees when it asks the same question.
-      def destination_responds?(name, include_private)
-        @destination.respond_to?(name, include_private)
-      rescue NoMethodError
-        false
-      end
-    end
-    private_constant :HelpOutput
-
     private
-
-    # Restore the invocation's shell before replay so generation failures
-    # leave no replacement behind and custom output runs on the exact object.
-    def recorded_help(destination)
-      output = HelpOutput.new(destination)
-      self.shell = output
-      yield
-      output
-    ensure
-      self.shell = destination
-    end
 
     def tolerate_closed_output
       yield
