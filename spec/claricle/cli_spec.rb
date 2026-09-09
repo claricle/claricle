@@ -496,6 +496,86 @@ RSpec.describe Claricle::Cli::Runner do
       expect(sink.string).to include("Display Claricle version")
     end
 
+    # The frozen path cannot be narrowed -- narrowing needs the shell
+    # swapped -- so it keeps the WIDE rescue rather than losing tolerance
+    # a frozen caller already had. A real pipe, not a stub: the errno has
+    # to come from the OS write, which is the only thing that proves the
+    # rescue is on the right side of the boundary.
+    it "tolerates a closed pipe on a frozen instance" do
+      reader, writer = IO.pipe
+      reader.close
+      shell = Thor::Base.shell.new
+      shell.define_singleton_method(:stdout) { writer }
+
+      expect(Claricle::Cli.new([], {}, shell: shell).freeze.help("version").code).to eq(0)
+    ensure
+      writer&.close
+    end
+
+    # `mute` yields with writes suppressed and clears the flag afterwards,
+    # so a call deferred from inside the block would replay UNMUTED and
+    # print exactly what the caller silenced. A muted write goes straight
+    # to the shell instead, which decides for itself what mute covers.
+    it "does not print a write the caller muted" do
+      sink = StringIO.new
+      subclass = Class.new(Claricle::Cli) do
+        def self.help(shell, *)
+          shell.mute { shell.say("suppressed") }
+        end
+      end
+      shell = Thor::Base.shell.new
+      shell.define_singleton_method(:stdout) { sink }
+
+      subclass.new([], {}, shell: shell).help
+
+      expect(sink.string).to eq("")
+    end
+
+    # Thor prints from a frozen shell happily, so replay must not assign
+    # to one. Restoring a padding that never moved was still an assignment
+    # and raised FrozenError before any output reached the sink.
+    it "prints through a shell frozen after construction" do
+      sink = StringIO.new
+      shell = Thor::Base.shell.new
+      shell.define_singleton_method(:stdout) { sink }
+      cli = Claricle::Cli.new([], {}, shell: shell)
+      shell.freeze
+
+      expect { cli.help("version") }.not_to raise_error
+      expect(sink.string).to include("Display Claricle version")
+    end
+
+    # A shell may report its padding and refuse to have it set, driving
+    # its own `indent` internally. Thor prints such a shell indented, so
+    # deferring the write -- which can only replay at the outer padding --
+    # would silently flatten it. The write goes through immediately.
+    it "keeps indentation on a shell whose padding cannot be set" do
+      sink = StringIO.new
+      read_only = Class.new(Thor::Shell::Basic) do
+        attr_reader :padding
+
+        undef_method :padding=
+
+        def indent(count = 1)
+          original = @padding
+          @padding = original + count
+          yield
+        ensure
+          @padding = original
+        end
+      end.new
+      read_only.define_singleton_method(:stdout) { sink }
+      subclass = Class.new(Claricle::Cli) do
+        def self.help(shell, *)
+          shell.indent(2) { shell.say("indented") }
+        end
+      end
+
+      subclass.new([], {}, shell: read_only).help
+
+      expect(sink.string).to eq("    indented\n")
+    end
+
     it "writes help through a print/puts/flush-only stream" do
       contents = +""
       sink = Object.new
