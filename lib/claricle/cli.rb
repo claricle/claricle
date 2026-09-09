@@ -33,20 +33,19 @@ module Claricle
     # last shell call's value. That is a deliberate change: the recorder's
     # call list is this class's internals and must not become an answer.
     #
-    # A FROZEN instance still gets help, unrecorded. Recording swaps
-    # `self.shell`, which a frozen receiver refuses -- and Thor's own `help`
-    # works on one, so silently losing that would be a regression rather
-    # than a limitation. An earlier comment here justified the loss by
-    # saying Thor builds its shell lazily; that is wrong. Thor assigns
-    # `@shell` during construction (`thor-1.5.0/lib/thor/shell.rb:44-47`),
-    # so the object is frozen with a shell already in it.
+    # A FROZEN instance takes the WIDE rescue, which is what this class
+    # narrows for everyone else. Narrowing needs the shell swapped for a
+    # recorder, and a frozen receiver refuses that -- so the choice on this
+    # path is the wide rescue or no rescue, and no rescue would take away
+    # closed-output tolerance a frozen caller already had.
     #
-    # The frozen path gets exactly what it had before this class existed:
-    # Thor's help, written straight out, with no closed-output tolerance.
-    # That is not a silent downgrade -- there is nowhere to record to, and
-    # pretending otherwise would need a mutation the caller forbade.
+    # Thor's own `help` works on a frozen instance because Thor assigns
+    # `@shell` during construction (`thor-1.5.0/lib/thor/shell.rb`, in
+    # `initialize`), so the object is frozen with a shell already in it. An
+    # earlier comment here claimed Thor built that shell lazily and used it
+    # to justify dropping the path; the claim is wrong.
     def help(command = nil, subcommand = false) # rubocop:disable Style/OptionalBooleanParameter
-      return super if frozen?
+      return tolerate_closed_output { super } if frozen?
 
       output = recorded_help(shell) { super(command, subcommand) }
       tolerate_closed_output { output.write_to }
@@ -399,6 +398,7 @@ module Claricle
       def initialize(destination)
         @destination = destination
         @calls = []
+        @baseline = readable_padding
       end
 
       # Returns nil rather than the `each` receiver. `help` is a public
@@ -411,6 +411,33 @@ module Claricle
           end
         end
         nil
+      end
+
+      # The one rule the deferral runs on: replay a write LATER only when
+      # the shell state it was made in can be put back. Anything else is
+      # written through immediately, which costs that single call its
+      # closed-output tolerance and buys back exact fidelity with what Thor
+      # would have printed. Fidelity wins -- a wrong help page is a defect,
+      # a crash on a closed pipe is the narrow case this class exists for,
+      # and no shape reachable through Claricle's own CLI takes this
+      # branch.
+      #
+      # Two states are known to matter, both measured against thor 1.5.0:
+      #
+      #   mute     `mute` yields with writes suppressed and resets after,
+      #            so a deferred call replays UNMUTED and prints what the
+      #            caller silenced. Forwarding while muted lets the shell
+      #            itself decide which methods mute covers, rather than
+      #            encoding that list here.
+      #
+      #   padding  `indent` raises padding, yields, and lowers it again, so
+      #            a deferred call replays at the OUTER padding and prints
+      #            flush left. Restoring it needs `padding=` on an unfrozen
+      #            shell; where that is missing the call goes through now.
+      def deferrable?(padding)
+        return false if muted?
+
+        padding == @baseline || settable_padding?
       end
 
       def method_missing(name, *arguments, **options, &block)
@@ -427,33 +454,48 @@ module Claricle
 
       private
 
-      # The padding is captured HERE, with the call, and restored for the
-      # replay. `indent` is forwarded immediately, because it is a state
-      # change rather than a write -- but Thor's `indent` only holds its
-      # padding for the duration of its block, so by the time a recorded
-      # call replays the block has exited and the padding is back to what
-      # it was. Measured on a subclass doing `shell.indent(2) { super }`:
-      # Thor printed "    Commands:" and this printed "Commands:".
-      #
-      # Recording the padding rather than deferring `indent` is deliberate.
-      # `indent` yields, and a deferred yield would run the caller's block
-      # at replay time, in a different order than it asked for.
+      # `indent` and `mute` are forwarded as they happen, because both are
+      # state changes rather than writes, and both yield -- deferring a
+      # yield would run the caller's block at replay time, out of the order
+      # it asked for. What is recorded alongside each write is the state
+      # those blocks had established when the write was made.
       def record(method, arguments, options, block)
-        @calls << [method, arguments, options, block, captured_padding]
+        padding = readable_padding
+        return forward(method, arguments, options, block) unless deferrable?(padding)
+
+        @calls << [method, arguments, options, block, padding]
         nil
       end
 
-      # nil means "this shell does not report a padding, so do not touch
-      # one" -- a `BasicObject` shell answering only the writing methods is
-      # a shape Thor drives, and it must stay drivable here.
-      def captured_padding
+      def forward(method, arguments, options, block)
+        @destination.__send__(method, *arguments, **options, &block)
+        nil
+      end
+
+      # nil means "this shell does not report a padding", so there is no
+      # padding to lose -- a `BasicObject` shell answering only the writing
+      # methods is a shape Thor drives, and it must stay drivable here.
+      def readable_padding
         return nil unless destination_responds?(:padding, false)
 
         @destination.padding
       end
 
+      def settable_padding?
+        destination_responds?(:padding=, false) && !@destination.frozen?
+      end
+
+      def muted?
+        destination_responds?(:mute?, false) && @destination.mute?
+      end
+
+      # A shell that will not take a `padding=` is never assigned to --
+      # that is what keeps a frozen shell printable, since writing even
+      # the same value back to one raises `FrozenError` before any output.
+      # `deferrable?` has already refused to defer a write whose padding
+      # such a shell could not reproduce, so nothing is lost by skipping.
       def replaying_at(padding)
-        return yield if padding.nil? || !destination_responds?(:padding=, false)
+        return yield if padding.nil? || !settable_padding?
 
         previous = @destination.padding
         @destination.padding = padding
