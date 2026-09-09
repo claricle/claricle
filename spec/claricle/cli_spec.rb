@@ -283,10 +283,6 @@ RSpec.describe Claricle::Cli::Runner do
       expect(described_class.run(%w[formats --json], output: StringIO.new)).to eq(4)
     end
 
-    # General help runs `printable_commands` before output. Command help
-    # queues "Usage:" first, then calls `banner` to generate its next line.
-    # Neither generation failure is an output-stream EPIPE, so both must
-    # remain outside the closed-output rescue.
     # `help`'s rescue deliberately covers generation as well as the write,
     # unlike every other command below. These two pin that, so narrowing it
     # cannot happen by accident -- the comment on `Cli#help` records the
@@ -365,12 +361,16 @@ RSpec.describe Claricle::Cli::Runner do
       expect(sink.string).to match(/\Acustom:Commands:\ncustom-table:\d+\ncustom:\n\z/)
     end
 
-    # Thor calls `shell.say` / `print_table` / `print_wrapped` and nothing
-    # else, and drives a shell that answers only those three happily. This
-    # one is built on `BasicObject`, which inherits eight methods and not
-    # `respond_to?`, `public_send` or anything else from Object -- so any
-    # future indirection through `help` has to reach it the way Thor does,
-    # rather than narrowing the shells this CLI accepts below Thor's own set.
+    # Thor drives a shell that answers `say`, `print_table`,
+    # `print_wrapped` and `respond_to?` -- FOUR, not the three it calls.
+    # Measured: a `BasicObject` shell without `respond_to?` never reaches
+    # help at all, dying in Thor's own construction with
+    # `NoMethodError: respond_to?`, which is why this one defines it.
+    #
+    # What `BasicObject` still withholds is everything else Object
+    # supplies, `public_send` included, so any future indirection through
+    # `help` has to reach this shell the way Thor does rather than
+    # narrowing the shells this CLI accepts below Thor's own set.
     it "writes onto a shell that does not inherit Object's methods" do
       reached = []
       bare = Class.new(BasicObject) do
@@ -397,12 +397,24 @@ RSpec.describe Claricle::Cli::Runner do
           super
         end
       end
+      coloured = []
       shell = Thor::Base.shell.new
       shell.define_singleton_method(:stdout) { sink }
+      shell.define_singleton_method(:set_color) do |text, *colors|
+        next text unless colors.include?(:green)
+
+        coloured << text
+        "REAL(#{text})"
+      end
 
       subclass.new([], {}, shell: shell).help
 
-      expect(sink.string).to include("Coloured heading")
+      # The marker is what makes this a query rather than an echo. A
+      # proxy that returned `set_color`'s ARGUMENT without ever asking the
+      # real shell would still print "Coloured heading", so asserting that
+      # alone passes on a shell whose answer was thrown away.
+      expect(sink.string).to include("REAL(Coloured heading)")
+      expect(coloured).to eq(["Coloured heading"])
       expect(sink.string).to include("Commands:")
     end
 
@@ -416,11 +428,16 @@ RSpec.describe Claricle::Cli::Runner do
       cli = Claricle::Cli.new([], {}, shell: shell)
 
       cli.help("version")
-      first = sink.string.bytesize
+      first = sink.string.dup
       cli.help("version")
 
+      # The CONTENT twice, not twice the byte count. A second call that
+      # wrote the same number of junk bytes satisfies a length check --
+      # measured, it stayed green -- so the length says nothing about
+      # whether the page was printed.
+      expect(first).to include("Display Claricle version")
       expect(cli.shell).to be(shell)
-      expect(sink.string.bytesize).to eq(first * 2)
+      expect(sink.string).to eq(first * 2)
     end
 
     # The five examples from here down all pin ONE property: `help` writes
@@ -492,6 +509,34 @@ RSpec.describe Claricle::Cli::Runner do
       subclass.new([], {}, shell: shell).help
 
       expect(sink.string).to eq("")
+    end
+
+    # A SECOND suppression switch, and it is not `mute?`. Thor's `say`
+    # also returns early when `base.options[:quiet]` is set, so a shell
+    # that is not muted can still be silent. The two are separate: a
+    # buffered `help` that consulted only `mute?` printed "suppressed"
+    # here while every mute example above stayed green.
+    #
+    # "visible" is written after quiet is cleared, so a run that printed
+    # nothing at all would fail too -- the assertion is which of the two
+    # lines survives, not that the page is empty.
+    it "does not print a write the caller silenced with the quiet option" do
+      sink = StringIO.new
+      subclass = Class.new(Claricle::Cli) do
+        def self.help(shell, *)
+          original = shell.base.options
+          shell.base.options = original.merge(quiet: true)
+          shell.say("suppressed")
+          shell.base.options = original
+          shell.say("visible")
+        end
+      end
+      shell = Thor::Base.shell.new
+      shell.define_singleton_method(:stdout) { sink }
+
+      subclass.new([], {}, shell: shell).help
+
+      expect(sink.string).to eq("visible\n")
     end
 
     # Thor prints from a frozen shell happily. Reproducing shell state for
