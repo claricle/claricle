@@ -287,16 +287,21 @@ RSpec.describe Claricle::Cli::Runner do
     # queues "Usage:" first, then calls `banner` to generate its next line.
     # Neither generation failure is an output-stream EPIPE, so both must
     # remain outside the closed-output rescue.
-    it "maps help generation's broken pipe to 4" do
+    # `help`'s rescue deliberately covers generation as well as the write,
+    # unlike every other command below. These two pin that, so narrowing it
+    # cannot happen by accident -- the comment on `Cli#help` records the
+    # three rounds of measurement that settled it. `printable_commands`
+    # builds the general help page; `banner` builds one command's.
+    it "returns 0 when help generation hits a broken pipe" do
       allow(Claricle::Cli).to receive(:printable_commands).and_raise(Errno::EPIPE)
 
-      expect(described_class.run(["help"], output: StringIO.new)).to eq(4)
+      expect(described_class.run(["help"], output: StringIO.new)).to eq(0)
     end
 
-    it "maps command help generation's broken pipe to 4" do
+    it "returns 0 when command help generation hits a broken pipe" do
       allow(Claricle::Cli).to receive(:banner).and_raise(Errno::EPIPE)
 
-      expect(described_class.run(%w[help version], output: StringIO.new)).to eq(4)
+      expect(described_class.run(%w[help version], output: StringIO.new)).to eq(0)
     end
 
     # The stored writer stays OPEN; it is the pipe's READER that is gone,
@@ -354,34 +359,19 @@ RSpec.describe Claricle::Cli::Runner do
 
       # Deliberately NOT an equality check on the row count. The command
       # inventory is pinned once, on its own example further down; matching
-      # it here as well would make adding a command look like a
-      # singleton-replay regression -- the same trap the terminator
-      # example's comment warns about.
+      # it here as well would make adding a command look like a regression
+      # in whose shell got used -- the same trap the terminator example's
+      # comment warns about.
       expect(sink.string).to match(/\Acustom:Commands:\ncustom-table:\d+\ncustom:\n\z/)
     end
 
-    # `help` is public, so whatever the replay returns becomes its return
-    # value on the success path. Returning the recorder's `@calls` would
-    # hand a library caller this class's internals -- a list of recorded
-    # method names and argument arrays -- as if it were an answer.
-    it "returns nil from help rather than the recorded calls" do
-      sink = StringIO.new
-      shell = Thor::Base.shell.new
-      shell.define_singleton_method(:stdout) { sink }
-      cli = Claricle::Cli.new([], {}, shell: shell)
-
-      expect(cli.help("version")).to be_nil
-      expect(sink.string).to include("Display Claricle version")
-    end
-
     # Thor calls `shell.say` / `print_table` / `print_wrapped` and nothing
-    # else, so replay must not require any method beyond those three. A
-    # `BasicObject` shell inherits only the eight methods BasicObject
-    # defines; `public_send` is an Object method and is NOT among them.
-    # Thor's own help path drives such a shell happily, so dispatching
-    # replay through `public_send` would narrow the set of shells this CLI
-    # accepts below what Thor itself accepts.
-    it "replays onto a shell that does not inherit Object's methods" do
+    # else, and drives a shell that answers only those three happily. This
+    # one is built on `BasicObject`, which inherits eight methods and not
+    # `respond_to?`, `public_send` or anything else from Object -- so any
+    # future indirection through `help` has to reach it the way Thor does,
+    # rather than narrowing the shells this CLI accepts below Thor's own set.
+    it "writes onto a shell that does not inherit Object's methods" do
       reached = []
       bare = Class.new(BasicObject) do
         define_method(:respond_to?) { |*| false }
@@ -395,10 +385,10 @@ RSpec.describe Claricle::Cli::Runner do
       expect(reached).to eq(%i[say print_table say])
     end
 
-    # Thor passes the recorder to `Cli.help` and `Cli.command_help`, so a
-    # subclass that overrides either one can call any shell method on it.
-    # Only writing methods are held back; a query like `set_color` goes
-    # straight to the real shell and returns its real answer.
+    # Thor hands the shell to `Cli.help` and `Cli.command_help`, so a
+    # subclass overriding either one can call ANY shell method on it, not
+    # just the writing ones. `set_color` is a query: it has to return the
+    # real shell's real answer, in the middle of building the page.
     it "forwards a non-writing shell method that a subclass asks for" do
       sink = StringIO.new
       subclass = Class.new(Claricle::Cli) do
@@ -417,8 +407,8 @@ RSpec.describe Claricle::Cli::Runner do
     end
 
     # `help` is public, so a library caller can hold one Cli instance and
-    # call it twice. Without the restore the second call finds the dead
-    # recorder still installed and records into it instead of printing.
+    # call it twice and get the page twice. Anything `help` installs on the
+    # instance for the duration of a call has to come back off it.
     it "restores the caller's shell so a second help still reaches it" do
       sink = StringIO.new
       shell = Thor::Base.shell.new
@@ -433,37 +423,16 @@ RSpec.describe Claricle::Cli::Runner do
       expect(sink.string.bytesize).to eq(first * 2)
     end
 
-    # The restore is an `ensure` so a failed generation cannot leave the
-    # recorder on the instance.
-    it "restores the caller's shell even when generation raises" do
-      sink = StringIO.new
-      shell = Thor::Base.shell.new
-      shell.define_singleton_method(:stdout) { sink }
-      cli = Claricle::Cli.new([], {}, shell: shell)
-
-      # Raise on the FIRST call only, so the second call can use the real
-      # `banner` and show that the shell came back.
-      raised = false
-      allow(Claricle::Cli).to receive(:banner).and_wrap_original do |original, *arguments|
-        next original.call(*arguments) if raised
-
-        raised = true
-        raise Errno::EPIPE
-      end
-
-      expect { cli.help("version") }.to raise_error(Errno::EPIPE)
-      expect(cli.shell).to be(shell)
-
-      cli.help("version")
-
-      expect(sink.string).to include("Display Claricle version")
-    end
-
-    # Thor's `indent` raises the padding, yields, and lowers it again.
-    # Recording defers every write past that block, so a recorder reading
-    # padding at REPLAY time reads the restored value and prints the line
-    # flush left -- the indentation the caller asked for is silently lost.
-    it "replays a write at the padding that was in force when it recorded" do
+    # The five examples from here down all pin ONE property: `help` writes
+    # through the caller's shell as it goes, so every state that shell is
+    # holding at the moment of a write still applies to it. Each is a shape
+    # that a buffered `help` was measured getting wrong, and together they
+    # are what a future attempt at buffering has to keep working. The
+    # comment on `Cli#help` records why that attempt was abandoned.
+    #
+    # Thor's `indent` raises the padding, yields, and lowers it again, so a
+    # write held past the block prints flush left.
+    it "writes at the padding in force when the write is made" do
       sink = StringIO.new
       subclass = Class.new(Claricle::Cli) do
         def self.help(shell, *)
@@ -482,10 +451,8 @@ RSpec.describe Claricle::Cli::Runner do
 
     # Thor assigns `@shell` during construction (thor's shell.rb, in
     # `initialize`), so a frozen Cli is frozen WITH a shell in it and
-    # Thor's own `help` prints from one happily. Recording assigns
-    # `self.shell`, which a frozen receiver refuses, so the frozen path
-    # skips recording instead of raising FrozenError at a caller that
-    # worked before this class existed.
+    # prints from one happily. Any scheme that swaps `self.shell` loses
+    # this caller entirely.
     it "prints help on a frozen instance" do
       sink = StringIO.new
       shell = Thor::Base.shell.new
@@ -496,11 +463,8 @@ RSpec.describe Claricle::Cli::Runner do
       expect(sink.string).to include("Display Claricle version")
     end
 
-    # The frozen path cannot be narrowed -- narrowing needs the shell
-    # swapped -- so it keeps the WIDE rescue rather than losing tolerance
-    # a frozen caller already had. A real pipe, not a stub: the errno has
-    # to come from the OS write, which is the only thing that proves the
-    # rescue is on the right side of the boundary.
+    # A real pipe, not a stub: the errno has to come from the OS write,
+    # which is the only thing that proves the rescue actually covers it.
     it "tolerates a closed pipe on a frozen instance" do
       reader, writer = IO.pipe
       reader.close
@@ -513,9 +477,8 @@ RSpec.describe Claricle::Cli::Runner do
     end
 
     # `mute` yields with writes suppressed and clears the flag afterwards,
-    # so a call deferred from inside the block would replay UNMUTED and
-    # print exactly what the caller silenced. A muted write goes straight
-    # to the shell instead, which decides for itself what mute covers.
+    # so a write held past the block prints exactly what the caller
+    # silenced.
     it "does not print a write the caller muted" do
       sink = StringIO.new
       subclass = Class.new(Claricle::Cli) do
@@ -531,9 +494,9 @@ RSpec.describe Claricle::Cli::Runner do
       expect(sink.string).to eq("")
     end
 
-    # Thor prints from a frozen shell happily, so replay must not assign
-    # to one. Restoring a padding that never moved was still an assignment
-    # and raised FrozenError before any output reached the sink.
+    # Thor prints from a frozen shell happily. Reproducing shell state for
+    # a held write means assigning to it, which raises FrozenError here
+    # before any output reaches the sink.
     it "prints through a shell frozen after construction" do
       sink = StringIO.new
       shell = Thor::Base.shell.new
@@ -546,9 +509,8 @@ RSpec.describe Claricle::Cli::Runner do
     end
 
     # A shell may report its padding and refuse to have it set, driving
-    # its own `indent` internally. Thor prints such a shell indented, so
-    # deferring the write -- which can only replay at the outer padding --
-    # would silently flatten it. The write goes through immediately.
+    # its own `indent` internally. Thor prints such a shell indented; a
+    # held write has no way to put that padding back, so it flattens.
     it "keeps indentation on a shell whose padding cannot be set" do
       sink = StringIO.new
       read_only = Class.new(Thor::Shell::Basic) do
