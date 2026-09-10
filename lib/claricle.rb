@@ -7,6 +7,9 @@ require_relative "claricle/models/location"
 require_relative "claricle/models/issue"
 require_relative "claricle/models/report"
 require_relative "claricle/models/inspection"
+require_relative "claricle/models/batch_item"
+require_relative "claricle/fault"
+require_relative "claricle/batch"
 require_relative "claricle/registry"
 require_relative "claricle/detector"
 require_relative "claricle/image"
@@ -66,5 +69,64 @@ module Claricle
     false
   end
 
-  private_class_method :accumulate, :conclusive?
+  # Does everything named here conform? Exactly one of a positional path or
+  # `pattern:` -- issue #1's own examples use both shapes.
+  #
+  # A predicate answers about conformance and raises about everything else.
+  # A nonconformant file is `false`; an unknown format, an unsupported one,
+  # a missing file or a delegate crash raises, out of the batch shape too,
+  # so an operational failure never reads as a verdict.
+  #
+  # Both shapes reach the same expansion, so a positional means here exactly
+  # what it means on the command line: a literal path when it names a file,
+  # and a glob otherwise.
+  def self.conform?(path = nil, pattern: nil, strict: false, profile: nil)
+    raise InvocationError, "give exactly one of a path or pattern" unless path.nil? ^ pattern.nil?
+
+    result = conformance_batch(*[path].compact, pattern: pattern,
+                                                strict: strict, profile: profile)
+    raise result.highest_error if result.highest_error
+
+    result.exit_code.zero?
+  end
+
+  def self.conformance_report(path, profile: nil)
+    checked_profile(profile)
+    Image.from_path(path).conformance_report
+  end
+
+  # A batch predicate loses information, so a caller can have the whole
+  # result instead: ordered per-file outcomes plus the aggregate status,
+  # which is what the command prints. Takes the command's own argument
+  # shape -- files, a pattern, or both -- so the two cannot drift about
+  # what conformance means.
+  def self.conformance_batch(*paths, pattern: nil, strict: false, profile: nil)
+    # Checked eagerly here, before the batch runs, so a profile no format
+    # defines is one invocation error about the call and never a row in a
+    # report -- `conformance_report` checks it again per file, but only as a
+    # no-op once this call has already passed.
+    checked_profile(profile)
+    Batch.run(paths, pattern: pattern,
+                     classify: ->(report) { conformant?(report, strict: strict) ? 0 : 1 }) do |file|
+      conformance_report(file, profile: profile)
+    end
+  end
+
+  # Any error means no; a warning alone means suspicious, which passes
+  # unless the caller asked for strict; info never downgrades anything.
+  def self.conformant?(report, strict:)
+    strict ? report.valid == :yes : report.valid != :no
+  end
+
+  # No handler implements conformance yet, so no format defines a profile
+  # yet -- and a profile a format does not define is a bad invocation, not
+  # a flag to accept and quietly drop. The per-format table of profile names
+  # arrives with the handlers that have them.
+  def self.checked_profile(profile)
+    return if profile.nil?
+
+    raise InvocationError, "no format defines a profile yet: #{profile.inspect}"
+  end
+
+  private_class_method :accumulate, :conclusive?, :conformant?, :checked_profile
 end
