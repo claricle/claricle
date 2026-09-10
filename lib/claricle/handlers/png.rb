@@ -588,12 +588,18 @@ module Claricle
         readable(image, ihdr, chunks)
       end
 
-      # The mapping itself, and why it must never be `validate_file`, are
-      # documented on `ConformanceMapper.report` above.
+      # png_conform's own mapping is documented on `ConformanceMapper.report`
+      # above. Structural issues run FIRST (D23): a cheap bounded-header
+      # pass answering whether the chunk sequence is well-formed, before
+      # the delegate's semantic opinions. Neither short-circuits nor
+      # dedupes against the other -- they were never designed to agree,
+      # and each catches shapes the other misses (a duplicate IHDR here,
+      # a bad signature only there), so both ship as-is.
       def conformance_report(image)
         require "png_conform"
 
-        ConformanceMapper.report(image)
+        Models::Report.new(source_path: image.path, format: image.format.to_s,
+                           issues: structural_issues(image) + ConformanceMapper.report(image).issues)
       end
 
       private
@@ -712,10 +718,9 @@ module Claricle
         )
       end
 
-      # The structural pre-pass (D23). Built and spec'd here; the call
-      # from `conformance_report` lands with item 03's conform wiring,
-      # which must also decide the delegate reader -- neither of
-      # png_conform's is safe on every input.
+      # The structural pre-pass (D23), called from `conformance_report`.
+      # Opens and closes the scanner's file independently of the
+      # delegate.
       def structural_issues(image)
         image.with_path { |path| File.open(path, "rb") { |io| StructureScanner.new(io).issues } }
       end
