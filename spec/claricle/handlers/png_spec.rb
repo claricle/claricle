@@ -831,12 +831,20 @@ RSpec.describe "Claricle PNG handler" do
         report = Claricle::Image.from_path(path).conformance_report
 
         expect(report.valid).to eq(:no)
+        # The structural scanner's own read of this file, independent of
+        # which platform arm the delegate takes below.
+        structural = have_attributes(
+          severity: "error", code: "png.chunk_truncated",
+          location: have_attributes(chunk: "IHDR", byte_offset: 8, byte_length: 8)
+        )
         if read_refuses_the_length
           expect(report.issues).to contain_exactly(
+            structural,
             have_attributes(severity: "error", code: "png.chunk_length_unreadable", location: nil)
           )
         else
           expect(report.issues).to contain_exactly(
+            structural,
             have_attributes(severity: "error", code: "png.missing_ihdr_chunk",
                             location: have_attributes(chunk: "IHDR", byte_offset: nil)),
             have_attributes(severity: "error", code: "png.missing_iend_chunk",
@@ -874,6 +882,52 @@ RSpec.describe "Claricle PNG handler" do
       image = Claricle::Image.from_path(conform_fixture("valid.png"))
 
       expect { image.conformance_report }.to raise_error(Errno::EACCES)
+    end
+
+    # Proves: (a) the scanner's own finding is present at all, (b) the
+    # delegate still runs on the same file (no short-circuit), (c)
+    # structural precedes the delegate's even where every issue is the
+    # same severity, so ordering isn't an artifact of a severity sort.
+    it "runs the structural scanner before the delegate, without dropping either" do
+      ihdr = PngStreams.chunk("IHDR", PngStreams::IHDR_13)
+      bytes = PngStreams::SIGNATURE + ihdr + ihdr + PngStreams.chunk("IEND", "")
+      image = Claricle::Image.from_content(bytes, format: :png)
+
+      report = image.conformance_report
+
+      expect(report.issues.map(&:code)).to eq(
+        %w[png.duplicate_ihdr png.iend_chunk_before_idat png.missing_idat_chunk]
+      )
+      expect(report.issues.first).to have_attributes(
+        severity: "error", location: have_attributes(chunk: "IHDR", byte_offset: 33)
+      )
+    end
+
+    # Two issues sharing the SAME code both survive concatenation -- the
+    # specific gap an unordered check over distinct codes cannot see: a
+    # `.uniq(&:code)` bug would satisfy the example above (three distinct
+    # codes) while silently dropping one of these two.
+    it "keeps two structural issues that share the same code" do
+      ihdr = PngStreams.chunk("IHDR", PngStreams::IHDR_13)
+      bytes = PngStreams::SIGNATURE + ihdr + ihdr + ihdr + PngStreams.chunk("IEND", "")
+      image = Claricle::Image.from_content(bytes, format: :png)
+
+      report = image.conformance_report
+      duplicate_ihdr_offsets = report.issues.select { |issue| issue.code == "png.duplicate_ihdr" }
+                                     .map { |issue| issue.location.byte_offset }
+
+      expect(duplicate_ihdr_offsets).to eq([33, 58])
+    end
+
+    # Ordering holds even against an `info`-severity delegate issue, so it
+    # is positional rather than an artifact of a severity sort.
+    it "puts a structural finding before the delegate's own, even an info one" do
+      bytes = "#{File.binread(conform_fixture("valid.png"))}TRAILING JUNK"
+      image = Claricle::Image.from_content(bytes, format: :png)
+
+      report = image.conformance_report
+
+      expect(report.issues.map(&:code)).to eq(%w[png.trailing_data png.gama])
     end
   end
 end
@@ -1101,9 +1155,11 @@ module PngBounded
   end
 end
 
-# The structural pre-pass (D23). Nothing calls `structural_issues` yet --
-# the conform wiring is item 03 -- so these drive it directly, the same
-# way the `read_chunks` examples above do.
+# The structural pre-pass (D23). `conformance_report` now calls
+# `structural_issues` (see the `conformance_report` describe block above),
+# but these examples still drive the scanner directly, the same way the
+# `read_chunks` examples above do -- so a fault in `StructureScanner` itself
+# is pinned to the scanner, not to how `conformance_report` happens to wire it.
 RSpec.describe "Claricle PNG structural scanner" do
   let(:handler) { Claricle.const_get(:Handlers).const_get(:Png).new }
 
