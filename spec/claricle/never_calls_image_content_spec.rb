@@ -30,6 +30,19 @@ end
 
 # format => fixture file => the parse status that file must produce.
 samples = {
+  # The pdf pair was BUILT rather than found, because the PDF handler that
+  # arrived with it builds its own inputs at runtime and left no fixture
+  # behind. Reproduce them with #12's own builder, so nobody has to guess
+  # what these bytes are:
+  #
+  #   require_relative "spec/support/pdf_builder"
+  #   FileUtils.cp(PdfBuilder.path, "spec/fixtures/inspect/valid.pdf")
+  #   File.binwrite("spec/fixtures/inspect/no_trailer.pdf",
+  #                 File.binread(PdfBuilder.path)[0, 60])
+  #
+  # 60 bytes stops inside the header, before any usable trailer -- the same
+  # shape as short_ihdr.png, and it inspects "failed" for the same reason.
+  pdf: { "valid.pdf" => "ok", "no_trailer.pdf" => "failed" },
   png: { "valid.png" => "ok", "short_ihdr.png" => "failed" },
   emf: { "valid.emf" => "ok", "truncated_44.emf" => "failed" },
   eps: { "basic.eps" => "ok" },
