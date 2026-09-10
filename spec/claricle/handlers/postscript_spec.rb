@@ -1525,8 +1525,12 @@ RSpec.describe "Claricle PostScript handler" do
     # the sentinel behind it simply gone.
     #
     # Trusting the bytes up to the last line TERMINATOR instead of the
-    # whole chunk is what closes it -- a truncated tail can never decide
-    # where the header ends.
+    # whole chunk is what closes it -- an AMBIGUOUS partial tail, one
+    # `scan_partial_line` cannot yet classify either way, can never decide
+    # where the header ends on its own. A DECISIVE partial tail is a
+    # different case: see "does not report truncated when the header
+    # already ended before a newline-free body" below, where a pending
+    # body line's prefix alone is enough to end the header early.
     it "does not end the header on a line a probe boundary split" do
       # 15 + 14 + 26 = a 55-byte preamble, then 68-byte comments, which
       # puts probe six exactly one byte into a line.
@@ -1665,6 +1669,35 @@ RSpec.describe "Claricle PostScript handler" do
         preamble = "%!PS-Adobe-3.0\n"
         header_content = preamble + exact_padding(limit - 7000 - preamble.bytesize)
         file.write("#{header_content}showpage #{" " * 30_000}")
+        file.flush
+        image = Claricle::Image.from_path(file.path)
+        stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", limit)
+
+        result = handler.inspection(image)
+
+        expect(result.parse_status).to eq("ok")
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Postscript)
+              .send(:private_constant, :HEADER_LIMIT_BYTES)
+    end
+
+    # The same false-positive family, from the sentinel side rather than a
+    # disqualifying line: a lone trailing CR at the very end of a probe is
+    # deliberately left unclassified (`pending_cr?`/`wait_on_cr`), so a
+    # CRLF split across two reads is not misread as a CR-terminated line
+    # followed by a bogus empty LF-only line. `%%EndComments\r` landing
+    # exactly at the ceiling is decisively the sentinel whichever way that
+    # CR resolves, and must not be truncated while still waiting to find
+    # out.
+    it "does not report truncated when a CR-terminated sentinel lands exactly at the limit" do
+      Tempfile.create(["cr_sentinel_at_limit", ".ps"]) do |file|
+        file.binmode
+        limit = 3 * 8192
+        preamble = "%!PS-Adobe-3.0\n"
+        sentinel = "%%EndComments\r"
+        padding = exact_padding(limit - preamble.bytesize - sentinel.bytesize)
+        file.write("#{preamble}#{padding}#{sentinel}showpage title here\n")
         file.flush
         image = Claricle::Image.from_path(file.path)
         stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", limit)

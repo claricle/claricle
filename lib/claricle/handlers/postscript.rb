@@ -227,7 +227,17 @@ module Claricle
         # immediately by a newline-free body line (no CR/LF yet) crossed
         # the byte ceiling mid-body-line before `scan_partial_line` ever
         # ran, and was wrongly reported as truncated.
-        truncate! if !final && over_limit?
+        #
+        # And never while a CR is pending -- `pending_cr?` below already
+        # buffers a trailing CR rather than classifying it, specifically so
+        # a CRLF split across two reads is not misread as a CR-terminated
+        # line followed by a bogus empty LF-only line. Truncating in that
+        # same window hits the identical ambiguity from the other side: a
+        # `%%EndComments\r` landing exactly at the ceiling is decisively
+        # the sentinel whether or not a `\n` follows, but was truncated
+        # before ever being classified, because it was one byte short of
+        # what `scan_complete_lines` needs to commit to a line ending.
+        truncate! if !final && over_limit? && !pending_cr_at_end?
       end
 
       # Every byte scanned counts toward the bound, not just bytes
@@ -236,6 +246,15 @@ module Claricle
       # advances @line_start.
       def over_limit?
         @bytes.bytesize >= @limit
+      end
+
+      # True exactly when `scan_complete_lines` deferred classifying a
+      # trailing CR via `wait_on_cr` -- the one state where one more byte,
+      # whatever it is, is guaranteed to make the pending line decisive.
+      # Bounded the same way the rest of this scan is: at most one more
+      # probe is read before the deferral resolves either way.
+      def pending_cr_at_end?
+        @search_from < @bytes.bytesize && @bytes.getbyte(@search_from) == 13
       end
 
       # Stops the scan at the last complete line read, the same cut point
