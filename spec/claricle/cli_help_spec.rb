@@ -1,5 +1,11 @@
 # frozen_string_literal: true
 
+# Required here rather than globbed into spec_helper, because that is how the
+# rest of spec/support is loaded -- pdf_spec.rb reaches its two builders the
+# same way. A glob would also pull those builders into every spec run for no
+# reason.
+require_relative "../support/shell_helpers"
+
 # What `Cli#help` promises a caller's SHELL, kept apart from cli_spec.rb
 # because it is a different subject -- it shares no fixture or helper with the
 # exit-code, inspect, formats or presenter groups there -- and because
@@ -65,6 +71,33 @@ RSpec.describe Claricle::Cli::Runner do
       writer&.close
     end
 
+    # WHEN a write reached the shell, not merely that it did. Thor's general
+    # help calls `class_options_help` AFTER its three shell writes, so at
+    # that moment a live `help` has already delivered all three and a `help`
+    # that recorded them to replay later has delivered none.
+    #
+    # The two examples below need this and an output assertion cannot give
+    # it to them: a recorder replaying in order produces byte-identical
+    # output, so the finished page proves the calls happened and says
+    # nothing about what drove them. Measured -- a record-and-replay `help`
+    # passed both of these on their output alone.
+    #
+    # `prepend` on the singleton, not a stub: `class_options_help` is
+    # protected on `Thor::Base::ClassMethods`, and the hook has to survive
+    # being called with Thor's own arguments.
+    def observing_generation(probe)
+      seen = []
+      hook = Module.new do
+        define_method(:class_options_help) do |shell, groups = {}|
+          seen << probe.call
+          super(shell, groups)
+        end
+      end
+      Claricle::Cli.singleton_class.prepend(hook)
+      yield
+      seen.first
+    end
+
     # Runner asks the settable `Thor::Base.shell` factory for each
     # invocation's shell. Returning this exact instance exercises the real
     # Runner path while proving its singleton output behaviour is preserved.
@@ -79,9 +112,11 @@ RSpec.describe Claricle::Cli::Runner do
       end
       allow(Thor::Base).to receive(:shell).and_return(shell_factory(injected))
 
-      expect do
-        expect(described_class.run(["help"], output: StringIO.new)).to eq(0)
-      end.to output("").to_stdout
+      mid_generation = observing_generation(-> { sink.string.dup }) do
+        expect do
+          expect(described_class.run(["help"], output: StringIO.new)).to eq(0)
+        end.to output("").to_stdout
+      end
 
       # Deliberately NOT an equality check on the row count. The command
       # inventory is pinned once, on its own example further down; matching
@@ -89,6 +124,8 @@ RSpec.describe Claricle::Cli::Runner do
       # in whose shell got used -- the same trap the terminator example's
       # comment warns about.
       expect(sink.string).to match(/\Acustom:Commands:\ncustom-table:\d+\ncustom:\n\z/)
+      # The singleton ran DURING generation, not in a replay afterwards.
+      expect(mid_generation).to start_with("custom:Commands:\n")
     end
 
     # Thor drives a shell that answers `say`, `print_table`,
@@ -111,8 +148,14 @@ RSpec.describe Claricle::Cli::Runner do
       end.new
       allow(Thor::Base).to receive(:shell).and_return(shell_factory(bare))
 
-      expect(described_class.run(["help"], output: StringIO.new)).to eq(0)
+      mid_generation = observing_generation(-> { reached.dup }) do
+        expect(described_class.run(["help"], output: StringIO.new)).to eq(0)
+      end
+
       expect(reached).to eq(%i[say print_table say])
+      # Thor drove THIS object while generating, rather than something
+      # else that copied its calls over afterwards.
+      expect(mid_generation).to eq(%i[say print_table say])
     end
 
     # Thor hands the shell to `Cli.help` and `Cli.command_help`, so a
