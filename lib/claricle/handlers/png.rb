@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "zlib"
+
 require_relative "base"
 require_relative "../models/inspection"
 require_relative "../models/issue"
@@ -111,6 +113,29 @@ module Claricle
       # pipe: 32 bytes took 655,360 reads and 5.29s, 16 KiB took 1,280
       # reads and 0.031s.
       DRAIN_BUFFER = 16_384
+
+      # png_conform's own iCCP/zTXt/iTXt validators each call
+      # `Zlib::Inflate.inflate` on attacker-controlled bytes with no output
+      # bound (measured against the installed 0.1.4 gem's
+      # `validators/ancillary/{iccp,ztxt,itxt}_validator.rb`) --
+      # `AncillaryBoundsGuard` below is what stands between that and this
+      # handler's caller. 64 MiB is comfortably past every real ICC profile
+      # measured against this guard (the largest of 24 profiles on this
+      # machine is 55,280 bytes; a synthetic, structurally valid 40 MiB
+      # profile was built and shown to pass) and a world away from the
+      # unbounded case it replaces: a 1,043,730-byte PNG carrying one iCCP
+      # chunk was measured driving `conformance_report` to a 2.19 GB peak
+      # RSS before this guard existed.
+      #
+      # Cumulative across every watched chunk in the file, not a per-chunk
+      # allowance -- png_conform's own `zTXt`/`iTXt` validators retain each
+      # decompressed chunk's text in a growing `context.store(:text_chunks,
+      # ...)` array across the WHOLE file, not one at a time. A per-chunk-only
+      # ceiling was measured letting eight 32 MiB zTXt chunks (each under it
+      # individually) through a 261,196-byte PNG that drove a 654 MB peak RSS
+      # -- the exact hazard this guard exists to stop, just split across
+      # chunks instead of concentrated in one.
+      MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
 
       # What `ChunkReader#gather` collects. png_conform's own chunk
       # object is gone from this handler entirely now that its bytes
@@ -243,6 +268,235 @@ module Claricle
         end
       end
 
+      # Walks the raw chunk stream for `iCCP`/`zTXt`/`iTXt` and asks one
+      # question, kept running across every occurrence in the file: has
+      # decompressing them exceeded `MAX_DECOMPRESSED_BYTES` IN TOTAL. Runs
+      # BEFORE png_conform ever sees the file, so a scan that exceeds it
+      # never reaches the delegate's own unbounded `Zlib::Inflate.inflate`
+      # at all.
+      #
+      # The total is cumulative across the whole file, not reset per chunk
+      # -- see `MAX_DECOMPRESSED_BYTES`'s own comment for why a per-chunk
+      # allowance alone is not enough.
+      #
+      # Deliberately does not stop at `IEND`, unlike `ChunkReader` above --
+      # measured against the installed delegate, a chunk appended after
+      # `IEND` is still inflated and reported, so stopping here would let a
+      # bomb chunk placed after `IEND` bypass this guard while still
+      # reaching png_conform.
+      #
+      # Does not reuse `ChunkReader`'s CRC method or "nil on a short read"
+      # discipline -- both exist there to decide whether to KEEP a chunk
+      # for an inspection report, a different question. This class has its
+      # own CRC check below (`#bomb_at?`), for a different reason: whether
+      # to count a chunk's bytes toward the running total at all. A
+      # truncated or structurally malformed chunk fails that question
+      # harmlessly (see `#bomb?`) or is left for the real delegate to
+      # report exactly as it does today.
+      #
+      # A real file (never a pipe): `conformance_report`'s own delegate
+      # already requires one -- `FullLoadReader#read` rewinds its IO before
+      # reading, which raises `Errno::ESPIPE` on a pipe today, before this
+      # guard existed. `#skip` below relies on the same guarantee.
+      class AncillaryBoundsGuard
+        WATCHED = %w[iCCP zTXt iTXt].freeze
+        private_constant :WATCHED
+
+        def initialize(io)
+          @io = io
+          @total = 0
+        end
+
+        # `[chunk_type, byte_offset]` of the first watched chunk whose
+        # decompression pushes the file's running total past the ceiling,
+        # or `nil` if the whole file stays under it.
+        def exceeded
+          io.read(8) # the PNG signature -- alignment only, never validated here
+          loop do
+            header_offset = io.pos
+            length, type = read_header
+            break unless type
+
+            hit = process(type, length, header_offset)
+            return hit if hit
+          end
+          nil
+        end
+
+        private
+
+        attr_reader :io
+
+        def read_header
+          header = io.read(8)
+          return [nil, nil] unless header && header.bytesize == 8
+
+          header.unpack("Na4")
+        end
+
+        # A watched type that exceeds the ceiling returns its own
+        # `[type, header_offset]`; anything else (unwatched, watched but
+        # safe, or watched but rejected on a check below) is skipped or
+        # already consumed and returns `nil`.
+        def process(type, length, header_offset)
+          unless WATCHED.include?(type)
+            skip(length)
+            return nil
+          end
+
+          [type, header_offset] if bomb_at?(type, length)
+        end
+
+        # `false` on a short payload (truncation), a bad CRC, a chunk too
+        # malformed to locate a compressed segment in, or one the real
+        # validator would reject before ever decompressing it -- every one
+        # of those answers "not a bomb" and leaves the chunk for the real
+        # delegate to judge on its own terms.
+        #
+        # The CRC check matters for more than integrity: every installed
+        # validator calls `check_crc` FIRST and stops on failure, so a
+        # chunk with a bad CRC is never decompressed by the delegate at
+        # all -- counting it here would inflate `@total` for bytes
+        # png_conform never actually produces.
+        def bomb_at?(type, length)
+          data = io.read(length)
+          crc = io.read(4)
+          return false unless data && data.bytesize == length && crc && crc.bytesize == 4
+          return false unless crc.unpack1("N") == Zlib.crc32(type + data)
+
+          compressed = compressed_segment(type, data)
+          compressed ? bomb?(type, compressed) : false
+        end
+
+        # Mirrors the installed validators' own field layout AND their
+        # compression-method check exactly
+        # (`validators/ancillary/{iccp,ztxt,itxt}_validator.rb`), read
+        # directly from that gem source rather than assumed -- a chunk
+        # declaring anything other than method 0 (deflate) is rejected by
+        # every validator before it ever decompresses, so counting it here
+        # would be the same overcounting the CRC check above exists to
+        # avoid. `getbyte`, not `[]` chained into `.ord`: a structurally
+        # short chunk (no compression-flag byte after its keyword) must
+        # answer "no compressed segment here", not raise.
+        def compressed_segment(type, data)
+          case type
+          when "iCCP", "zTXt"
+            null_pos = data.index("\0")
+            return nil unless null_pos && data.getbyte(null_pos + 1)&.zero? # compression method
+
+            data[(null_pos + 2)..]
+          when "iTXt"
+            itxt_compressed_segment(data)
+          end
+        end
+
+        def itxt_compressed_segment(data)
+          first = data.index("\0")
+          return nil unless first && data.getbyte(first + 1) == 1 && data.getbyte(first + 2)&.zero? # flag, method
+
+          second = data.index("\0", first + 3)
+          return nil unless second
+
+          third = data.index("\0", second + 1)
+          third && data[(third + 1)..]
+        end
+
+        # Ruby stdlib's block form of `Zlib::Inflate#inflate` yields
+        # decompressed output incrementally rather than materializing all
+        # of it before returning -- a `return` inside the block (see
+        # `#accumulate` below) aborts the decompression already in
+        # progress, the same non-local-exit mechanism any `each`-style
+        # iterator supports. Measured against the real
+        # bomb's own iCCP payload: peak memory stayed proportional to the
+        # abort threshold (~39 MiB aborting at 10 MiB, ~101 MiB aborting at
+        # `MAX_DECOMPRESSED_BYTES`), not the 2.19 GB an unbounded call
+        # produces.
+        #
+        # Checked against `@total` (this chunk's own running count on top
+        # of every prior chunk's) so a single huge chunk still aborts
+        # mid-stream exactly as before, AND several sub-ceiling chunks are
+        # caught once their sum crosses it. `@total` is only committed once
+        # this chunk decompresses cleanly AND (for iTXt) its text is valid
+        # UTF-8 -- a chunk that fails either never reaches png_conform's
+        # own `store_profile_info`/`store_text_info` either (every
+        # validator calls `check_decompression` first and stops on
+        # failure; iTXt's own `check_decompression` additionally rejects
+        # invalid UTF-8 before ever storing), so it must not inflate the
+        # running total.
+        #
+        # `Zlib::Error` (malformed zlib data) answers "not a bomb" -- the
+        # real delegate already reports its own "decompression failed" for
+        # that shape, and this must not take over reporting a different
+        # problem for input that was never actually a bomb.
+        def bomb?(type, compressed)
+          this_chunk, text = decompressed_size(compressed, keep_text: type == "iTXt")
+          return true if this_chunk.nil?
+          # No `.dup`: `text` is this method's own local, built fresh by
+          # `#accumulate` and never read again after this line, so
+          # mutating its encoding in place is safe and avoids copying up
+          # to `MAX_DECOMPRESSED_BYTES` just to check it.
+          return false if type == "iTXt" && !text.force_encoding(Encoding::UTF_8).valid_encoding?
+
+          @total += this_chunk
+          false
+        rescue Zlib::Error
+          false
+        end
+
+        # This chunk's own full decompressed byte count and (only when
+        # `keep_text` -- iTXt only, where UTF-8 validity has to be checked
+        # against the actual decompressed text) the text itself, or `nil`
+        # the moment `@total` plus what has decompressed so far crosses the
+        # ceiling -- checked incrementally, so a single huge chunk still
+        # aborts mid-stream rather than after materializing all of it.
+        # Retaining the bytes for iTXt costs no more than the real
+        # delegate already pays: `store_text_info` also holds the whole
+        # decompressed text at once, and this is bounded by the same
+        # ceiling either way.
+        #
+        # `zstream.finished?`, not just an absence of `Zlib::Error`: the
+        # incremental block form completes without raising for a stream
+        # missing only its trailing checksum (measured -- a 40 MiB payload
+        # with its last checksum byte cut off yields the full 40 MiB here
+        # and `finished? == false`), where `Zlib::Inflate.inflate` (the
+        # module method the real validators call) raises `Zlib::BufError`
+        # on the identical bytes. Without this check that chunk's bytes
+        # would wrongly join `@total` for a chunk the delegate itself would
+        # reject and never retain -- raising here routes it through the
+        # same `rescue Zlib::Error` below every other malformed chunk
+        # already takes, rather than inventing a second "not a bomb" path.
+        def decompressed_size(compressed, keep_text:)
+          zstream = Zlib::Inflate.new
+          this_chunk, text = accumulate(zstream, compressed, keep_text)
+          return [nil, nil] if this_chunk.nil?
+          raise Zlib::BufError, "truncated zlib stream" unless zstream.finished?
+
+          [this_chunk, text]
+        ensure
+          zstream&.close unless zstream&.closed?
+        end
+
+        # `[nil, nil]` the moment `@total` plus what has decompressed so
+        # far crosses the ceiling -- checked incrementally, so a single
+        # huge chunk still aborts mid-stream rather than after
+        # materializing all of it.
+        def accumulate(zstream, compressed, keep_text)
+          this_chunk = 0
+          text = keep_text ? +"" : nil
+          zstream.inflate(compressed) do |piece|
+            this_chunk += piece.bytesize
+            return [nil, nil] if @total + this_chunk > MAX_DECOMPRESSED_BYTES
+
+            text << piece if text
+          end
+          [this_chunk, text]
+        end
+
+        def skip(length)
+          io.seek(length + 4, IO::SEEK_CUR) # payload plus the CRC, neither read here
+        end
+      end
+
       # Builds the `Report` a conform operation returns, kept apart from
       # PNG metadata interpretation for the same reason `ChunkReader`
       # above is -- and, like it, a nested class rather than a sibling:
@@ -287,6 +541,11 @@ module Claricle
         MALFORMED_CODE = "#{IssueCode::PREFIX}chunk_length_unreadable".freeze
         MALFORMED_MESSAGE = "a chunk declared a length the file could not supply"
 
+        # Claricle's own finding, not a mapped png_conform message -- same
+        # treatment MALFORMED_CODE above gets, and for the same reason:
+        # there is no upstream type to synthesize one from.
+        BOUND_EXCEEDED_CODE = "#{IssueCode::PREFIX}decompression_bound_exceeded".freeze
+
         # Never `validate_file` (03-conform.md): it hands back a
         # `FileAnalysis` with chunk and offset already discarded, and
         # both it and `result.validation_result.errors` report
@@ -299,8 +558,22 @@ module Claricle
         # PngSuite fixture), and reading errors only would silently drop
         # it -- which breaks D8's tri-state, since info must never
         # disappear from a clean file's report.
+        #
+        # `image.with_path`, not `image.with_source`: the delegate's own
+        # `FullLoadReader` takes a path or an IO and opens its own handle
+        # either way (03-conform.md's Design table names the path
+        # constructor), so nothing here needs to hand over an already-open
+        # file. `AncillaryBoundsGuard` runs first, inside that same block --
+        # one Tempfile for a content-born image, not two -- and
+        # short-circuits before `png_conform` ever opens the file if any
+        # watched chunk would decompress past its ceiling (see the class
+        # above for why).
         def self.report(image)
-          report_for(image, mapped_issues(image))
+          image.with_path do |path|
+            hit = File.open(path, "rb") { |io| AncillaryBoundsGuard.new(io).exceeded }
+
+            hit ? report_for(image, [bound_exceeded_issue(*hit)]) : report_for(image, mapped_issues(path))
+          end
         rescue *MALFORMED_INPUT
           report_for(image, [malformed_issue])
         end
@@ -309,13 +582,8 @@ module Claricle
           Models::Report.new(source_path: image.path, format: image.format.to_s, issues: issues)
         end
 
-        # `image.with_path`, not `image.with_source`: the delegate's own
-        # `FullLoadReader` takes a path or an IO and opens its own handle
-        # either way (03-conform.md's Design table names the path
-        # constructor), so nothing here needs to hand over an
-        # already-open file.
-        def self.mapped_issues(image)
-          context = image.with_path { |path| validated_context(path) }
+        def self.mapped_issues(path)
+          context = validated_context(path)
 
           (context.all_errors + context.all_warnings + context.all_info).map { |raw| issue_from(raw) }
         end
@@ -353,8 +621,18 @@ module Claricle
           Models::Issue.new(severity: "error", code: MALFORMED_CODE, message: MALFORMED_MESSAGE)
         end
 
+        # `offset` is real, not invented: `AncillaryBoundsGuard` read it off
+        # the chunk's own 8-byte header while scanning.
+        def self.bound_exceeded_issue(chunk_type, offset)
+          Models::Issue.new(
+            severity: "error", code: BOUND_EXCEEDED_CODE,
+            message: "the #{chunk_type} chunk's compressed payload decompresses past the safety bound",
+            location: Models::Location.new(chunk: chunk_type, byte_offset: offset)
+          )
+        end
+
         private_class_method :report_for, :mapped_issues, :validated_context,
-                             :issue_from, :location_for, :malformed_issue
+                             :issue_from, :location_for, :malformed_issue, :bound_exceeded_issue
       end
 
       private_constant :ConformanceMapper
@@ -574,18 +852,100 @@ module Claricle
         end
       end
 
+      # Turns a parsed IHDR (plus the rest of the chunk list, for dpi) into
+      # an Inspection model. Its own concern -- IHDR metadata, not
+      # conformance -- so it is its own nested class rather than more
+      # top-level methods on Png, matching the pattern already used for
+      # ChunkReader, AncillaryBoundsGuard, ConformanceMapper and
+      # StructureScanner above.
+      class MetadataInspector
+        # A signature-only file yields zero chunks and raises nothing, and a
+        # well-formed chunk can carry a short payload -- unpack returns nils
+        # for the missing fields rather than failing. Both are measured, so
+        # absence of an exception proves nothing and this gate is what makes
+        # "the metadata parsed" a real claim (D17).
+        def self.usable_ihdr?(ihdr)
+          !ihdr.nil? && ihdr.data.bytesize == IHDR_BYTES
+        end
+
+        def self.readable(image, ihdr, chunks)
+          width, height, depth, color_type, *encoding = ihdr.data.unpack(IHDR_LAYOUT)
+
+          Models::Inspection.new(
+            format: image.format.to_s,
+            width: width.to_f, height: height.to_f,
+            dpi: dpi(chunks), color_space: COLOR_SPACES[color_type],
+            meta: meta(depth, encoding), parse_status: "ok"
+          )
+        end
+
+        # Inspection has named slots for dimensions, dpi and colour space;
+        # what is left of IHDR is format-native, so it goes here.
+        def self.meta(depth, encoding)
+          compression, filter, interlace = encoding
+
+          { "bit_depth" => depth, "compression" => compression,
+            "filter" => filter, "interlace" => interlace }
+        end
+
+        def self.unreadable(image)
+          Models::Inspection.new(
+            format: image.format.to_s,
+            parse_status: "failed",
+            issues: [unreadable_issue]
+          )
+        end
+
+        # One message for every way the header can be unreadable: absent,
+        # the wrong length, or never reached because the read itself failed.
+        # Naming only the length case would misdescribe the other two.
+        def self.unreadable_issue
+          Models::Issue.new(
+            severity: "error",
+            code: "png.ihdr_unreadable",
+            message: "PNG header (IHDR) could not be read"
+          )
+        end
+
+        # nil when pHYs is absent, and nil when it records an aspect ratio
+        # rather than a physical unit. Both are ordinary files, not errors.
+        #
+        # The length is checked before unpacking, because unpack skips a
+        # directive it has too few bytes for but keeps reading the rest
+        # from where it started. Measured across every length below 9:
+        # 1 to 3 give [nil, nil, 1], which passes the unit check and then
+        # multiplies nil. 5 to 7 give [value, nil, 1], which the axis check
+        # below rejects on its own. So this gate stops a crash, not a wrong
+        # number.
+        def self.dpi(chunks)
+          phys = chunks.find { |chunk| chunk.type == "pHYs" }
+          return nil unless phys && phys.data.bytesize >= PHYS_BYTES
+
+          # dpi is a single number, so a PNG with non-square pixels has no
+          # one value to report -- and reporting the x axis alone would say
+          # 72 for an image that is 72x144. Measured: X=2835 Y=5669 is
+          # exactly that case. Unequal axes give nil rather than half the
+          # truth.
+          horizontal, vertical, unit = phys.data.unpack(PHYS_LAYOUT)
+          return nil unless unit == METRE_UNIT && horizontal == vertical
+
+          horizontal * METRES_PER_INCH
+        end
+      end
+
       private_constant :IHDR_LAYOUT, :IHDR_BYTES, :PHYS_LAYOUT, :PHYS_BYTES,
                        :METRE_UNIT, :METRES_PER_INCH, :WANTED_CHUNKS,
                        :COLOR_SPACES, :STRUCTURE_MESSAGES, :MAX_CHUNK_READ, :DRAIN_BUFFER,
-                       :Chunk, :ChunkReader, :StructureScanner
+                       :MAX_DECOMPRESSED_BYTES, :Chunk, :ChunkReader, :StructureScanner,
+                       :AncillaryBoundsGuard, :MetadataInspector
 
       def inspection(image)
         chunks = read_chunks(image)
         ihdr = chunks.find { |chunk| chunk.type == "IHDR" }
 
-        return unreadable(image) unless usable_ihdr?(ihdr)
+        return MetadataInspector.unreadable(image) unless MetadataInspector.usable_ihdr?(ihdr)
 
-        readable(image, ihdr, chunks)
+        MetadataInspector.readable(image, ihdr, chunks)
       end
 
       # png_conform's own mapping is documented on `ConformanceMapper.report`
@@ -670,84 +1030,11 @@ module Claricle
         chunks
       end
 
-      # A signature-only file yields zero chunks and raises nothing, and a
-      # well-formed chunk can carry a short payload -- unpack returns nils
-      # for the missing fields rather than failing. Both are measured, so
-      # absence of an exception proves nothing and this gate is what makes
-      # "the metadata parsed" a real claim (D17).
-      def usable_ihdr?(ihdr)
-        !ihdr.nil? && ihdr.data.bytesize == IHDR_BYTES
-      end
-
-      def readable(image, ihdr, chunks)
-        width, height, depth, color_type, *encoding = ihdr.data.unpack(IHDR_LAYOUT)
-
-        Models::Inspection.new(
-          format: image.format.to_s,
-          width: width.to_f, height: height.to_f,
-          dpi: dpi(chunks), color_space: COLOR_SPACES[color_type],
-          meta: meta(depth, encoding), parse_status: "ok"
-        )
-      end
-
-      # Inspection has named slots for dimensions, dpi and colour space;
-      # what is left of IHDR is format-native, so it goes here.
-      def meta(depth, encoding)
-        compression, filter, interlace = encoding
-
-        { "bit_depth" => depth, "compression" => compression,
-          "filter" => filter, "interlace" => interlace }
-      end
-
-      def unreadable(image)
-        Models::Inspection.new(
-          format: image.format.to_s,
-          parse_status: "failed",
-          issues: [unreadable_issue]
-        )
-      end
-
-      # One message for every way the header can be unreadable: absent,
-      # the wrong length, or never reached because the read itself failed.
-      # Naming only the length case would misdescribe the other two.
-      def unreadable_issue
-        Models::Issue.new(
-          severity: "error",
-          code: "png.ihdr_unreadable",
-          message: "PNG header (IHDR) could not be read"
-        )
-      end
-
       # The structural pre-pass (D23), called from `conformance_report`.
       # Opens and closes the scanner's file independently of the
       # delegate.
       def structural_issues(image)
         image.with_path { |path| File.open(path, "rb") { |io| StructureScanner.new(io).issues } }
-      end
-
-      # nil when pHYs is absent, and nil when it records an aspect ratio
-      # rather than a physical unit. Both are ordinary files, not errors.
-      #
-      # The length is checked before unpacking, because unpack skips a
-      # directive it has too few bytes for but keeps reading the rest
-      # from where it started. Measured across every length below 9:
-      # 1 to 3 give [nil, nil, 1], which passes the unit check and then
-      # multiplies nil. 5 to 7 give [value, nil, 1], which the axis check
-      # below rejects on its own. So this gate stops a crash, not a wrong
-      # number.
-      def dpi(chunks)
-        phys = chunks.find { |chunk| chunk.type == "pHYs" }
-        return nil unless phys && phys.data.bytesize >= PHYS_BYTES
-
-        # dpi is a single number, so a PNG with non-square pixels has no
-        # one value to report -- and reporting the x axis alone would say
-        # 72 for an image that is 72x144. Measured: X=2835 Y=5669 is
-        # exactly that case. Unequal axes give nil rather than half the
-        # truth.
-        horizontal, vertical, unit = phys.data.unpack(PHYS_LAYOUT)
-        return nil unless unit == METRE_UNIT && horizontal == vertical
-
-        horizontal * METRES_PER_INCH
       end
     end
   end

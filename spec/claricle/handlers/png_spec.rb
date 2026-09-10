@@ -1603,5 +1603,12 @@ RSpec.describe "Claricle PNG structural scanner" do
 
       expect(messages).to eq(["duplicate IHDR chunk; a PNG datastream carries exactly one"])
     end
+
+    # `AncillaryBoundsGuard` (checked against png_conform's own iCCP/zTXt/
+    # iTXt validators calling `Zlib::Inflate.inflate` with no output bound)
+    # has its own spec file -- png_decompression_bound_spec.rb -- rather
+    # than a nested describe here: a distinct resource-safety concern, with
+    # its own fixture-building helpers, and this file was already
+    # substantial before it existed.
   end
 end
