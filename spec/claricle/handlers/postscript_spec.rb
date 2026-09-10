@@ -1711,6 +1711,44 @@ RSpec.describe "Claricle PostScript handler" do
               .send(:private_constant, :HEADER_LIMIT_BYTES)
     end
 
+    # What the CR grace above must NOT do: renew itself indefinitely. A
+    # source built so every single probe boundary lands on a CR -- an
+    # ordinary comment line sized to divide HEADER_PROBE_BYTES evenly --
+    # re-armed the exemption on every append before `@cr_grace_used`
+    # existed, so a source many times the limit read to completion with
+    # the scan never truncating at all. This is the never-ending-header
+    # hang this whole change exists to close, reopened through the CR
+    # exemption alone.
+    it "still truncates when every probe boundary lands on a pending CR" do
+      Tempfile.create(["repeated_cr_boundary", ".ps"]) do |file|
+        file.binmode
+        limit = 3 * 8192
+        line = "%#{"x" * 62}\r" # 64 bytes, divides 8192 evenly
+        lines_per_probe = 8192 / line.bytesize
+        preamble = "%!PS-Adobe-3.0\n"
+        first_probe = preamble + "%#{"x" * (64 - preamble.bytesize - 2)}\r" +
+                      (line * (lines_per_probe - 1))
+        # 10 probes' worth, far more than the 3-probe limit, and
+        # %%EndComments never appears.
+        file.write(first_probe + (line * lines_per_probe * 9))
+        file.flush
+        image = Claricle::Image.from_path(file.path)
+        stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", limit)
+
+        result = nil
+        reads = reads_for(file.path) { result = handler.inspection(image) }
+
+        expect(result.parse_status).to eq("failed")
+        # The limit, plus at most one probe of CR grace, plus at most one
+        # probe for the partial-line check -- never the full ten probes.
+        expect(reads.sum).to be <= limit + (2 * 8192)
+        expect(reads.sum).to be < file.size / 2
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Postscript)
+              .send(:private_constant, :HEADER_LIMIT_BYTES)
+    end
+
     # A header that ends well inside the bound must be unaffected by it --
     # this holds for the many short-header examples elsewhere in this
     # file, all of which run against the real 8 MiB HEADER_LIMIT_BYTES and

@@ -174,6 +174,7 @@ module Claricle
         @header_end = nil
         @limit = limit
         @truncated = false
+        @cr_grace_used = false
       end
 
       def append(chunk)
@@ -228,16 +229,38 @@ module Claricle
         # the byte ceiling mid-body-line before `scan_partial_line` ever
         # ran, and was wrongly reported as truncated.
         #
-        # And never while a CR is pending -- `pending_cr?` below already
-        # buffers a trailing CR rather than classifying it, specifically so
-        # a CRLF split across two reads is not misread as a CR-terminated
-        # line followed by a bogus empty LF-only line. Truncating in that
-        # same window hits the identical ambiguity from the other side: a
-        # `%%EndComments\r` landing exactly at the ceiling is decisively
-        # the sentinel whether or not a `\n` follows, but was truncated
-        # before ever being classified, because it was one byte short of
-        # what `scan_complete_lines` needs to commit to a line ending.
-        truncate! if !final && over_limit? && !pending_cr_at_end?
+        # And never while a CR is pending, for exactly ONE probe -- but no
+        # more than that. `pending_cr?` below already buffers a trailing CR
+        # rather than classifying it, specifically so a CRLF split across
+        # two reads is not misread as a CR-terminated line followed by a
+        # bogus empty LF-only line. Truncating in that same window hits the
+        # identical ambiguity from the other side: a `%%EndComments\r`
+        # landing exactly at the ceiling is decisively the sentinel whether
+        # or not a `\n` follows, but was truncated before ever being
+        # classified, because it was one byte short of what
+        # `scan_complete_lines` needs to commit to a line ending.
+        #
+        # The grace is spent, not renewable: a source built so every probe
+        # boundary lands on a CR -- an ordinary comment line sized to
+        # divide the probe length evenly -- kept re-arming this exemption
+        # on every single append, so a source many times the limit read in
+        # full with `truncated?` false. `@cr_grace_used` caps the cost of
+        # resolving the ambiguity to exactly one extra probe, ever, the
+        # same tolerance already accepted elsewhere in this design; a
+        # second pending CR after the grace is spent truncates like any
+        # other still-ambiguous state.
+        return unless !final && over_limit?
+        return grant_cr_grace! if cr_grace_available?
+
+        truncate!
+      end
+
+      def cr_grace_available?
+        pending_cr_at_end? && !@cr_grace_used
+      end
+
+      def grant_cr_grace!
+        @cr_grace_used = true
       end
 
       # Every byte scanned counts toward the bound, not just bytes
