@@ -214,9 +214,20 @@ module Claricle
       def scan(final:)
         scan_complete_lines(final)
         return if done?
-        return truncate! if !final && over_limit?
 
         final ? scan_final_line : scan_partial_line
+        return if done?
+
+        # Only after giving the pending partial line a chance to end the
+        # header decisively on its own -- `scan_partial_line` recognises a
+        # disqualifying prefix (a body line that plainly is not a comment)
+        # without waiting for its terminator, and that must win over the
+        # ceiling. Checking the limit first truncated a header that had
+        # already, correctly, ended: a well-formed comment block followed
+        # immediately by a newline-free body line (no CR/LF yet) crossed
+        # the byte ceiling mid-body-line before `scan_partial_line` ever
+        # ran, and was wrongly reported as truncated.
+        truncate! if !final && over_limit?
       end
 
       # Every byte scanned counts toward the bound, not just bytes
@@ -657,13 +668,12 @@ module Claricle
       # itself, because here the scan IS the header -- there is no separate
       # fixed-size read to fall back on.
       #
-      # 8 MiB: about 13x the largest header this file's own comments cite (a
-      # real 629 KB header of 32,000 %%For: comments, see the quadratic-parse
-      # fix above) and about 53x the largest one any spec here builds.
-      # Measured: an unbounded scan of a never-ending header cost 1.71s at
-      # 8 MB and climbed to 90.5s by 80 MB and 144s by 100 MB (4.64 GB peak
-      # RSS) -- this keeps the worst case bounded and fast whatever the
-      # file's real size is.
+      # 8 MiB: about 13x the largest header this file's own comments cite --
+      # a real 629 KB header of 32,000 %%For: comments, see the
+      # quadratic-parse fix above. Measured: an unbounded scan of a
+      # never-ending header cost 1.71s at 8 MB and climbed to 90.5s by
+      # 80 MB and 144s by 100 MB (4.64 GB peak RSS) -- this keeps the
+      # worst case bounded and fast whatever the file's real size is.
       #
       # A header that runs past this is reported `failed`, not `ok` with
       # whatever was read. That is NOT the same trade-off

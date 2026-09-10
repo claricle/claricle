@@ -1651,14 +1651,41 @@ RSpec.describe "Claricle PostScript handler" do
               .send(:private_constant, :HEADER_LIMIT_BYTES)
     end
 
+    # The false positive the ordering inside #scan existed to prevent: a
+    # header that has ALREADY correctly ended -- a disqualifying body line
+    # that plainly is not a comment -- must not be reported as truncated
+    # just because that body line has no terminator yet and pushes the
+    # byte count over the limit while still pending. The header content
+    # here ends well under the limit; only the trailing, newline-free
+    # "showpage" body crosses it.
+    it "does not report truncated when the header already ended before a newline-free body" do
+      Tempfile.create(["ended_before_body", ".ps"]) do |file|
+        file.binmode
+        limit = 3 * 8192
+        preamble = "%!PS-Adobe-3.0\n"
+        header_content = preamble + exact_padding(limit - 7000 - preamble.bytesize)
+        file.write("#{header_content}showpage #{" " * 30_000}")
+        file.flush
+        image = Claricle::Image.from_path(file.path)
+        stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", limit)
+
+        result = handler.inspection(image)
+
+        expect(result.parse_status).to eq("ok")
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Postscript)
+              .send(:private_constant, :HEADER_LIMIT_BYTES)
+    end
+
     # A header that ends well inside the bound must be unaffected by it --
-    # this holds for every one of the 148 examples elsewhere in this file,
-    # all of which run against the real 8 MiB HEADER_LIMIT_BYTES and would
-    # fail here if the bound disturbed a normal, short header. A dedicated
-    # example for this case would pass identically whether the bound
-    # exists or not (a header this small parses the same either way), so
-    # it cannot prove anything a mutation of the fix would catch -- see
-    # mutation-check.sh's verdict on this diff.
+    # this holds for the many short-header examples elsewhere in this
+    # file, all of which run against the real 8 MiB HEADER_LIMIT_BYTES and
+    # would fail here if the bound disturbed a normal, short header. A
+    # dedicated example asserting only that would pass identically whether
+    # the bound exists or not (a header this small parses the same either
+    # way), so it cannot prove anything a mutation of the fix would catch
+    # -- see mutation-check.sh's verdict on this diff.
   end
 
   # Nothing guarantees the tag on a String of raw bytes, and these bytes
