@@ -292,6 +292,7 @@ RSpec.describe "the documentation" do
         Image: {},
         InvocationError: {},
         Models: {
+          Conversion: { LOSSINESS_LEVELS: nil },
           Inspection: { PARSE_STATUSES: nil },
           Issue: { SEVERITIES: nil },
           Location: {},
@@ -336,6 +337,13 @@ RSpec.describe "the documentation" do
       # `::`, not `const_get` -- measured: `Module#const_get` walks
       # straight past `private_constant` and hands the class back, so an
       # assertion written that way passes whatever the visibility is.
+      claims("The model class `Models::Conversion` and its vocabulary " \
+             "`Conversion::LOSSINESS_LEVELS` are public.")
+      claims("`Lossiness` and `Models::BinaryContent` are private constants.")
+      expect { Claricle::Lossiness }
+        .to raise_error(NameError, /private constant/)
+      expect { Claricle::Models::BinaryContent }
+        .to raise_error(NameError, /private constant/)
       expect { Claricle::Models::FreeFormHash }
         .to raise_error(NameError, /private constant/)
       expect { Claricle::Models::Validation }
