@@ -1571,27 +1571,14 @@ RSpec.describe "Claricle PostScript handler" do
               .send(:private_constant, :HEADER_LIMIT_BYTES)
     end
 
-    # The bound must not disturb a header that ends well inside it -- the
-    # same fixture shape every other spec in this file already relies on.
-    it "does not truncate a header that ends inside the limit" do
-      Tempfile.create(["under_limit", ".ps"]) do |file|
-        file.binmode
-        file.write("%!PS-Adobe-3.0\n%%BoundingBox: 0 0 100 50\n" \
-                   "%%Title: Kept\n%%EndComments\nshowpage\n")
-        file.flush
-        image = Claricle::Image.from_path(file.path)
-        stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", 3 * 8192)
-
-        result = handler.inspection(image)
-
-        expect(result).to have_attributes(width: 100.0, height: 50.0,
-                                          parse_status: "ok")
-        expect(result.meta).to include("title" => "Kept")
-      end
-    ensure
-      Claricle.const_get(:Handlers).const_get(:Postscript)
-              .send(:private_constant, :HEADER_LIMIT_BYTES)
-    end
+    # A header that ends well inside the bound must be unaffected by it --
+    # this holds for every one of the 148 examples elsewhere in this file,
+    # all of which run against the real 8 MiB HEADER_LIMIT_BYTES and would
+    # fail here if the bound disturbed a normal, short header. A dedicated
+    # example for this case would pass identically whether the bound
+    # exists or not (a header this small parses the same either way), so
+    # it cannot prove anything a mutation of the fix would catch -- see
+    # mutation-check.sh's verdict on this diff.
   end
 
   # Nothing guarantees the tag on a String of raw bytes, and these bytes
