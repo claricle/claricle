@@ -41,8 +41,9 @@ module Claricle
     # closeable. What the narrowing would have bought is one distinction --
     # a broken pipe during generation reporting 4 rather than 0 -- and for
     # a page the user piped into `head` both answers mean the same thing.
-    # The two specs below pin the wide behaviour so a future change to it
-    # is deliberate rather than accidental.
+    # `spec/claricle/cli_help_spec.rb` pins the wide behaviour, and every
+    # caller shape the abandoned design broke, so a future change to any
+    # of it is deliberate rather than accidental.
     def help(command = nil, subcommand = false) # rubocop:disable Style/OptionalBooleanParameter
       tolerate_closed_output { super(command, subcommand) }
     end
