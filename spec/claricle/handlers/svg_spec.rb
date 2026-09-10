@@ -755,6 +755,27 @@ RSpec.describe "Claricle SVG handler" do
       expect(report.issues.map(&:severity).uniq).to eq(["error"])
     end
 
+    # The default comes from the DECLARATION, not from a constant naming
+    # `base` a second time. Today those are indistinguishable, because
+    # `base` is first in the only profile declaration in the codebase --
+    # measured, hardcoding `:base` in place of `.first` left all 1062
+    # examples green. A subclass declaring a different order is what
+    # forces the two apart.
+    it "runs the first profile it declares, not a second copy of the name" do
+      reordered = Class.new(Claricle.const_get(:Handlers).const_get(:Svg)) do
+        profiles :svg_1_2_rfc, :base
+      end
+
+      report = reordered.new.conformance_report(
+        Claricle::Image.from_path(File.join(conform_fixtures, "valid.svg"))
+      )
+
+      expect(report.profile).to eq("svg_1_2_rfc")
+      # And it really ran that profile rather than merely labelling it:
+      # svg_1_2_rfc refuses this fixture's colours where base passes it.
+      expect(report.issues.map(&:code)).to include("color_restrictions")
+    end
+
     it "names the file it read and the profile it ran" do
       report = conform("valid")
 

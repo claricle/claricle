@@ -145,6 +145,19 @@ RSpec.describe "Claricle conformance API" do
     # profiles either way, so this stays the "defines none" case. The
     # message says which, rather than leaving the caller to guess whether
     # they mistyped the profile or brought the wrong file.
+    # A unit test, because no CLI input can reach this branch TODAY:
+    # a name only survives `checked_profile` if some format defines it,
+    # and SVG is the only format that defines any, so anything reaching
+    # the per-format check for :svg is by construction in SVG's own list.
+    # The branch becomes reachable the moment a second format declares a
+    # different set, and this is what will already be pinning it.
+    it "names what the format does accept, when it accepts anything" do
+      error = Claricle::UnsupportedProfile.new(:svg, "nope", %i[base metanorma])
+
+      expect(error.message)
+        .to eq('format :svg does not define profile "nope"; it defines :base, :metanorma')
+    end
+
     it "refuses a name the file's own format does not define" do
       expect { Claricle.conformance_report(png, profile: "base") }
         .to raise_error(Claricle::UnsupportedProfile, /:png does not define profile "base"/)
