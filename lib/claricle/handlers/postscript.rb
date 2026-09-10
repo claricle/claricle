@@ -173,6 +173,7 @@ module Claricle
         @search_from = 0
         @header_end = nil
         @limit = limit
+        @truncated = false
       end
 
       def append(chunk)
@@ -195,6 +196,19 @@ module Claricle
         @bytes.byteslice(0, @header_end) if done?
       end
 
+      # True once the byte ceiling, rather than %%EndComments, a
+      # disqualifying line, or genuine end of input, is what stopped the
+      # scan. Distinct from every other way `done?` becomes true: those
+      # all mean the WHOLE header was seen, so `Dsc.settled?`/`disputed?`/
+      # `continued?` are sound over it. A truncated read has seen only a
+      # PREFIX -- a `%%+` continuation or a conflicting repeat of the same
+      # comment could sit just past the cut, and those checks have no way
+      # to know that. Callers must not treat a truncated header as safe to
+      # extract fields from.
+      def truncated?
+        @truncated
+      end
+
       private
 
       def scan(final:)
@@ -213,14 +227,17 @@ module Claricle
         @bytes.bytesize >= @limit
       end
 
-      # The same fallback #finish already takes when input runs out with
-      # no sentinel and no disqualifying line: whatever complete lines
-      # were classified become the header. The only difference here is
-      # what triggered it -- the byte ceiling, not genuine end of input --
-      # so a header that runs past the bound is read exactly like one
-      # that simply never carries %%EndComments.
+      # Stops the scan at the last complete line read, the same cut point
+      # #finish falls back to at genuine end of input -- but this is NOT
+      # the same situation. Genuine EOF means there is nothing more to
+      # read, so what was read IS the whole header. Hitting the byte
+      # ceiling means there might be more: a `%%+` continuation or a
+      # conflicting repeat of a comment could be one byte past the cut,
+      # unseen. `#truncated?` flags this so callers can refuse to publish
+      # fields whose validity depends on having seen the whole header.
       def truncate!
         @header_end = @line_start
+        @truncated = true
       end
 
       def scan_complete_lines(final)
@@ -275,6 +292,10 @@ module Claricle
     # the stateful scanner, one bounded probe at a time. Binary-preview EPS
     # files are reframed to the offset and length declared by their wrapper.
     module DscHeader
+      # `[header, truncated?]`, or bare `nil` when `raw` does not carry a
+      # PostScript section at all. `truncated?` is only meaningful when
+      # `header` is present, and callers must refuse to extract fields
+      # from a truncated header -- see `HeaderScanner#truncated?`.
       def self.signed_header(raw, signature, probe_bytes, scan_limit)
         if raw.respond_to?(:read)
           io_header(raw, signature, probe_bytes, scan_limit)
@@ -308,7 +329,7 @@ module Claricle
           scanner.append(chunk)
         end
         scanner.finish unless scanner.done?
-        scanner.header
+        [scanner.header, scanner.truncated?]
       end
 
       def self.read_io_chunk(io, probe_bytes, remaining)
@@ -343,7 +364,7 @@ module Claricle
           offset += amount
         end
         scanner.finish unless scanner.done?
-        scanner.header
+        [scanner.header, scanner.truncated?]
       end
 
       def self.signed?(bytes, signature)
@@ -644,13 +665,23 @@ module Claricle
       # RSS) -- this keeps the worst case bounded and fast whatever the
       # file's real size is.
       #
-      # A header that runs past this has not been shown to be broken, only
-      # unusual -- so it is read the same way HeaderScanner already reads a
-      # header that reaches true end of input with no %%EndComments: every
-      # complete line classified before the limit becomes the header.
-      # Detector::EpsHeader makes the same trade-off for the first line
-      # alone, treating a scan that runs past its own ceiling the same as no
-      # match at all rather than as an error.
+      # A header that runs past this is reported `failed`, not `ok` with
+      # whatever was read. That is NOT the same trade-off
+      # `Detector::EpsHeader` makes for its own scan ceiling (treating "ran
+      # past it" the same as "no match" there is safe, because an EPSF
+      # match is a single independent regex hit with nothing else to get
+      # wrong): here, `Dsc.settled?`/`disputed?`/`continued?` decide what a
+      # field means only by looking at the header they are handed, and
+      # they are sound only when that IS the whole header. A truncated
+      # read has seen a PREFIX -- a `%%+` continuation or a conflicting
+      # repeat of the same comment could sit one byte past the cut, unseen
+      # -- so those checks can answer "settled" when the real header is
+      # "continued", and publish a value DSC's own first-occurrence rule
+      # says to suppress. Measured against the real handler: a `%%Title`
+      # ending five bytes before the ceiling, followed by a `%%+`
+      # continuation just past it, reports `title: "First part"` if
+      # truncation is treated as safe to read from -- the full header
+      # correctly suppresses it as continued.
       HEADER_LIMIT_BYTES = 8 * 1024 * 1024
 
       private_constant :SIGNATURE, :BOX_COMMENTS,
@@ -664,8 +695,13 @@ module Claricle
       # `with_source` instead, the same reader `Handlers::Svg` uses for
       # the same reason.
       def inspection(image)
-        source = image.with_source { DscHeader.signed_header(_1, SIGNATURE, HEADER_PROBE_BYTES, HEADER_LIMIT_BYTES) }
-        return unreadable(image) unless source
+        source, truncated = image.with_source do |raw|
+          DscHeader.signed_header(raw, SIGNATURE, HEADER_PROBE_BYTES, HEADER_LIMIT_BYTES)
+        end
+        # A truncated header has only been seen as a PREFIX -- see
+        # HeaderScanner#truncated? -- so `settled?`/`disputed?`/`continued?`
+        # below cannot be trusted to have seen the whole document.
+        return unreadable(image) unless source && !truncated
 
         header = read_header(source)
         return unreadable(image) unless header
@@ -804,10 +840,8 @@ module Claricle
           "hires_bounding_box" => carried_box(boxes["hires_bounding_box"]),
           "title" => authoritative(header.title, source, "Title"),
           "creator" => authoritative(header.creator, source, "Creator"),
-          "creation_date" => authoritative(header.creation_date, source,
-                                           "CreationDate"),
-          "language_level" => authoritative(header.language_level, source,
-                                            "LanguageLevel")
+          "creation_date" => authoritative(header.creation_date, source, "CreationDate"),
+          "language_level" => authoritative(header.language_level, source, "LanguageLevel")
         }.compact
       end
 

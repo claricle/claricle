@@ -1398,6 +1398,20 @@ RSpec.describe "Claricle PostScript handler" do
       reads
     end
 
+    # Exactly `size` bytes of ordinary, non-structural header lines ("%"
+    # plus filler plus a line break), built to land a caller's own bytes
+    # at a precise offset -- needed to put a straddling boundary exactly
+    # where a spec wants it, which a repeated fixed-width line cannot
+    # guarantee when `size` is not a multiple of that width.
+    def exact_padding(size)
+      count, rest = size.divmod(100)
+      if [1, 2].include?(rest)
+        count -= 1
+        rest += 100
+      end
+      ("%#{"x" * 98}\n" * count) + (rest.zero? ? "" : "%#{"x" * (rest - 2)}\n")
+    end
+
     def program(header_comments, body_lines)
       padding = "%%For: #{"x" * 60}\n" * header_comments
       body = "0 0 moveto showpage\n" * body_lines
@@ -1547,8 +1561,12 @@ RSpec.describe "Claricle PostScript handler" do
     # started this work.
     #
     # Stubbed to a small limit so the spec stays fast and deterministic
-    # rather than needing a multi-MB fixture to prove the bound binds.
-    it "stops well short of a header that never ends, and reports ok" do
+    # rather than needing a multi-MB fixture to prove the bound binds. The
+    # limit is an exact multiple of HEADER_PROBE_BYTES (as the real 8 MiB
+    # limit also is: 8*1024*1024 / 8192 == 1024), so the read loop detects
+    # exhaustion on the very chunk that reaches the limit and asks for no
+    # probe beyond it.
+    it "stops well short of a header that never ends, and reports failed" do
       Tempfile.create(["never_ending", ".ps"]) do |file|
         file.binmode
         # 20,000 lines * 50 bytes = ~1 MB, several times the stubbed limit
@@ -1561,10 +1579,72 @@ RSpec.describe "Claricle PostScript handler" do
         result = nil
         reads = reads_for(file.path) { result = handler.inspection(image) }
 
-        expect(result.parse_status).to eq("ok")
-        # Header plus at most the one probe that straddles the limit.
-        expect(reads.sum).to be <= (3 * 8192) + 8192
-        expect(reads.sum).to be < file.size
+        expect(result.parse_status).to eq("failed")
+        expect(result.issues.map(&:code)).to eq(["postscript.header_unreadable"])
+        expect(reads.sum).to eq(3 * 8192)
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Postscript)
+              .send(:private_constant, :HEADER_LIMIT_BYTES)
+    end
+
+    # What truncating mid-document actually risks: `Dsc.settled?` (and the
+    # `disputed?`/`continued?` checks it composes) can only see the bytes
+    # in front of it. A `%%+` continuation landing one byte past the
+    # limit is invisible to a truncated read, so a naive "publish what was
+    # read" answer would report the fragment as a complete, undisputed
+    # title -- when the full document marks it continued and suppresses
+    # it. Measured against this exact shape before this guard existed: it
+    # reported `title: "First part"`.
+    it "does not publish a title whose continuation falls past the limit" do
+      Tempfile.create(["straddled_continuation", ".ps"]) do |file|
+        file.binmode
+        limit = 3 * 8192
+        preamble = "%!PS-Adobe-3.0\n"
+        title_line = "%%Title: First part\n"
+        # Padding sized so title_line ends exactly 5 bytes before the
+        # limit, leaving "%%+ m" -- an incomplete line -- as the pending
+        # bytes at the cut.
+        padding = exact_padding(limit - preamble.bytesize - title_line.bytesize - 5)
+        file.write("#{preamble}#{padding}#{title_line}%%+ more\n%%EndComments\nshowpage\n")
+        file.flush
+        image = Claricle::Image.from_path(file.path)
+        stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", limit)
+
+        result = handler.inspection(image)
+
+        expect(result.parse_status).to eq("failed")
+        expect(result.meta).to be_nil
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Postscript)
+              .send(:private_constant, :HEADER_LIMIT_BYTES)
+    end
+
+    # The same mechanism on a box rather than a scalar field: a conflicting
+    # %%BoundingBox declared past the limit is invisible to a truncated
+    # read, so `Dsc.disputed?` sees only the first declaration and cannot
+    # refuse it -- a naive "publish what was read" answer would report a
+    # box the full document explicitly disputes.
+    it "does not publish a bounding box whose conflicting repeat falls past the limit" do
+      Tempfile.create(["straddled_dispute", ".ps"]) do |file|
+        file.binmode
+        limit = 3 * 8192
+        preamble = "%!PS-Adobe-3.0\n"
+        box_line = "%%BoundingBox: 0 0 100 50\n"
+        # Padding alone spans the whole limit, so the conflicting second
+        # declaration below is guaranteed to fall entirely past the cut --
+        # the truncated read never sees it.
+        padding = exact_padding(limit)
+        file.write("#{preamble}#{box_line}#{padding}%%BoundingBox: 0 0 200 200\n%%EndComments\nshowpage\n")
+        file.flush
+        image = Claricle::Image.from_path(file.path)
+        stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", limit)
+
+        result = handler.inspection(image)
+
+        expect(result.parse_status).to eq("failed")
+        expect(result.meta).to be_nil
       end
     ensure
       Claricle.const_get(:Handlers).const_get(:Postscript)
