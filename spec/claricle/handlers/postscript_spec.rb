@@ -1537,6 +1537,61 @@ RSpec.describe "Claricle PostScript handler" do
         expect(result.meta).to include("title" => "Kept")
       end
     end
+
+    # The shape none of the above cases produce: no %%EndComments, and
+    # every line satisfies Dsc.header_line? (an ordinary comment), so
+    # neither of HeaderScanner#classify's two exits ever fires. Before the
+    # scan limit existed this read to EOF -- reproduced independently on
+    # this branch at 1-10 MB (0.07s-2.48s, already super-linear) and
+    # reported at 10-100 MB (1.9s-144s, 4.64 GB peak RSS) in the brief that
+    # started this work.
+    #
+    # Stubbed to a small limit so the spec stays fast and deterministic
+    # rather than needing a multi-MB fixture to prove the bound binds.
+    it "stops well short of a header that never ends, and reports ok" do
+      Tempfile.create(["never_ending", ".ps"]) do |file|
+        file.binmode
+        # 20,000 lines * 50 bytes = ~1 MB, several times the stubbed limit
+        # below, and %%EndComments never appears.
+        file.write("%!PS-Adobe-3.0\n#{"%comment #{"x" * 40}\n" * 20_000}")
+        file.flush
+        image = Claricle::Image.from_path(file.path)
+        stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", 3 * 8192)
+
+        result = nil
+        reads = reads_for(file.path) { result = handler.inspection(image) }
+
+        expect(result.parse_status).to eq("ok")
+        # Header plus at most the one probe that straddles the limit.
+        expect(reads.sum).to be <= (3 * 8192) + 8192
+        expect(reads.sum).to be < file.size
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Postscript)
+              .send(:private_constant, :HEADER_LIMIT_BYTES)
+    end
+
+    # The bound must not disturb a header that ends well inside it -- the
+    # same fixture shape every other spec in this file already relies on.
+    it "does not truncate a header that ends inside the limit" do
+      Tempfile.create(["under_limit", ".ps"]) do |file|
+        file.binmode
+        file.write("%!PS-Adobe-3.0\n%%BoundingBox: 0 0 100 50\n" \
+                   "%%Title: Kept\n%%EndComments\nshowpage\n")
+        file.flush
+        image = Claricle::Image.from_path(file.path)
+        stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", 3 * 8192)
+
+        result = handler.inspection(image)
+
+        expect(result).to have_attributes(width: 100.0, height: 50.0,
+                                          parse_status: "ok")
+        expect(result.meta).to include("title" => "Kept")
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Postscript)
+              .send(:private_constant, :HEADER_LIMIT_BYTES)
+    end
   end
 
   # Nothing guarantees the tag on a String of raw bytes, and these bytes

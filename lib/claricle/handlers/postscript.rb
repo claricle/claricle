@@ -167,11 +167,12 @@ module Claricle
     # separates the mutable stream walk from the framing predicates and
     # declaration lookups that remain module functions there.
     class HeaderScanner
-      def initialize
+      def initialize(limit:)
         @bytes = +"".b
         @line_start = 0
         @search_from = 0
         @header_end = nil
+        @limit = limit
       end
 
       def append(chunk)
@@ -199,8 +200,27 @@ module Claricle
       def scan(final:)
         scan_complete_lines(final)
         return if done?
+        return truncate! if !final && over_limit?
 
         final ? scan_final_line : scan_partial_line
+      end
+
+      # Every byte scanned counts toward the bound, not just bytes
+      # classified into complete lines -- a single line that never
+      # terminates (no CR, no LF) must be capped too, and it never
+      # advances @line_start.
+      def over_limit?
+        @bytes.bytesize >= @limit
+      end
+
+      # The same fallback #finish already takes when input runs out with
+      # no sentinel and no disqualifying line: whatever complete lines
+      # were classified become the header. The only difference here is
+      # what triggered it -- the byte ceiling, not genuine end of input --
+      # so a header that runs past the bound is read exactly like one
+      # that simply never carries %%EndComments.
+      def truncate!
+        @header_end = @line_start
       end
 
       def scan_complete_lines(final)
@@ -255,17 +275,17 @@ module Claricle
     # the stateful scanner, one bounded probe at a time. Binary-preview EPS
     # files are reframed to the offset and length declared by their wrapper.
     module DscHeader
-      def self.signed_header(raw, signature, probe_bytes)
+      def self.signed_header(raw, signature, probe_bytes, scan_limit)
         if raw.respond_to?(:read)
-          io_header(raw, signature, probe_bytes)
+          io_header(raw, signature, probe_bytes, scan_limit)
         else
-          string_header(raw, signature, probe_bytes)
+          string_header(raw, signature, probe_bytes, scan_limit)
         end
       end
 
-      def self.io_header(io, signature, probe_bytes)
+      def self.io_header(io, signature, probe_bytes, scan_limit)
         first = io.read(probe_bytes) || "".b
-        return scan_io(io, first, probe_bytes) if signed?(first, signature)
+        return scan_io(io, first, probe_bytes, scan_limit) if signed?(first, signature)
 
         range = EpsBinary.postscript_range(first, io.size)
         return nil unless range
@@ -275,11 +295,11 @@ module Claricle
         first = io.read([probe_bytes, length].min) || "".b
         return nil unless signed?(first, signature)
 
-        scan_io(io, first, probe_bytes, length - first.bytesize)
+        scan_io(io, first, probe_bytes, scan_limit, length - first.bytesize)
       end
 
-      def self.scan_io(io, first, probe_bytes, remaining = nil)
-        scanner = HeaderScanner.new.append(first)
+      def self.scan_io(io, first, probe_bytes, scan_limit, remaining = nil)
+        scanner = HeaderScanner.new(limit: scan_limit).append(first)
         until scanner.done?
           read = read_io_chunk(io, probe_bytes, remaining)
           break unless read
@@ -301,8 +321,8 @@ module Claricle
         [bytes, remaining && (remaining - bytes.bytesize)]
       end
 
-      def self.string_header(raw, signature, probe_bytes)
-        return scan_string(raw, 0, raw.bytesize, probe_bytes) if signed?(raw, signature)
+      def self.string_header(raw, signature, probe_bytes, scan_limit)
+        return scan_string(raw, 0, raw.bytesize, probe_bytes, scan_limit) if signed?(raw, signature)
 
         range = EpsBinary.postscript_range(raw, raw.bytesize)
         return nil unless range
@@ -311,11 +331,11 @@ module Claricle
         return nil if length < signature.bytesize
         return nil unless signed?(raw.byteslice(offset, signature.bytesize), signature)
 
-        scan_string(raw, offset, length, probe_bytes)
+        scan_string(raw, offset, length, probe_bytes, scan_limit)
       end
 
-      def self.scan_string(raw, offset, length, probe_bytes)
-        scanner = HeaderScanner.new
+      def self.scan_string(raw, offset, length, probe_bytes, scan_limit)
+        scanner = HeaderScanner.new(limit: scan_limit)
         limit = offset + length
         until scanner.done? || offset >= limit
           amount = [probe_bytes, limit - offset].min
@@ -604,8 +624,37 @@ module Claricle
       # longer, exactly the 629 KB case `FIELD_COMMENTS` exists for.
       HEADER_PROBE_BYTES = 8192
 
+      # The most this handler will ever read while looking for
+      # %%EndComments. DSC sets no ceiling on header length, so a run of
+      # ordinary-looking comment lines that never declares %%EndComments --
+      # every line matching HEADER_LINE, none matching DscKeywords::OTHER_PART
+      # -- read to EOF before this bound existed.
+      #
+      # Unlike Handlers::Metafile's SCAN_LIMIT, which deliberately does NOT
+      # bound its header (a separate, fixed-size read that stays readable
+      # however large the surrounding stream is), this bounds the header
+      # itself, because here the scan IS the header -- there is no separate
+      # fixed-size read to fall back on.
+      #
+      # 8 MiB: about 13x the largest header this file's own comments cite (a
+      # real 629 KB header of 32,000 %%For: comments, see the quadratic-parse
+      # fix above) and about 53x the largest one any spec here builds.
+      # Measured: an unbounded scan of a never-ending header cost 1.71s at
+      # 8 MB and climbed to 90.5s by 80 MB and 144s by 100 MB (4.64 GB peak
+      # RSS) -- this keeps the worst case bounded and fast whatever the
+      # file's real size is.
+      #
+      # A header that runs past this has not been shown to be broken, only
+      # unusual -- so it is read the same way HeaderScanner already reads a
+      # header that reaches true end of input with no %%EndComments: every
+      # complete line classified before the limit becomes the header.
+      # Detector::EpsHeader makes the same trade-off for the first line
+      # alone, treating a scan that runs past its own ceiling the same as no
+      # match at all rather than as an error.
+      HEADER_LIMIT_BYTES = 8 * 1024 * 1024
+
       private_constant :SIGNATURE, :BOX_COMMENTS,
-                       :FIELD_COMMENTS, :HEADER_PROBE_BYTES,
+                       :FIELD_COMMENTS, :HEADER_PROBE_BYTES, :HEADER_LIMIT_BYTES,
                        :ISSUE_CODE, :ISSUE_MESSAGE
 
       # `image.content` would cost a path-born image a file-sized
@@ -615,7 +664,7 @@ module Claricle
       # `with_source` instead, the same reader `Handlers::Svg` uses for
       # the same reason.
       def inspection(image)
-        source = image.with_source { DscHeader.signed_header(_1, SIGNATURE, HEADER_PROBE_BYTES) }
+        source = image.with_source { DscHeader.signed_header(_1, SIGNATURE, HEADER_PROBE_BYTES, HEADER_LIMIT_BYTES) }
         return unreadable(image) unless source
 
         header = read_header(source)
@@ -653,8 +702,7 @@ module Claricle
         Models::Inspection.new(
           format: image.format.to_s,
           parse_status: "failed",
-          issues: [Models::Issue.new(severity: "error", code: ISSUE_CODE,
-                                     message: ISSUE_MESSAGE)]
+          issues: [Models::Issue.new(severity: "error", code: ISSUE_CODE, message: ISSUE_MESSAGE)]
         )
       end
 
