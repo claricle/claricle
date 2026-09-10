@@ -39,11 +39,13 @@ RSpec.describe Claricle::Cli::Runner do
   describe "help's shell contract" do
     include ShellHelpers
 
-    # `help`'s rescue deliberately covers generation as well as the write,
-    # unlike every other command below. These two pin that, so narrowing it
-    # cannot happen by accident -- the comment on `Cli#help` records the
-    # three rounds of measurement that settled it. `printable_commands`
-    # builds the general help page; `banner` builds one command's.
+    # `help`'s rescue deliberately covers generation as well as the write.
+    # Every other command narrows its own rescue to the write half -- see
+    # the `broken pipe to 4` examples in cli_spec.rb -- and these two pin
+    # that help is the exception, so narrowing it cannot happen by
+    # accident. The comment on `Cli#help` records the three rounds of
+    # measurement that settled it. `printable_commands` builds the general
+    # help page; `banner` builds one command's.
     it "returns 0 when help generation hits a broken pipe" do
       allow(Claricle::Cli).to receive(:printable_commands).and_raise(Errno::EPIPE)
 
@@ -143,6 +145,47 @@ RSpec.describe Claricle::Cli::Runner do
           seen << probe.call
           super(shell, groups)
         end
+      end
+    end
+
+    # `observing_generation` prepends a module to `Claricle::Cli`'s singleton
+    # and a prepended module cannot be un-prepended, so without the
+    # `remove_method` in its `ensure` every hook stays in the dispatch chain
+    # for the rest of the PROCESS. Measured with a TracePoint: after two
+    # examples had used it, one help call in another file ran
+    # `class_options_help` six times, four of them through leaked closures
+    # holding dead objects.
+    #
+    # Both examples count invocations OUTSIDE any observation scope, so
+    # neither depends on which examples ran first. Removing the cleanup
+    # leaves every other example in this file green and turns these red.
+    describe "the generation hook's cleanup" do
+      def help_generations
+        count = 0
+        trace = TracePoint.new(:call) { |tp| count += 1 if tp.method_id == :class_options_help }
+        trace.enable { described_class.run(["help"], output: StringIO.new) }
+        count
+      end
+
+      it "leaves no hook behind after a completed observation" do
+        observing_generation(-> { :sampled }) do
+          described_class.run(["help"], output: StringIO.new)
+        end
+
+        expect(help_generations).to eq(1)
+      end
+
+      # The cleanup is an `ensure`, so a block that raises must not strand a
+      # hook either -- that is the case a happy-path-only check would miss.
+      it "leaves no hook behind when the observed block raises" do
+        expect do
+          observing_generation(-> { :sampled }) do
+            described_class.run(["help"], output: StringIO.new)
+            raise "boom"
+          end
+        end.to raise_error("boom")
+
+        expect(help_generations).to eq(1)
       end
     end
 
