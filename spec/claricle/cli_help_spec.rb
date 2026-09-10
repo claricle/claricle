@@ -19,6 +19,8 @@ require_relative "../support/shell_helpers"
 # them silently.
 RSpec.describe Claricle::Cli::Runner do
   describe "help's shell contract" do
+    include ShellHelpers
+
     # `help`'s rescue deliberately covers generation as well as the write,
     # unlike every other command below. These two pin that, so narrowing it
     # cannot happen by accident -- the comment on `Cli#help` records the

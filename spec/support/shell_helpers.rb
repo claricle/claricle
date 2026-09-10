@@ -1,10 +1,16 @@
 # frozen_string_literal: true
 
-# Building the Thor shell shapes the CLI specs drive. In `spec/support` and
-# included through `RSpec.configure` rather than defined in a spec file: a
-# `def` at the top level of a spec file becomes a private method on Object and
-# is reachable from every other file in the suite, which is a surprise nobody
-# asked for. Two files need these, so they stop being local helpers.
+# Building the Thor shell shapes `cli_help_spec.rb` drives. In `spec/support`
+# and NOT self-installing: the file that wants these includes the module into
+# its own group.
+#
+# An earlier version ended with `RSpec.configure { config.include ShellHelpers }`,
+# which put both helpers on every example group in the suite -- but only when
+# the one file requiring this one happened to be in the run. Measured:
+# `rspec spec/claricle/registry_spec.rb` alone answered false to
+# `respond_to?(:shell_factory)`, and a full `rspec` answered true. A helper
+# whose presence depends on which files were selected is the same surprise a
+# top-level `def` in a spec file causes, wearing better clothes.
 module ShellHelpers
   # Thor asks the settable `Thor::Base.shell` factory for a shell per
   # invocation. Handing back one prepared instance is what lets an example
@@ -25,8 +31,4 @@ module ShellHelpers
     shell.define_singleton_method(:stdout) { sink }
     shell
   end
-end
-
-RSpec.configure do |config|
-  config.include ShellHelpers
 end
