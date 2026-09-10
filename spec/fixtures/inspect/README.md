@@ -201,3 +201,9 @@ ever reached.
 | `begin_future.ps`, `trailer_colon.ps`, `bare_page.ps`, `page_trailer_colon.ps` | the four spellings DSC does not define: `%%BeginFuture:`, a `%%Trailer:` that takes no operands, a bare `%%Page` that requires them, and the same colon on `%%PageTrailer`. A `Begin\|End\|Include` stem behind a "colon, whitespace or end of line" delimiter read each one as the keyword it resembles and ended the header there, discarding the box and title behind it -- so each carries `0 0 100 50` and `%%Title: Kept`, which must both survive. Each pairs with a fixture above that must still END the header -- `begin_data.ps`, `trailer_comment.ps`, `page_comment.ps` and `page_trailer.ps` -- so the pairs fail in opposite directions: loosening the punctuation reddens these, dropping a name reddens those |
 | `duplicate_creator.ps`, `duplicate_creation_date.ps` | a repeated `%%Creator` and `%%CreationDate`, mirroring `duplicate_title.ps` for the two other textual fields the first-occurrence rule covers |
 | `duplicate_language_level.ps` | two declarations, `2` then `3`, both well-formed DSC unsigned integers -- unlike `underscored_level.ps`, where the FIRST one is not. This is the fixture that reaches `Dsc.unsigned(declared) == value` and has to reject on the values actually differing, not on either one failing to parse |
+
+## SVG
+
+| Fixture | Purpose |
+|---|---|
+| `valid.svg` | a minimal root with both dimensions, so every registered format has a real file on disk. `never_calls_image_content_spec.rb` only reaches the unbounded read through a PATH-born image, and SVG's own specs build their sources in memory |
