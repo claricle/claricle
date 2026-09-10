@@ -40,8 +40,13 @@ samples = {
   #   File.binwrite("spec/fixtures/inspect/no_trailer.pdf",
   #                 File.binread(PdfBuilder.path)[0, 60])
   #
-  # 60 bytes stops inside the header, before any usable trailer -- the same
-  # shape as short_ihdr.png, and it inspects "failed" for the same reason.
+  # 60 bytes lands mid-way through the object list -- 51 bytes PAST the
+  # 9-byte header, and well before the xref at 162 or the trailer at 251.
+  # The cut is deliberate rather than convenient: sweeping every truncation
+  # point of this document, bytes 9 through 297 all report no trailer and
+  # inspect "failed", and only 298 onward parse. That is a 288-byte-wide
+  # band, so 60 is nowhere near an edge a pdfrb release could move -- it
+  # would take pdfrb inventing a trailer the bytes never contain.
   pdf: { "valid.pdf" => "ok", "no_trailer.pdf" => "failed" },
   png: { "valid.png" => "ok", "short_ihdr.png" => "failed" },
   emf: { "valid.emf" => "ok", "truncated_44.emf" => "failed" },

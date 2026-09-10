@@ -3,8 +3,12 @@
 require "fileutils"
 require "tmpdir"
 
-# Builds classic-xref PDF fixtures from named parts, so no PDF byte is
-# committed to this repo. Every part is a keyword defaulting to the valid
+# Builds classic-xref PDF fixtures from named parts, so the CORRUPTION
+# corpus needs no committed bytes. Two static fixtures are committed --
+# spec/fixtures/inspect/valid.pdf and no_trailer.pdf, both produced by this
+# builder -- because the table in never_calls_image_content_spec.rb sources
+# every other format from a static file and one row built at spec time
+# would be the odd one out. Every part is a keyword defaulting to the valid
 # one, and a fixture is named by which parts it overrides -- there is no
 # list of override points to keep in step with the corpus.
 #
