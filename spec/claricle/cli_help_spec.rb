@@ -18,6 +18,24 @@ require_relative "../support/shell_helpers"
 # the shapes, so a future attempt at it fails loudly rather than regressing
 # them silently.
 RSpec.describe Claricle::Cli::Runner do
+  # A SIBLING group, so it sees exactly what every other file in the suite
+  # sees. `ShellHelpers` is included one group down and must not reach
+  # here: an earlier version of the support file ended with
+  # `RSpec.configure { config.include ShellHelpers }`, which put both
+  # helpers on every group in the suite -- but only when this file happened
+  # to be in the run, so `rspec spec/claricle/registry_spec.rb` alone and a
+  # full `rspec` disagreed about what a group could call.
+  #
+  # This asserts a property rather than watching a route: the helpers are
+  # not globally visible. Restoring that `RSpec.configure` block turns it
+  # red, which is the whole reason it is here rather than in a comment.
+  describe "helper reach" do
+    it "does not leak the help specs' helpers into a sibling group" do
+      expect(respond_to?(:shell_factory)).to be(false)
+      expect(respond_to?(:shell_writing_to)).to be(false)
+    end
+  end
+
   describe "help's shell contract" do
     include ShellHelpers
 
@@ -149,10 +167,10 @@ RSpec.describe Claricle::Cli::Runner do
       end
 
       # Deliberately NOT an equality check on the row count. The command
-      # inventory is pinned once, on its own example further down; matching
-      # it here as well would make adding a command look like a regression
-      # in whose shell got used -- the same trap the terminator example's
-      # comment warns about.
+      # inventory is pinned once, by "lists only the documented command" in
+      # cli_spec.rb; matching it here as well would make adding a command
+      # look like a regression in WHOSE SHELL got used, which is a
+      # different question and the only one this example asks.
       expect(sink.string).to match(/\Acustom:Commands:\ncustom-table:\d+\ncustom:\n\z/)
       # The singleton ran DURING generation, not in a replay afterwards.
       expect(mid_generation).to start_with("custom:Commands:\n")
