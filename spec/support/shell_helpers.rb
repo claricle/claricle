@@ -15,8 +15,10 @@ module ShellHelpers
     end
   end
 
-  # A real `Thor::Shell::Basic` -- real padding, real muting, real everything
-  # -- writing into `sink` instead of `$stdout`. Thor reads `stdout` on every
+  # A real shell of whatever class `Thor::Base.shell` hands back -- measured
+  # as `Thor::Shell::Color` here, a `Basic` subclass, so the write path is
+  # inherited and unchanged. Real padding, real muting, real everything,
+  # writing into `sink` instead of `$stdout`. Thor reads `stdout` on every
   # write, so a singleton is enough and nothing else about the shell changes.
   def shell_writing_to(sink)
     shell = Thor::Base.shell.new
