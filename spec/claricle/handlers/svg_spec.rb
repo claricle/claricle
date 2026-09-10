@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
 require "English"
-# The DOM parser, required only by the specs: it is what "malformed"
-# means in the root-prefix examples, and the library never loads it.
+# The DOM parser. `inspection` never loads it -- it reads a bounded root
+# prefix -- but `conformance_report` does (svg.rb requires rexml/document
+# for its well-formedness gate), so "the library never loads it" stopped
+# being true when conform arrived.
 require "rexml/document"
 require "rexml/security"
 require "tempfile"
@@ -597,11 +599,12 @@ RSpec.describe "Claricle SVG handler" do
     # read_root hands back its own hash. Handing a reference to it out of
     # an inspection lets a caller mutate what the reader produced, and
     # the model's freeze does not reach inside a Hash.
-    # The handler passes the reader's hash straight through, relying on
-    # lutaml to copy a `:hash` attribute on assignment. That is measured
-    # behaviour of a dependency, not a guarantee, so it is pinned here --
-    # if lutaml ever starts aliasing, an inspection would hand callers a
-    # reference to the reader's own hash and this goes red.
+    # The handler passes the reader's hash straight through, and the copy
+    # is Claricle's OWN: `Models::FreeFormHash.cast` does it explicitly,
+    # which is why that type exists rather than lutaml's `:hash` -- see the
+    # comment on `readable` in svg.rb. Pinned here because a caller holding
+    # a reference to the reader's hash could mutate what an inspection
+    # reported, and the model's freeze does not reach inside a Hash.
     it "does not share the reader's hash" do
       readers_hash = { "xmlns" => svg_ns, "width" => "7" }
       allow(Claricle.const_get(:Detector)).to receive(:read_root)
@@ -739,9 +742,10 @@ RSpec.describe "Claricle SVG handler" do
     end
 
     # svg_conform keeps XML parse failures in its SAX handler's own
-    # `@parse_errors`, which `ValidationResult` never carries -- so every
-    # one of these came back `valid: :yes`, no issues, CLI exit 0 before
-    # the well-formedness gate went in. A conformance report calling a
+    # `@parse_errors`, which nothing ever reads -- measured, the only two
+    # mentions in the gem are the initialiser and one append -- so each of
+    # these three came back `valid: :yes`, no issues, CLI exit 0 before the
+    # well-formedness gate went in. A conformance report calling a
     # broken file conformant is the one answer this operation must not
     # give, so the shapes are pinned rather than the mechanism.
     {
@@ -766,7 +770,7 @@ RSpec.describe "Claricle SVG handler" do
     # under a name that promises it is testing the conformance gate.
     #
     # The gate must not swallow a document svg_conform would have judged.
-    # Paired with the four above, so a gate that refused everything fails
+    # Paired with the three above, so a gate that refused everything fails
     # here and a gate that refused nothing fails there.
     it "still reaches the delegate for a well-formed document" do
       expect(conform("no_viewbox").issues.map(&:code)).to eq(%w[viewbox_required viewbox_required])
@@ -867,7 +871,7 @@ RSpec.describe "Claricle SVG handler" do
     # profile going UNPASSED: svg_conform then runs its own default,
     # `svg_1_2_rfc`, which reports a `color_restrictions` error against
     # this very fixture. Passing it to `Validator.new` instead also works
-    # -- the comment on `PROFILE` records why -- so this example does not
+    # -- the comment on `Svg.profiles` records why -- so this does not
     # pin the route, only that base is what ran.
     it "runs the base profile rather than svg_conform's own default" do
       expect(conform("valid").issues).to be_empty
