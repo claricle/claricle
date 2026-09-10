@@ -46,7 +46,8 @@ The name reflects what the library is for:
   It stops at the root start tag, so its parse status means "the root
   was readable", not "the document is well-formed". A file damaged
   after that tag still reports `ok`. Judging the whole document is
-  conformance, and no handler implements it yet
+  conformance, which `conform` now does for SVG; `inspect` still only
+  reads the bounded root prefix
 * `inspect` for EPS and PS -- dimensions from a **concrete bounding box
   declared in the DSC header**, preferring `%%HiResBoundingBox` and
   falling back to `%%BoundingBox`, plus the title, creator, creation
@@ -76,16 +77,20 @@ The name reflects what the library is for:
 * **CR-only line endings for EPS and PS.** The parser reads no DSC
   comments from them, so those files inspect as `ok` with no dimensions
   and no metadata
-* `conform` and `convert` for every format. No handler implements
-  either yet, so both raise `Claricle::UnsupportedFormat`. `claricle
-  formats` reports this per format, and it reads the handlers rather
-  than a list, so it cannot claim an operation that is not there.
-  The `conform` command and `Claricle.conform?` do exist -- they take
-  files, expand globs and report per file -- but every format currently
-  answers exit 3, so the command is plumbing waiting on its handlers
-* `--profile` for `conform`. PDF and SVG will name stricter standards
-  through it, but no handler defines one yet, so supplying `profile:`
-  is refused rather than accepted and ignored
+* `conform` for every format but SVG, and `convert` for every format.
+  No handler implements convert yet, so it always raises
+  `Claricle::UnsupportedFormat`. `claricle formats` reports this per
+  format, and it reads the handlers rather than a list, so it cannot
+  claim an operation that is not there. SVG is the first format with a
+  conformance handler; every other format still answers exit 3 for
+  `conform`, so the command remains plumbing waiting on the rest of
+  its handlers
+* `--profile` for `conform`, on every format but SVG. SVG's handler
+  already defines six -- `base` (the default), `lucid_fix`,
+  `metanorma`, `no_external_css`, `svg_1_2_rfc` and
+  `svg_1_2_rfc_with_rdf`. PDF will name stricter standards through it
+  once it has a handler; until then supplying `profile:` for an
+  unconformed format is refused rather than accepted and ignored
 * WMF beyond detection. `detect` returns `:wmf`, but no handler
   registers it, so every operation on a WMF raises
   `UnsupportedFormat`. That is deliberate: the upstream parser this
@@ -141,8 +146,9 @@ because a process status has to be a byte. The codes above are the ones
 this library assigns.
 
 Exit code 1 is reserved for a nonconformant file. `claricle conform`
-ships, but no handler judges conformance yet, so it reaches 2 and 3
-today and 1 becomes reachable with the first handler.
+ships, and SVG is the first format with a conformance handler, so 0
+and 1 are now reachable end to end for an SVG file; every other
+format still answers 2 or 3 until it gets a handler of its own.
 
 `claricle conform` takes any number of files. A positional is a literal
 path when it names an existing file and a glob otherwise, and

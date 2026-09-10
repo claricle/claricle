@@ -92,7 +92,7 @@ module Claricle
 
   def self.conformance_report(path, profile: nil)
     checked_profile(profile)
-    Image.from_path(path).conformance_report
+    Image.from_path(path).conformance_report(profile: profile)
   end
 
   # A batch predicate loses information, so a caller can have the whole
@@ -118,14 +118,22 @@ module Claricle
     strict ? report.valid == :yes : report.valid != :no
   end
 
-  # No handler implements conformance yet, so no format defines a profile
-  # yet -- and a profile a format does not define is a bad invocation, not
-  # a flag to accept and quietly drop. The per-format table of profile names
-  # arrives with the handlers that have them.
+  # A name NO format defines is a bad invocation -- a typo, caught before
+  # the batch opens a file. A name some format defines but this file's
+  # format does not is a different answer and belongs per file, so
+  # `Image#conformance_report` asks it again with the format in hand.
+  #
+  # This used to refuse every profile outright, because no handler
+  # implemented conformance. That is no longer true, and leaving it would
+  # have meant a report naming the profile it ran under while the same
+  # public API rejected a caller asking for that profile by name.
   def self.checked_profile(profile)
     return if profile.nil?
 
-    raise InvocationError, "no format defines a profile yet: #{profile.inspect}"
+    known = Registry.profiles
+    return if known.include?(profile.to_sym)
+
+    raise InvocationError, "no format defines a profile named #{profile.inspect}"
   end
 
   private_class_method :accumulate, :conclusive?, :conformant?, :checked_profile

@@ -89,7 +89,7 @@ module Claricle
     option :strict, type: :boolean, default: false,
                     desc: "Require a clean verdict, not merely the absence of errors"
     option :profile, type: :string,
-                     desc: "Require conformance to this profile; no format defines one yet"
+                     desc: "Require conformance to a named profile the format defines"
     def conform(*files)
       result = Claricle.conformance_batch(*files, pattern: options[:pattern],
                                                   strict: options[:strict],

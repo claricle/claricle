@@ -723,16 +723,33 @@ RSpec.describe Claricle::Cli::Runner do
       described_class.run(%w[conform a.png], output: StringIO.new)
     end
 
-    # Real behavior, not a forwarding mock: no handler defines a profile
-    # yet, so any --profile is a bad invocation checked before the batch
-    # runs -- proven the same way the module API's own spec proves it,
-    # through the command's real exit code and message.
-    it "exits 2 for --profile, since no format defines one yet" do
+    # Three profile outcomes, and they are three DIFFERENT exit codes,
+    # which is the whole reason the two error classes are separate:
+    #
+    #   a name no format defines        2   a typo in the invocation
+    #   a name THIS format lacks        3   the format is fine, the pair is not
+    #   a name the format defines       0   or 1, on the file's own merits
+    #
+    # Every one goes through the real Runner, not a stub, because the exit
+    # code is the only part of this a user ever sees.
+    it "exits 3 for a profile another format defines but this one does not" do
       workspace.call(["a.png", "valid.png"]) do
         expect(described_class.run(%w[conform a.png --profile base], output: StringIO.new))
-          .to eq(2)
+          .to eq(3)
         expect { described_class.run(%w[conform a.png --profile base], output: $stderr) }
-          .to output(/no format defines a profile yet: "base"/).to_stderr
+          .to output(/:png does not define profile "base"; it defines none/).to_stderr
+      end
+    end
+
+    # Real behavior, not a forwarding mock: a profile name no format
+    # defines is a bad invocation checked before the batch runs, and it
+    # reaches the user through the command's real exit code and message.
+    it "exits 2 for a --profile no format defines" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect(described_class.run(%w[conform a.png --profile nope], output: StringIO.new))
+          .to eq(2)
+        expect { described_class.run(%w[conform a.png --profile nope], output: $stderr) }
+          .to output(/no format defines a profile named "nope"/).to_stderr
       end
     end
 

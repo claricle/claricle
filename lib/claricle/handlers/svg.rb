@@ -34,6 +34,13 @@ module Claricle
     class Svg < Base
       formats :svg
 
+      # svg_conform's own six, measured from `Profiles.available_profiles`
+      # on a cleared cache rather than copied from its README, and pinned
+      # by a spec so a release that adds or drops one says so here. `base`
+      # is FIRST because D21 makes it what a plain `conform` runs.
+      profiles :base, :lucid_fix, :metanorma, :no_external_css,
+               :svg_1_2_rfc, :svg_1_2_rfc_with_rdf
+
       # CSS absolute lengths, all defined against 1in = 96px. Computed
       # from that anchor rather than copied: 72pt, 6pc and 1in all come
       # to 96.0. Q is listed because CSS defines it: an absolute unit
@@ -73,9 +80,9 @@ module Claricle
       # root-attribute interpretation for the same reason `Png` keeps its
       # own mapper apart: the two share a file and nothing else.
       class ConformanceMapper
-        # D21: a generic `conform` runs the `base` requirement set. The
-        # other five profiles are reached through `--profile`, which this
-        # method does not take yet.
+        # D21: a generic `conform` runs the `base` requirement set, which
+        # is why `Svg.profiles` lists it first. The other five are reached
+        # through `--profile`.
         #
         # What matters is that it is passed AT ALL. svg_conform's own
         # default is `:svg_1_2_rfc`, a far stricter set: measured on 0.2.2,
@@ -93,8 +100,6 @@ module Claricle
         # ways against that fixture: constructor-only `[]`, keyword-only
         # `[]`, neither `["color_restrictions"]`. The keyword is used here
         # because it reads as an argument to the call it applies to.
-        PROFILE = :base
-
         # svg_conform's own three buckets. `ValidationResult` carries
         # exactly these -- it takes `context.errors`, `context.warnings`
         # and `context.validity_errors` in its constructor and drops
@@ -130,8 +135,8 @@ module Claricle
         # rule's id, then to the rule class's name, then to the string
         # "unknown". So unlike PNG, no code has to be slugged out of the
         # message here.
-        def self.report(image)
-          image.with_path { |path| report_for(image, path) }
+        def self.report(image, profile:)
+          image.with_path { |path| report_for(image, path, profile) }
         end
 
         # `clear_cache!` is not tidiness. `Profiles.available_profiles`
@@ -139,12 +144,12 @@ module Claricle
         # 0.2.2, all six before a `base` run and `[:base]` after it -- so
         # a process that validated once would go on to answer a later
         # `--profile` check against a list of one.
-        def self.report_for(image, path)
-          result = ::SvgConform::Validator.new.validate_file(path, profile: PROFILE)
+        def self.report_for(image, path, profile)
+          result = ::SvgConform::Validator.new.validate_file(path, profile: profile)
 
           Models::Report.new(
             source_path: image.path, format: image.format.to_s,
-            profile: PROFILE.to_s, validator_version: ::SvgConform::VERSION,
+            profile: profile.to_s, validator_version: ::SvgConform::VERSION,
             issues: issues_from(result)
           )
         ensure
@@ -201,14 +206,18 @@ module Claricle
 
       # The mapping, and every fact it rests on, are documented on
       # `ConformanceMapper.report` below.
-      def conformance_report(image)
+      #
+      # The default comes from the DECLARATION, not from a second constant
+      # naming `base` again -- one rule in two places is one that can
+      # drift, and `profiles` already puts the default first.
+      def conformance_report(image, profile: nil)
         # Lazily required (D5), matching `Png#conformance_report`: the
         # detector's `emf` is the only eager delegate, and svg_conform
         # pulls in a profile loader and a SAX stack that a plain
         # `inspect` run has no use for.
         require "svg_conform"
 
-        ConformanceMapper.report(image)
+        ConformanceMapper.report(image, profile: profile || self.class.supported_profiles.first)
       end
 
       private

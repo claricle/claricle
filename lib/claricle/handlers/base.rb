@@ -54,6 +54,33 @@ module Claricle
           @formats || [].freeze
         end
 
+        # The profile names this handler's conform operation accepts, in
+        # the order the format's own spec ranks them, so the FIRST is what
+        # a plain `conform` runs. Declared rather than derived, unlike
+        # `capabilities` below: a profile is a name in a delegate's own
+        # vocabulary, and nothing in the handler's method list says which
+        # names those are.
+        #
+        # Refused twice over on the same grounds as `formats` -- no
+        # take-backs, and Symbols only, because `Registry.profiles_for`
+        # sorts these and one String among them raises on comparison
+        # rather than at the typo.
+        def profiles(*symbols)
+          raise Error, "#{self} already declared profiles #{@profiles.inspect}" if @profiles
+
+          bad = symbols.grep_v(Symbol)
+          raise Error, "#{self} declared non-Symbol profiles #{bad.inspect}" if bad.any?
+
+          @profiles = symbols.freeze
+        end
+
+        # Empty means "this format has no profiles", which is a real
+        # answer and not a gap: PNG conformance is one fixed requirement
+        # set, so there is nothing to choose between.
+        def supported_profiles
+          @profiles || [].freeze
+        end
+
         # Derived, never declared. A declaration is a second place to say
         # what the code already says, and it can advertise an operation
         # that is still Base's raising stub -- exactly the lie `formats`

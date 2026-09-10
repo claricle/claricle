@@ -1,7 +1,9 @@
 # frozen_string_literal: true
 
+require "fileutils"
 require "stringio"
 require "timeout"
+require "tmpdir"
 
 RSpec.describe "the documentation" do
   root = File.expand_path("../..", __dir__)
@@ -165,6 +167,41 @@ RSpec.describe "the documentation" do
         .to raise_error(Claricle::UnknownFormat)
     end
 
+    # This is the passage most likely to go stale next: it names SVG
+    # specifically as the ONLY format with a handler, so the day a second
+    # format gets one, the sentence is still true about SVG and wrong
+    # about "every other format still answers 2 or 3". A `shows`/`claims`
+    # pin cannot see that kind of drift -- it only proves the sentence is
+    # still IN the README, not that it is still the whole truth. Running
+    # `conform` end to end against both a conformant and a nonconformant
+    # SVG is what a text match cannot give: proof the exit codes the
+    # sentence promises are the exit codes the CLI actually returns today.
+    it "reaches exit 0 and exit 1 through conform now that SVG has a handler" do
+      claims("SVG is the first format with a conformance handler, so 0")
+      claims("and 1 are now reachable end to end for an SVG file")
+
+      conform_fixtures = File.join(root, "spec/fixtures/conform")
+
+      previous_stdout = $stdout
+      $stdout = StringIO.new
+
+      Dir.mktmpdir do |dir|
+        FileUtils.cp(File.join(conform_fixtures, "valid.svg"), File.join(dir, "a.svg"))
+        Dir.chdir(dir) do
+          expect(Claricle::Cli::Runner.run(%w[conform a.svg], output: StringIO.new)).to eq(0)
+        end
+      end
+
+      Dir.mktmpdir do |dir|
+        FileUtils.cp(File.join(conform_fixtures, "no_viewbox.svg"), File.join(dir, "a.svg"))
+        Dir.chdir(dir) do
+          expect(Claricle::Cli::Runner.run(%w[conform a.svg], output: StringIO.new)).to eq(1)
+        end
+      end
+    ensure
+      $stdout = previous_stdout
+    end
+
     # A mapped command is documented under the name users type, not the
     # method behind it. Flag aliases (-h, --tree) are Thor's, not commands.
     # The registry keys ARE the command names now. This used to invert
@@ -302,6 +339,7 @@ RSpec.describe "the documentation" do
         },
         UnknownFormat: {},
         UnsupportedFormat: {},
+        UnsupportedProfile: {},
         VERSION: nil
       )
       # Set equality, not order: `methods(false)` answers in definition

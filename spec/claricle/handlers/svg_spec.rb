@@ -794,14 +794,23 @@ RSpec.describe "Claricle SVG handler" do
       expect(SvgConform::Profiles.available_profiles).to match_array(before)
     end
 
-    # The clear has to survive a validation that blew up, or one bad file
-    # poisons the profile list for the rest of the process.
-    it "leaves the profiles discoverable when validation raises" do
+    # The clear has to survive a failure, or one bad file poisons the
+    # profile list for the rest of the process.
+    #
+    # It raises AFTER the validation, not before it, and that is the whole
+    # point. svg_conform resolves the profile -- which is what dirties the
+    # cache -- before it parses anything, so a stub that raises from
+    # `Validator.new` never reaches the poisoning step and the example
+    # passes with the `ensure` deleted. Measured: with `ensure` removed,
+    # that version stayed green while its sibling above went red. Raising
+    # from `Models::Report.new` puts the failure on the far side of a real
+    # validation, where the cache is already `[:base]`.
+    it "clears the cache when the report cannot be built" do
       SvgConform::Profiles.clear_cache!
       before = SvgConform::Profiles.available_profiles
-      allow(SvgConform::Validator).to receive(:new).and_raise(SvgConform::ValidationError, "boom")
+      allow(Claricle::Models::Report).to receive(:new).and_raise(RuntimeError, "boom")
 
-      expect { conform("valid") }.to raise_error(SvgConform::ValidationError)
+      expect { conform("valid") }.to raise_error(RuntimeError, "boom")
       expect(SvgConform::Profiles.available_profiles).to match_array(before)
     end
 
@@ -865,11 +874,19 @@ RSpec.describe "Claricle SVG handler" do
       expect(conform("no_viewbox").issues.map(&:location)).to eq([nil, nil])
     end
 
-    it "carries the position when the issue reports one" do
-      stub_validation(errors: [issue_double(:error, "positioned", line: 4, column: 11)])
+    # BOTH absent is the only shape that means "no position". One present
+    # and one absent still locates the issue, and `&&` versus `||` is the
+    # whole difference -- measured, `||` survived every other example here.
+    [
+      { line: 4, column: 11 },
+      { line: 4, column: nil },
+      { line: nil, column: 11 }
+    ].each do |position|
+      it "carries a location when the issue reports #{position.compact.keys.join(" and ")}" do
+        stub_validation(errors: [issue_double(:error, "positioned", **position)])
 
-      expect(conform("valid").issues.first.location)
-        .to have_attributes(line: 4, column: 11)
+        expect(conform("valid").issues.first.location).to have_attributes(**position)
+      end
     end
   end
 end
