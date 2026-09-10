@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "rexml/document"
+
 require_relative "base"
 require_relative "../detector"
 require_relative "../models/inspection"
@@ -135,16 +137,62 @@ module Claricle
         # rule's id, then to the rule class's name, then to the string
         # "unknown". So unlike PNG, no code has to be slugged out of the
         # message here.
+        # Well-formedness FIRST, and it is not belt-and-braces. svg_conform
+        # 0.2.2 collects XML parse failures in `SaxValidationHandler`'s own
+        # `@parse_errors`, which `ValidationResult` never carries -- so
+        # mapping its three buckets cannot tell a valid document from an
+        # unparseable one. Measured on three shapes, every one reported
+        # `valid: :yes`, no issues, CLI exit 0:
+        #
+        #   <svg ...><g></svg>            mismatched end tag
+        #   <svg ...><rect wid            truncated mid-attribute
+        #   <svg .../><svg/>              two root elements
+        #
+        # A conformance report that calls a broken file conformant is the
+        # one answer this operation must never give, so the check runs
+        # before the delegate and short-circuits it.
+        #
+        # This is where the whole document gets parsed, and that is
+        # correct HERE where it is wrong in `inspection`: D16 makes
+        # judging the whole document conformance's job, and the bounded
+        # 8192-byte read exists to keep `inspect` cheap, not to keep
+        # `conform` shallow.
         def self.report(image, profile:)
-          image.with_path { |path| report_for(image, path, profile) }
+          image.with_path do |path|
+            malformed = not_well_formed(path)
+            next malformed if malformed
+
+            report_for(image, path, profile)
+          end
         end
 
-        # `clear_cache!` is not tidiness. `Profiles.available_profiles`
-        # collapses to just the profile last validated with -- measured on
-        # 0.2.2, all six before a `base` run and `[:base]` after it -- so
-        # a process that validated once would go on to answer a later
-        # `--profile` check against a list of one.
+        # REXML is already a runtime dependency and raises one class for
+        # every shape above, so nothing here has to enumerate what "broken"
+        # means. Encoding failures come back as the same refusal: a
+        # document Ruby cannot decode is one no validator can judge.
+        def self.not_well_formed(path)
+          ::REXML::Document.new(::File.read(path))
+          nil
+        rescue ::REXML::ParseException, ::EncodingError, ::ArgumentError => e
+          malformed_report(path, e)
+        end
+
+        # The first line of REXML's message only: it renders the whole
+        # offending source after it, which would put an arbitrary slice of
+        # someone's document into a report a caller may well print.
+        def self.malformed_report(path, error)
+          Models::Report.new(
+            source_path: path, format: "svg",
+            validator_version: ::SvgConform::VERSION,
+            issues: [Models::Issue.new(
+              severity: "error", code: "svg.not_well_formed",
+              message: "the document is not well-formed XML: #{error.message.lines.first.to_s.strip}"
+            )]
+          )
+        end
+
         def self.report_for(image, path, profile)
+          warm_profile_cache
           result = ::SvgConform::Validator.new.validate_file(path, profile: profile)
 
           Models::Report.new(
@@ -152,8 +200,35 @@ module Claricle
             profile: profile.to_s, validator_version: ::SvgConform::VERSION,
             issues: issues_from(result)
           )
-        ensure
-          ::SvgConform::Profiles.clear_cache!
+        end
+
+        # ADDS to svg_conform's profile cache; never clears it. Validating
+        # loads only the profile it used, and `Profiles.available_profiles`
+        # answers from the cache once the cache is non-empty -- so one
+        # `base` run leaves the process believing `base` is the only
+        # profile that exists, measured six before and `[:base]` after.
+        #
+        # Clearing the cache fixes that count and breaks something worse.
+        # `Profiles` keys its cache in a CLASS VARIABLE shared with every
+        # other user of the gem in the process, so a host that customised
+        # a profile through svg_conform's own public API loses that
+        # customisation the first time Claricle conforms anything --
+        # measured: a host removing `viewbox_required` from `base` saw it
+        # come back after one Claricle call. A library inside someone
+        # else's process does not get to reset their state.
+        #
+        # Warming from OUR OWN declaration is what makes this possible.
+        # `available_profiles` cannot be the source, because once the cache
+        # has collapsed it reports the collapsed list -- the very thing
+        # being repaired. `Svg.profiles` is declared, not derived, so it
+        # says the same six whatever the cache currently holds.
+        #
+        # Idempotent and cheap when warm: every call is a cache hit.
+        # Measured cold, all six load in 54.7 ms once; a warm validation
+        # costs 0.08 ms against 0.81 ms when the cache was cleared each
+        # time, so a glob batch stops paying a reload per file.
+        def self.warm_profile_cache
+          Svg.supported_profiles.each { |name| ::SvgConform::Profiles.get(name) }
         end
 
         def self.issues_from(result)
@@ -181,7 +256,9 @@ module Claricle
           Models::Location.new(line: line, column: column)
         end
 
-        private_class_method :report_for, :issues_from, :issue_from, :location_for
+        private_class_method :report_for, :issues_from, :issue_from, :location_for,
+                             :not_well_formed, :warm_profile_cache,
+                             :malformed_report
       end
 
       private_constant :ConformanceMapper

@@ -738,6 +738,85 @@ RSpec.describe "Claricle SVG handler" do
       allow(SvgConform::Validator).to receive(:new).and_return(validator)
     end
 
+    # svg_conform keeps XML parse failures in its SAX handler's own
+    # `@parse_errors`, which `ValidationResult` never carries -- so every
+    # one of these came back `valid: :yes`, no issues, CLI exit 0 before
+    # the well-formedness gate went in. A conformance report calling a
+    # broken file conformant is the one answer this operation must not
+    # give, so the shapes are pinned rather than the mechanism.
+    {
+      "a mismatched end tag" => %(<svg xmlns="http://www.w3.org/2000/svg"><g></svg>),
+      "a document truncated mid-attribute" => %(<svg xmlns="http://www.w3.org/2000/svg"><rect wid),
+      "a second root element" => %(<svg xmlns="http://www.w3.org/2000/svg"/><svg/>)
+    }.each do |shape, source|
+      it "refuses #{shape} instead of reporting it conformant" do
+        with_svg_file.call(source) do |path|
+          report = handler.conformance_report(Claricle::Image.from_path(path))
+
+          expect(report.valid).to eq(:no)
+          expect(report.issues.map(&:code)).to eq(["svg.not_well_formed"])
+        end
+      end
+    end
+
+    # Bytes that are not markup at all are deliberately NOT in that table.
+    # `Image.from_path` refuses them with `UnknownFormat` before any
+    # handler is chosen -- measured, the example failed with "no known
+    # image signature" -- so a row here would be testing the detector
+    # under a name that promises it is testing the conformance gate.
+    #
+    # The gate must not swallow a document svg_conform would have judged.
+    # Paired with the four above, so a gate that refused everything fails
+    # here and a gate that refused nothing fails there.
+    it "still reaches the delegate for a well-formed document" do
+      expect(conform("no_viewbox").issues.map(&:code)).to eq(%w[viewbox_required viewbox_required])
+    end
+
+    # `Profiles` caches in a CLASS VARIABLE shared with every other user of
+    # the gem in this process. Clearing it repaired the profile count and
+    # destroyed a host's own customisation; warming from `Svg.profiles`
+    # repairs the count by ADDING, which is the only version a library
+    # inside someone else's process is entitled to.
+    # A PARTIALLY warm cache, which is the only arm where the warming
+    # SOURCE matters. From an empty cache `available_profiles` falls
+    # through to globbing the profile YAML and answers all six, so warming
+    # from it looks identical to warming from the declaration -- which is
+    # exactly why the whole suite stayed green against that mutant.
+    # Measured: with one entry cached, the declaration restores all six and
+    # `available_profiles` restores `["base"]`, reproducing the collapse
+    # being repaired.
+    it "still discovers every profile when the cache arrives partly warm" do
+      conform("valid")
+      SvgConform::Profiles.clear_cache!
+      SvgConform::Profiles.get(:base)
+
+      conform("valid")
+
+      expect(SvgConform::Profiles.available_profiles).to match_array(
+        Claricle.const_get(:Handlers).const_get(:Svg).supported_profiles
+      )
+    ensure
+      SvgConform::Profiles.clear_cache!
+    end
+
+    it "leaves a host's own profile customisation alone" do
+      SvgConform::Profiles.clear_cache!
+      SvgConform::Profiles.get(:base).remove_requirement("viewbox_required")
+      customised = SvgConform::Validator.new.validate_file(
+        File.join(conform_fixtures, "no_viewbox.svg"), profile: :base
+      ).errors
+
+      conform("valid")
+
+      after = SvgConform::Validator.new.validate_file(
+        File.join(conform_fixtures, "no_viewbox.svg"), profile: :base
+      ).errors
+      expect(customised.map(&:requirement_id)).to eq([])
+      expect(after.map(&:requirement_id)).to eq([])
+    ensure
+      SvgConform::Profiles.clear_cache!
+    end
+
     it "reports a conformant document as valid with no issues" do
       report = conform("valid")
 
@@ -815,18 +894,17 @@ RSpec.describe "Claricle SVG handler" do
       expect(SvgConform::Profiles.available_profiles).to match_array(before)
     end
 
-    # The clear has to survive a failure, or one bad file poisons the
-    # profile list for the rest of the process.
+    # A failure must not leave the profile list short. Nothing CLEARS the
+    # cache any more -- warming replaced that -- so what this pins is that
+    # the warm happens before the work that can fail, and therefore
+    # survives it.
     #
-    # It raises AFTER the validation, not before it, and that is the whole
-    # point. svg_conform resolves the profile -- which is what dirties the
-    # cache -- before it parses anything, so a stub that raises from
-    # `Validator.new` never reaches the poisoning step and the example
-    # passes with the `ensure` deleted. Measured: with `ensure` removed,
-    # that version stayed green while its sibling above went red. Raising
+    # It raises AFTER the validation on purpose. svg_conform resolves the
+    # profile before it parses anything, so a stub raising from
+    # `Validator.new` never reaches the interesting step at all; raising
     # from `Models::Report.new` puts the failure on the far side of a real
-    # validation, where the cache is already `[:base]`.
-    it "clears the cache when the report cannot be built" do
+    # validation. Measured at that point, the cache holds all six.
+    it "leaves every profile discoverable when the report cannot be built" do
       SvgConform::Profiles.clear_cache!
       before = SvgConform::Profiles.available_profiles
       allow(Claricle::Models::Report).to receive(:new).and_raise(RuntimeError, "boom")
