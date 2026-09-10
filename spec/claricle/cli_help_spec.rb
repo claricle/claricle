@@ -87,17 +87,45 @@ RSpec.describe Claricle::Cli::Runner do
     # `prepend` on the singleton, not a stub: `class_options_help` is
     # protected on `Thor::Base::ClassMethods`, and the hook has to survive
     # being called with Thor's own arguments.
+    #
+    # The `ensure` is the load-bearing half. A prepended module cannot be
+    # un-prepended, so without it every hook stays in the dispatch chain
+    # for the rest of the process and its closure fires on every later
+    # `help` -- measured with a TracePoint on `class_options_help`: after
+    # two examples here had run, an example in `cli_spec.rb` invoked it
+    # SIX times, four of them through leaked hooks holding dead `sink` and
+    # `reached` objects. Nothing broke, because these hooks only append to
+    # arrays nobody reads any more. The first hook that closes over an IO
+    # or a frozen object would fail an unrelated example in another file
+    # with nothing pointing back to here.
+    #
+    # `remove_method` leaves the empty module in `ancestors` -- Ruby gives
+    # no way to remove it -- but takes its override out of the chain,
+    # which is the part that matters.
+    #
+    # It refuses a second invocation rather than returning the first and
+    # dropping the rest. Two `help` calls inside one block is a reasonable
+    # thing for a later example to try, and silently answering about the
+    # first one is how it would waste an afternoon.
     def observing_generation(probe)
       seen = []
-      hook = Module.new do
+      hook = generation_hook(seen, probe)
+      Claricle::Cli.singleton_class.prepend(hook)
+      yield
+      raise "observing_generation saw #{seen.length} generations, expected 1" unless seen.one?
+
+      seen.first
+    ensure
+      hook&.send(:remove_method, :class_options_help)
+    end
+
+    def generation_hook(seen, probe)
+      Module.new do
         define_method(:class_options_help) do |shell, groups = {}|
           seen << probe.call
           super(shell, groups)
         end
       end
-      Claricle::Cli.singleton_class.prepend(hook)
-      yield
-      seen.first
     end
 
     # Runner asks the settable `Thor::Base.shell` factory for each
