@@ -407,10 +407,14 @@ module Claricle
           objstm_header_tokens(objstm)
         end
 
+        # The type/sign check on `first` runs BEFORE `decoded_stream` --
+        # an invalid `/First` is refused without paying for a decode at
+        # all, rather than decoding first and discarding the result.
         def objstm_header_tokens(objstm)
           first = objstm.value[:First]
-          decoded = objstm.decoded_stream
           return unless first.is_a?(::Integer) && !first.negative?
+
+          decoded = objstm.decoded_stream
           return unless decoded && first <= decoded.bytesize
 
           decoded.byteslice(0, first).split(/\s+/)
