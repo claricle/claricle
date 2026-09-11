@@ -178,19 +178,27 @@ RSpec.describe "Claricle conformance API" do
       expect(Claricle.conformance_report(svg, profile: ran).profile).to eq(ran)
     end
 
+    # The regex pins the current message, not just the profile name: the
+    # old wording ("no format defines a profile yet: ...") also contained
+    # the name, so a looser pattern here would pass unchanged against
+    # code that never checks `Registry.profiles` at all -- measured by
+    # mutation-check.sh, which is exactly the gap this file's other
+    # `/no format defines a profile named/` pattern (above) already
+    # closes.
     it "refuses a bad profile on conform?" do
       workspace(["a.svg", File.join(__dir__, "..", "..", "fixtures", "conform", "valid.svg")]) do
         expect { Claricle.conform?("a.svg", profile: "no-such-profile") }
-          .to raise_error(Claricle::InvocationError, /no-such-profile/)
+          .to raise_error(Claricle::InvocationError, /no format defines a profile named "no-such-profile"/)
       end
     end
 
     # Once per call, not once per file: an unknown name is one invocation
-    # error about the command, never a row in a report.
+    # error about the command, never a row in a report. Same pinning as
+    # above, for the same measured reason.
     it "refuses an unknown profile before the batch runs" do
       workspace(["a.png", png], ["b.eps", eps]) do
         expect { Claricle.conformance_batch(pattern: "*", profile: "no-such-profile") }
-          .to raise_error(Claricle::InvocationError, /no-such-profile/)
+          .to raise_error(Claricle::InvocationError, /no format defines a profile named "no-such-profile"/)
       end
     end
   end
