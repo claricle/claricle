@@ -292,11 +292,12 @@ module Claricle
         # it that way, but a producer that inlined it would be reported
         # "failed". Accepted, and recorded rather than hidden.
         #
-        # For a COMPRESSED reference this cannot prove the object it
-        # received is the object the file recorded at that index: pdfrb's
-        # object-stream reader discards the number stored there and wraps
-        # the value with the number that was asked for. That is a
-        # limitation of object numbers, not of generations.
+        # For a COMPRESSED reference `document.object` alone cannot prove
+        # the object it received is the object the file recorded at that
+        # index: pdfrb's object-stream reader discards the number stored
+        # there and wraps the value with the number that was asked for.
+        # `compressed_oid_matches?` below is what closes that gap by
+        # reading the ObjStm's own header directly.
         def resolve(document, value)
           guarded { checked(document, value) }
         end
@@ -307,8 +308,116 @@ module Claricle
           entry = document.xref&.[](value.oid)
           return unless entry && RESOLVABLE.include?(entry.type)
           return unless entry.gen.to_i == value.gen
+          return unless resolvable_compressed?(document, entry, value.oid)
 
           document.object(value)
+        end
+
+        # A no-op for every non-compressed entry, so `checked` pays this
+        # branch's cost without paying `compressed_oid_matches?`'s.
+        def resolvable_compressed?(document, entry, oid)
+          entry.type != :compressed || compressed_oid_matches?(document, entry, oid)
+        end
+
+        # ISO 32000-1 7.5.7: the xref's declared object number for a
+        # compressed object and the number the object stream's OWN header
+        # records at that index shall agree. pdfrb's
+        # `ObjectReader#load_from_objstm` (measured against pdfrb-0.7.49
+        # lib/pdfrb/source/object_reader.rb:119-129) discards the stored
+        # number and relabels whatever value it finds at the index with
+        # the oid the caller asked for -- so an xref entry whose `index`
+        # disagrees with what the stream itself declares silently returns
+        # a different object's value under the right object's number.
+        # Measured: an otherwise well-formed compressed Pages node with
+        # `/Count 1` swapped for one at another index declaring `/Count
+        # 999` resolves and publishes 999 with no error anywhere.
+        #
+        # `container&.type == :in_use` is checked FIRST and separately
+        # from the oid comparison below. An object stream is never itself
+        # stored inside another object stream, so if the xref claims the
+        # CONTAINING stream is itself `:compressed`, the `document.object`
+        # call a few lines down would recurse into pdfrb's own
+        # compressed-resolution path a second time with none of this
+        # method's guards applied to that inner hop -- measured, without
+        # this check that recursion runs until `SystemStackError`, which
+        # `guarded` happens to catch but only after paying for the whole
+        # stack. Refusing immediately is cheaper and does not depend on a
+        # rescue two frames away.
+        #
+        # Re-parses only the ObjStm's HEADER (the `oid offset` pairs
+        # before `/First`), not the values: `ObjectStreamReader.read`
+        # (pdfrb-0.7.49 lib/pdfrb/source/object_stream_reader.rb:18-21)
+        # parses the header exactly this way, but it also eagerly parses
+        # every declared VALUE, which pdfrb already does once per ObjStm
+        # and caches privately (`@objstm_cache`, unreachable from here).
+        # Calling that method a second time here would double the
+        # value-parsing cost of every compressed resolution; this reads
+        # only the bytes needed to answer the oid question.
+        def compressed_oid_matches?(document, entry, expected_oid)
+          pairs = objstm_header_pairs(document, entry.obj_stm_oid)
+          return false unless pairs
+
+          slot = entry.index.to_i * 2
+          return false unless slot >= 0 && slot < pairs.length
+
+          pairs[slot].to_i == expected_oid
+        end
+
+        # Memoised per `obj_stm_oid`, on the handler instance. `Image#handler`
+        # (image.rb) builds a fresh handler per call and this method's own
+        # instance runs exactly one `Pdfrb::Document.open` (`open_document`
+        # above), so the cache cannot outlive, or leak across, the one
+        # document it was built for.
+        #
+        # Without this, a shared object stream pays `objstm_header_tokens`'s
+        # decode once per COMPRESSED OBJECT the handler resolves out of it,
+        # not once per stream. Measured: instrumenting
+        # `Pdfrb::Model::Cos::Stream#decoded_stream` (which pdfrb does not
+        # memoise -- confirmed against pdfrb-0.7.49
+        # lib/pdfrb/model/cos/stream.rb, every call re-runs
+        # `Pdfrb::Filter.apply`) on the default 3-object fixture, where the
+        # handler resolves 2 distinct compressed oids (Catalog, Pages) from
+        # one ObjStm, gave 4 decodes -- 1 for the xref stream, 2 for this
+        # method (one per resolve), 1 more inside pdfrb's own
+        # `ObjectReader#load_from_objstm`. The comment on
+        # `compressed_oid_matches?` above already accounts for paying that
+        # last one twice (ours plus pdfrb's, once); it did not account for
+        # multiplying by every compressed object touched, and the file's own
+        # `DEADLINE_SECONDS` comment treats decode cost as a resource this
+        # handler cannot let scale with attacker-controlled shape.
+        def objstm_header_pairs(document, obj_stm_oid)
+          cache = (@objstm_header_pairs ||= {})
+          return cache[obj_stm_oid] if cache.key?(obj_stm_oid)
+
+          cache[obj_stm_oid] = uncached_objstm_header_pairs(document, obj_stm_oid)
+        end
+
+        # Returns nil for anything that keeps the header from being read
+        # safely: the declared container is not a genuine in-use stream
+        # (see `compressed_oid_matches?`'s comment on why that is checked
+        # before touching the delegate at all), or `/First` does not
+        # describe a real prefix of the decoded bytes.
+        def uncached_objstm_header_pairs(document, obj_stm_oid)
+          container = document.xref&.[](obj_stm_oid)
+          return unless container&.type == :in_use
+
+          objstm = document.object(::Pdfrb::Model::Reference.new(obj_stm_oid, 0))
+          return unless objstm.is_a?(::Pdfrb::Model::Cos::Stream)
+
+          objstm_header_tokens(objstm)
+        end
+
+        # The type/sign check on `first` runs BEFORE `decoded_stream` --
+        # an invalid `/First` is refused without paying for a decode at
+        # all, rather than decoding first and discarding the result.
+        def objstm_header_tokens(objstm)
+          first = objstm.value[:First]
+          return unless first.is_a?(::Integer) && !first.negative?
+
+          decoded = objstm.decoded_stream
+          return unless decoded && first <= decoded.bytesize
+
+          decoded.byteslice(0, first).split(/\s+/)
         end
       end
       include Resolver
