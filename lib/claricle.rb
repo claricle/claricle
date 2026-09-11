@@ -136,33 +136,43 @@ module Claricle
   # the CLI command and the Ruby API cannot drift about what "which files"
   # or "where to" mean.
   #
-  # 04-convert.md's own item 3 scope: the command + batch + boundary specs.
-  # There is no single-file `Claricle.convert` convenience wrapper yet --
-  # that line sits in the design's item-2 prose, not item 3's "## Do" list,
-  # and building it now would be undocumented scope creep. It is deferred
-  # to item 4, alongside `Models::Conversion`, which is what would give it
-  # something real to return.
+  # There is no single-file `Claricle.convert` convenience wrapper yet. It
+  # is deferred until there is a real per-conversion result worth returning
+  # from one -- building it ahead of that would be an API surface with
+  # nothing honest to answer for `output_path`/lossiness yet.
   #
   # The whole destination set is preflighted -- collision, overwrite,
-  # case-fold aliasing -- BEFORE any file is converted, per 04-convert.md's
-  # whole-batch-atomic rule. That is why this resolves the expanded file
-  # list and every destination up front, rather than letting `Batch.run`
-  # derive them one file at a time the way `conformance_batch` does.
+  # case-fold aliasing -- BEFORE any file is converted. That is why this
+  # resolves the expanded file list and every destination up front, rather
+  # than letting `Batch.run` derive them one file at a time the way
+  # `conformance_batch` does.
+  #
+  # Target resolution runs before the single-source check below, so a
+  # `--to`/`--output` mismatch is reported even when the source count is
+  # also wrong -- the more specific problem surfaces first rather than
+  # being masked by the more generic one.
   def self.convert_batch(*paths, to: nil, output: nil, force: false, pattern: nil)
     files = Batch.expand(paths, pattern)
+    target = resolved_convert_target(to: to, output: output)
     raise InvocationError, "--output takes a single source; #{files.length} files matched" if output && files.length > 1
 
-    target = resolved_convert_target(to: to, output: output)
     destinations = files.to_h { |file| [file, convert_destination(file, target: target, output: output)] }
     writer = Writer.new(destinations.values, sources: files, force: force)
 
     # `classify` always answers 0: the block below either returns normally
     # -- always `nil`, since `Models::BatchItem#result` is still typed to
-    # `Report` and item 04 is what widens it for a real conversion result
-    # -- or raises, which `Batch.run`'s own rescue already turns into a
-    # failed item with its own exit code. There is no success/failure
-    # distinction left for `classify` to make.
-    Batch.run(files, classify: ->(_result) { 0 }) do |file|
+    # `Report` and stays that way until a handler produces a real
+    # conversion result to widen it for -- or raises, which `Batch.run`'s
+    # own rescue already turns into a failed item with its own exit code.
+    # There is no success/failure distinction left for `classify` to make.
+    #
+    # `run_files`, not `run`: `files` is already the expanded list built
+    # above for the destination preflight. `run` would expand it a SECOND
+    # time -- redundant stat/realpath work on every file, and a real gap:
+    # a file removed between the two expansions would silently drop out of
+    # the second one with no error, even though a destination was already
+    # preflighted for it.
+    Batch.run_files(files, classify: ->(_result) { 0 }) do |file|
       convert_one(file, target: target, destination: destinations.fetch(file), writer: writer)
     end
   end
@@ -171,8 +181,9 @@ module Claricle
     image = Image.from_path(file)
     raise InvocationError, "#{file} is already #{target}; nothing to convert to" if image.format == target
 
-    # No handler implements `convert` yet (item 04), so this always raises
-    # `UnsupportedFormat` today -- exit 3, the same state `conform` is in.
+    # No handler implements `convert` yet, so this always raises
+    # `UnsupportedFormat` today -- exit 3, the same state `conform` is in
+    # until its own first handler lands.
     bytes = image.convert(to: target)
     writer.write(bytes, to: destination)
     nil
@@ -182,11 +193,16 @@ module Claricle
   # recognised `--output` extension. `--output` alone must name a
   # recognised extension to infer from; `--output -` alone cannot, since
   # stdout has no extension.
+  #
+  # `--to` is case-folded to the registry's own spelling (`Registry.formats`
+  # is always lowercase symbols) so `--to SVG` and `--to svg` resolve
+  # identically -- unfolded, `--to SVG --output copy.svg` reported a false
+  # "conflicts with --output" (the two sides compared `:SVG` against the
+  # inferred `:svg`), a same-format `--to SVG` on an already-SVG source
+  # skipped the guard below entirely, and the derived destination for a
+  # bare `--to SVG` carried the wrong-cased extension.
   def self.resolved_convert_target(to:, output:)
-    if to
-      check_to_output_conflict(to, output)
-      return to.to_sym
-    end
+    return resolved_to_target(to, output) if to
     if output == Writer::STDOUT_DESTINATION
       raise InvocationError, "--output - needs --to; there is no extension to infer from"
     end
@@ -196,17 +212,24 @@ module Claricle
       raise(InvocationError, "--output #{output.inspect} has no recognised format extension; give --to")
   end
 
-  # A conflict, not a preference: 04-convert.md is explicit that one
-  # silently winning is wrong. `output:` naming stdout or an
+  def self.resolved_to_target(to, output)
+    target = to.to_s.downcase.to_sym
+    check_to_output_conflict(target, output)
+    target
+  end
+
+  # A conflict, not a preference: one silently winning over the other would
+  # surprise whichever the caller meant. `output:` naming stdout or an
   # unrecognised extension carries no claim about the target, so there is
-  # nothing for `--to` to conflict with in either case.
-  def self.check_to_output_conflict(to, output)
+  # nothing for `--to` to conflict with in either case. `target` arrives
+  # already case-folded from `resolved_convert_target`.
+  def self.check_to_output_conflict(target, output)
     return if output.nil? || output == Writer::STDOUT_DESTINATION
 
     inferred = convert_extension_format(output)
-    return if inferred.nil? || inferred == to.to_sym
+    return if inferred.nil? || inferred == target
 
-    raise InvocationError, "--to #{to} conflicts with --output #{output} (looks like #{inferred})"
+    raise InvocationError, "--to #{target} conflicts with --output #{output} (looks like #{inferred})"
   end
 
   # The canonical extension for a target is the format symbol itself --
@@ -229,6 +252,6 @@ module Claricle
   end
 
   private_class_method :accumulate, :conclusive?, :conformant?, :checked_profile,
-                       :convert_one, :resolved_convert_target, :check_to_output_conflict,
-                       :convert_extension_format, :convert_destination
+                       :convert_one, :resolved_convert_target, :resolved_to_target,
+                       :check_to_output_conflict, :convert_extension_format, :convert_destination
 end

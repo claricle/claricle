@@ -83,9 +83,18 @@ module Claricle
 
     class << self
       def run(arguments, classify:, pattern: nil, &operation)
-        BatchResult.new(
-          expand(arguments, pattern).map { |path| outcome(path, classify, &operation) }
-        )
+        run_files(expand(arguments, pattern), classify: classify, &operation)
+      end
+
+      # Runs over an ALREADY-expanded file list, skipping expansion
+      # entirely. `Claricle.convert_batch` calls `expand` itself first (to
+      # build its destination preflight) and hands the result straight
+      # here -- expanding it a second time would redo every `File.file?`/
+      # `File.realpath` call for nothing, and would silently drop a file
+      # that vanished between the two calls (TOCTOU) even though a
+      # destination had already been preflighted for it.
+      def run_files(files, classify:, &operation)
+        BatchResult.new(files.map { |path| outcome(path, classify, &operation) })
       end
 
       # A positional is a literal path when it names an existing file and a
@@ -102,10 +111,10 @@ module Claricle
       # file survives does not depend on the order they were given in.
       #
       # Public, unlike the rest of this class: `Claricle.convert_batch`
-      # needs the expanded file list before `run`, to build the whole-batch
-      # destination preflight up front (04-convert.md's write-lifecycle
-      # rule). `glob`/`glob_combinations`/`nothing_matched` stay private --
-      # only this method is called from outside `Batch`.
+      # needs the expanded file list before it can preflight the whole
+      # destination set up front. `glob`/`glob_combinations`/
+      # `nothing_matched` stay private -- only this method is called from
+      # outside `Batch`.
       def expand(arguments, pattern)
         found = arguments.flat_map do |argument|
           File.file?(argument) ? [argument] : glob(argument)

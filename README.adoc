@@ -86,7 +86,7 @@ The name reflects what the library is for:
   So does `claricle convert` and `Claricle.convert_batch`: batching,
   `--force`, `--output`, `--to` inference and the exit-2 boundary checks
   are all real, but every format still answers exit 3 until a handler
-  implements the edge
+  implements that source-to-target conversion
 * `--profile` for `conform`. PDF and SVG will name stricter standards
   through it, but no handler defines one yet, so supplying `profile:`
   is refused rather than accepted and ignored

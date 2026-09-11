@@ -94,7 +94,9 @@ RSpec.describe "Claricle conversion API" do
       workspace(["a.png", png], ["b.eps", eps]) do
         result = Claricle.convert_batch(pattern: "*", to: "emf")
 
+        expect(result.exit_code).to eq(3)
         expect(result.highest_error).to be_a(Claricle::UnsupportedFormat)
+        expect(result.highest_error.message).to match(/is not supported for convert to :emf/)
       end
     end
 
@@ -161,6 +163,14 @@ RSpec.describe "Claricle conversion API" do
     it "prefers --to outright when there is no conflicting --output" do
       expect(Claricle.send(:resolved_convert_target, to: "svg", output: nil)).to eq(:svg)
       expect(Claricle.send(:resolved_convert_target, to: "svg", output: "-")).to eq(:svg)
+    end
+
+    # `Registry.formats` is always lowercase symbols, so `--to` is folded
+    # to match -- unfolded, `--to SVG --output copy.svg` compared `:SVG`
+    # against the inferred `:svg` and raised a false conflict.
+    it "case-folds --to to the registry's own lowercase spelling" do
+      expect(Claricle.send(:resolved_convert_target, to: "SVG", output: nil)).to eq(:svg)
+      expect(Claricle.send(:resolved_convert_target, to: "SVG", output: "copy.svg")).to eq(:svg)
     end
 
     it "infers the target from a recognised --output extension" do

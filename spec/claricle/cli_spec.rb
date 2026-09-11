@@ -880,6 +880,35 @@ RSpec.describe Claricle::Cli::Runner do
       end
     end
 
+    # `--to` is case-folded to the registry's own lowercase spelling.
+    # Before that fold, `--to SVG` alone (no `--output`, so nothing for it
+    # to conflict with) reached the real conversion attempt with the
+    # UNFOLDED `:SVG` as the target and printed it uppercase.
+    it "treats --to case-insensitively" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect(described_class.run(%w[convert a.png --to SVG], output: StringIO.new)).to eq(3)
+        expect { described_class.run(%w[convert a.png --to SVG], output: StringIO.new) }
+          .to output(/:png is not supported for convert to :svg/).to_stderr
+      end
+    end
+
+    # The sharper case: before the fold, `--to EPS` on an already-EPS
+    # source compared `:eps == :EPS`, found them unequal, and skipped the
+    # same-format guard entirely -- reaching a real (exit 3) conversion
+    # attempt instead of the exit-2 invocation error a same-format `--to`
+    # is supposed to be.
+    it "matches the source's own format case-insensitively for the same-format guard" do
+      workspace.call(["a.eps", "basic.eps"]) do
+        expect(described_class.run(%w[convert a.eps --to EPS --output copy.eps],
+                                   output: StringIO.new)).to eq(2)
+        expect do
+          described_class.run(%w[convert a.eps --to EPS --output copy.eps],
+                              output: StringIO.new)
+        end
+          .to output(/a\.eps is already eps; nothing to convert to/).to_stderr
+      end
+    end
+
     # `--output` is given explicitly here, and given a DIFFERENT name than
     # the source: with no `--output`, the derived destination for
     # `a.eps --to eps` is `a.eps` itself, which Writer's own
@@ -998,6 +1027,27 @@ RSpec.describe Claricle::Cli::Runner do
 
         expect(stdout.string).to eq("RAWBYTES")
         expect(stderr.string).to eq("")
+      end
+    end
+
+    # Every other command's closed-stdout behavior is proven in "the real
+    # CLI" above (returns 0). `--output -` writes its bytes DURING
+    # `Claricle.convert_batch`, inside Batch's own per-file rescue, so a
+    # closed pipe there used to surface as an ordinary conversion failure
+    # (exit 4) instead of the exit-0 every sibling command gives -- the
+    # `tolerate_closed_output` wrapper around `write_convert` below never
+    # got a chance to see it, because the write already happened and
+    # already failed by the time that line runs.
+    it "returns 0 when a converted file's stdout is closed, the same as every other command" do
+      workspace.call(["a.png", "valid.png"]) do
+        fake = instance_double(Claricle::Image, format: :png, convert: "RAWBYTES")
+        allow(Claricle::Image).to receive(:from_path).with("a.png").and_return(fake)
+
+        result = closed_stdout do
+          described_class.run(%w[convert a.png --to svg --output -], output: StringIO.new)
+        end
+
+        expect(result).to eq(0)
       end
     end
   end
