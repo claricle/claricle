@@ -797,10 +797,16 @@ RSpec.describe Claricle::Cli::Runner do
       end
     end
 
+    # The message is asserted, not just the code: an unknown-command error
+    # (a missing `convert` command entirely) also answers 2, so the code
+    # alone does not distinguish "the command exists and refused this
+    # pattern" from "there is no such command".
     it "exits 2 for a pattern that matched nothing" do
       workspace.call do
         expect(described_class.run(["convert", "--pattern", "none-*.png"], output: StringIO.new))
           .to eq(2)
+        expect { described_class.run(["convert", "--pattern", "none-*.png"], output: $stderr) }
+          .to output(/no files matched "none-\*\.png"/).to_stderr
       end
     end
 
@@ -964,23 +970,34 @@ RSpec.describe Claricle::Cli::Runner do
     # stands in for the one call (Image#convert) nothing else can drive --
     # `instance_double` is verified against Image's real public interface,
     # so a renamed or dropped method here fails this spec, not silently.
-    it "writes exactly the converted bytes to stdout, with no trailing newline" do
+    # One example, not two: "stdout carries bytes only" is a claim about
+    # BOTH streams' division of labor, so a stray write on either one
+    # should fail it. A standalone `not_to output.to_stderr` proved
+    # nothing on its own here -- an unknown `convert` command (reverting
+    # this whole feature) also writes nothing to real stderr, since Thor's
+    # own error report goes through the `output:` argument instead. This
+    # combined form catches that: reverted, `stdout.string` is empty, not
+    # `"RAWBYTES"`.
+    it "writes exactly the converted bytes to stdout, with no trailing newline, and nothing to stderr" do
       workspace.call(["a.png", "valid.png"]) do
         fake = instance_double(Claricle::Image, format: :png, convert: "RAWBYTES")
         allow(Claricle::Image).to receive(:from_path).with("a.png").and_return(fake)
 
-        expect { described_class.run(%w[convert a.png --to svg --output -], output: StringIO.new) }
-          .to output("RAWBYTES").to_stdout
-      end
-    end
+        stdout = StringIO.new
+        stderr = StringIO.new
+        previous_stdout = $stdout
+        previous_stderr = $stderr
+        $stdout = stdout
+        $stderr = stderr
+        begin
+          described_class.run(%w[convert a.png --to svg --output -], output: StringIO.new)
+        ensure
+          $stdout = previous_stdout
+          $stderr = previous_stderr
+        end
 
-    it "puts nothing on stderr for a converted file written to stdout" do
-      workspace.call(["a.png", "valid.png"]) do
-        fake = instance_double(Claricle::Image, format: :png, convert: "RAWBYTES")
-        allow(Claricle::Image).to receive(:from_path).with("a.png").and_return(fake)
-
-        expect { described_class.run(%w[convert a.png --to svg --output -], output: StringIO.new) }
-          .not_to output.to_stderr
+        expect(stdout.string).to eq("RAWBYTES")
+        expect(stderr.string).to eq("")
       end
     end
   end
