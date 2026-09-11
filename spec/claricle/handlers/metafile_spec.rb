@@ -63,6 +63,12 @@ RSpec.describe "Claricle metafile handler" do
     [type, size].pack("VV") + ("\x00".b * (size - 8))
   end
 
+  # A valid EMR_EOF: no palette, and SizeLast -- the record's final DWORD --
+  # equal to `size`, as MS-EMF requires. `rec(14, size)` leaves SizeLast 0.
+  def eof(size = 20)
+    [14, size, 0, 16].pack("V4") + ("\x00".b * (size - 20)) + [size].pack("V")
+  end
+
   describe "dimensions" do
     it "reads the picture bounds" do
       expect(inspect_emf("valid")).to have_attributes(width: 100.0, height: 50.0)
@@ -1204,16 +1210,200 @@ RSpec.describe "Claricle metafile handler" do
     expect(output).to eq("100.0")
   end
 
-  # The structural pre-pass. Built and spec'd here; it is deliberately NOT
-  # wired to `conformance_report`, because `Base.capabilities` is derived from
-  # which methods a handler overrides, so overriding it would add `conform` to
-  # `claricle formats` and change output this PR must leave byte-identical.
+  # The conform operation. Every fact these pin was measured against emf
+  # 0.1.0, and several of them the gem itself gets wrong -- `ok?` is not
+  # the answer, and neither is the absence of `errors`.
+  describe "conformance_report" do
+    def conform_emf(name)
+      handler.conformance_report(Claricle::Image.from_path(fixture(name)))
+    end
+
+    # Explicit format, matching `inspect_emf` above: a hand-edited stream
+    # need not still detect as EMF, and detection would raise before the
+    # handler ran.
+    def conform_bytes(bytes)
+      handler.conformance_report(Claricle::Image.from_content(bytes, format: :emf))
+    end
+
+    it "reports a conformant metafile as valid with no issues" do
+      expect(conform_emf("valid")).to have_attributes(format: "emf", issues: [], valid: :yes)
+    end
+
+    it "names the delegate it judged with" do
+      expect(conform_emf("valid").validator_version).to eq(Emf::VERSION)
+    end
+
+    def codes_at(report)
+      report.issues.map { |issue| [issue.code, issue.location&.byte_offset] }
+    end
+
+    # `valid.emf` with one DWORD rewritten.
+    def valid_with(offset, value)
+      source = File.binread(fixture("valid")).dup
+      source[offset, 4] = [value].pack("V")
+      source
+    end
+
+    # Strip the final EMR_EOF and the gem reports `ok? == true, errors ==
+    # []` -- a stream ending at a record boundary is indistinguishable from
+    # a clean end of file to a parser that only reads forwards.
+    it "refuses a metafile the delegate itself calls clean" do
+      source = File.binread(fixture("valid"))
+      truncated = source[0, 344]
+
+      expect(Emf.parse(truncated)).to have_attributes(ok?: true, errors: [])
+      report = conform_bytes(truncated)
+
+      expect(report.valid).to eq(:no)
+      expect(report.issues.map(&:code))
+        .to contain_exactly("emf.byte_count_mismatch", "emf.missing_eof", "emf.record_count_mismatch")
+    end
+
+    # `header.n_bytes` cannot stand in for the walk: this file declares 392
+    # and IS 392, because whoever appended the bytes updated the header.
+    it "refuses bytes that follow the EMR_EOF record" do
+      expect(File.size(fixture("after_eof"))).to eq(392)
+      expect(Emf.parse(File.binread(fixture("after_eof"))).header.n_bytes).to eq(392)
+
+      expect(conform_emf("after_eof").issues.map(&:code)).to eq(["emf.trailing_bytes"])
+    end
+
+    it "refuses a misaligned record the delegate parses clean" do
+      expect(Emf.parse(File.binread(fixture("misaligned_record"))))
+        .to have_attributes(ok?: true, errors: [])
+
+      expect(codes_at(conform_emf("misaligned_record"))).to eq([["emf.record_framing", 88]])
+    end
+
+    # Size 13 cannot prove the divisor is four -- it is odd, so a rule of
+    # two refuses it too. Size 10 can: 10 % 2 is 0 and 10 % 4 is 2.
+    it "refuses a record size that is even but not four-byte aligned" do
+      expect(codes_at(conform_emf("record_size_10"))).to include(["emf.record_framing", 88])
+    end
+
+    # EMR_HEADER is framed like every other record. 110 pins the divisor
+    # the same way size 10 does above.
+    [109, 110].each do |declared|
+      it "refuses a header declaring #{declared} bytes" do
+        report = conform_bytes(valid_with(4, declared))
+
+        expect(report.valid).to eq(:no)
+        expect(codes_at(report)).to eq([["emf.record_framing", 0]])
+      end
+    end
+
+    # MS-EMF: the header's Bytes field is the size of the whole metafile.
+    # `valid.emf` is 364 bytes.
+    [0, 360, 368].each do |declared|
+      it "refuses a header declaring #{declared} bytes for a 364-byte file" do
+        issues = conform_bytes(valid_with(48, declared)).issues
+
+        expect(issues.map(&:code)).to eq(["emf.byte_count_mismatch"])
+        expect(issues.first.message).to eq("the header declares #{declared} bytes and the file holds 364")
+      end
+    end
+
+    # MS-EMF: EMR_EOF's SizeLast MUST equal its Size. `valid.emf` ends with
+    # a 20-byte EMR_EOF at 344, so SizeLast is its final DWORD.
+    it "refuses an EMR_EOF whose SizeLast disagrees with its Size" do
+      issues = conform_bytes(valid_with(360, 0)).issues
+
+      expect(issues.map(&:code)).to eq(["emf.eof_size_mismatch"])
+      expect(issues.first.location).to have_attributes(byte_offset: 360, byte_length: 4)
+    end
+
+    # The outer framing of both is perfect, so only reading the comment's
+    # own DataSize finds the damage.
+    %w[bad_comment overrun_comment].each do |name|
+      it "refuses #{name}.emf, whose comment declares more data than its record holds" do
+        report = conform_emf(name)
+
+        expect(report.valid).to eq(:no)
+        expect(report.issues.map(&:code)).to eq(["emf.comment_overrun"])
+      end
+    end
+
+    # Every exception family the gem raises, and what the walk reports in
+    # its place. `EOFError < IOError`, so listing IOError covers both --
+    # but only because the rescue matches by CLASS, not by equality.
+    {
+      "truncated_44" => ["Emf::FormatError", ["emf.record_framing", 0]],
+      "nsize_87" => ["IOError", ["emf.record_framing", 0]],
+      "nsize_44" => ["EOFError", ["emf.record_framing", 0]],
+      "described_92" => ["EOFError", ["emf.unverified", nil]],
+      "bad_comment" => ["NoMethodError", ["emf.comment_overrun", 88]]
+    }.each do |name, (raised, found)|
+      it "reports #{found.first} for #{name}.emf rather than letting #{raised} escape" do
+        expect { Emf.parse(File.binread(fixture(name))) }
+          .to raise_error(Object.const_get(raised))
+
+        expect(codes_at(conform_emf(name))).to eq([found])
+      end
+    end
+
+    # A gem exception is evidence about the validator, not the file. These
+    # headers are legal and their record streams intact, so the answer is
+    # "not fully judged", never "nonconformant".
+    %w[described_92 described_96 described_emf_plus].each do |name|
+      it "calls #{name}.emf suspicious, not nonconformant" do
+        expect(conform_emf(name)).to have_attributes(valid: :suspicious)
+      end
+    end
+
+    it "reports a stream over the scan limit as not examined, not clean" do
+      oversized = File.binread(fixture("valid")) + ("\x00".b * (200 * 1024 * 1024))
+
+      expect(conform_bytes(oversized))
+        .to have_attributes(valid: :suspicious, issues: [have_attributes(code: "emf.not_examined")])
+    end
+
+    # This source can only be read with a length, and only up to one byte
+    # past the scan limit, so an unbounded read is impossible rather than
+    # merely unobserved.
+    it "never reads more than one byte past the scan limit from an open file" do
+      bytes = File.binread(fixture("valid"))
+      ceiling = (200 * 1024 * 1024) + 1
+      source = Class.new do
+        define_method(:read) { |length| bytes.byteslice(0, length) if length <= ceiling }
+      end.new
+      image = Claricle::Image.from_path(fixture("valid"))
+      allow(image).to receive(:with_source).and_yield(source)
+
+      expect(handler.conformance_report(image).issues).to eq([])
+    end
+
+    # Independence, proven per check rather than asserted. Each input
+    # defeats one check and is caught by the other, so neither is dead
+    # weight -- measured by construction, not by reading.
+    it "catches a dropped EOF even when the record count agrees" do
+      source = File.binread(fixture("valid"))
+      truncated = source[0, 344].dup
+      truncated[52, 4] = [16].pack("V")
+
+      codes = conform_bytes(truncated).issues.map(&:code)
+
+      expect(codes).to include("emf.missing_eof")
+      expect(codes).not_to include("emf.record_count_mismatch")
+    end
+
+    it "catches a wrong record count even when the EOF record is present" do
+      source = File.binread(fixture("valid")).dup
+      source[52, 4] = [999].pack("V")
+
+      codes = conform_bytes(source).issues.map(&:code)
+
+      expect(codes).to include("emf.record_count_mismatch")
+      expect(codes).not_to include("emf.missing_eof")
+    end
+  end
+
+  # The structural pre-pass `conformance_report` runs before the delegate.
   describe "the structural pre-pass" do
     let(:structure) do
       Claricle.const_get(:Handlers).const_get(:EmfStructure)
     end
     let(:scan_limit) { 200 * 1024 * 1024 }
-    let(:eof20) { rec(14, 20) }
+    let(:eof20) { eof(20) }
 
     def issues_for(content, declared = 88)
       structure.issues(content, declared, scan_limit)
@@ -1260,7 +1450,51 @@ RSpec.describe "Claricle metafile handler" do
     it "treats 20 bytes as the EMR_EOF minimum, not its size" do
       expect(issues_for(stream_of(rec(14, 16))).map(&:code)).to eq(["emf.missing_eof"])
       expect(issues_for(stream_of(rec(14, 16), eof20))).to eq([])
-      expect(issues_for(stream_of(rec(14, 24)))).to eq([])
+      expect(issues_for(stream_of(eof(24)))).to eq([])
+    end
+
+    # SizeLast is the record's LAST DWORD, not a fixed offset. In a padded
+    # EMR_EOF the DWORD at +16 is padding, so reading there reports a
+    # mismatch on a valid record -- which the 24-byte row above catches.
+    it "reports an EMR_EOF whose SizeLast disagrees with its Size" do
+      bad = eof(24).dup
+      bad[20, 4] = [20].pack("V")
+      result = issues_for(stream_of(bad))
+
+      expect(result.map(&:code)).to eq(["emf.eof_size_mismatch"])
+      expect(result.first).to have_attributes(
+        severity: "error", message: "EMR_EOF declares size 24 but its SizeLast field says 20"
+      )
+      expect(result.first.location).to have_attributes(byte_offset: 108, byte_length: 4)
+    end
+
+    # The outer Size is intact, so it still says where the next record
+    # starts: the walk carries on and reports what follows.
+    it "reports a comment overrun and keeps walking" do
+      result = issues_for(stream_of([70, 16, 5, 0].pack("V4")))
+
+      expect(result.map(&:code)).to eq(["emf.comment_overrun", "emf.missing_eof"])
+      expect(result.first.location).to have_attributes(byte_offset: 88, byte_length: 16)
+    end
+
+    # 4 is the most a 16-byte comment can declare, so this pins the bound
+    # at `>` rather than `>=`.
+    it "accepts a comment whose data fills its record exactly" do
+      expect(issues_for(stream_of([70, 16, 4, 0].pack("V4"), eof20))).to eq([])
+    end
+
+    # An 8-byte comment has no DataSize field at all. It stands last so that
+    # nothing follows its header: anywhere else the next record's bytes would
+    # read as a DataSize, and fail the bound by accident.
+    it "reports a comment too short to hold its data size" do
+      expect(issues_for(stream_of(rec(70, 8))).map(&:code))
+        .to eq(["emf.comment_overrun", "emf.missing_eof"])
+    end
+
+    # The overrun check is for comments only. This record's DataSize-shaped
+    # DWORD overruns, and it is type 38, so nothing is wrong with it.
+    it "does not apply the comment rule to other record types" do
+      expect(issues_for(stream_of([38, 16, 5, 0].pack("V4"), eof20))).to eq([])
     end
 
     it "reports bytes after the EMR_EOF with the range they occupy" do
@@ -1320,7 +1554,7 @@ RSpec.describe "Claricle metafile handler" do
     # does pin is that a count-shaped bound is reachable at all, at a cost of
     # 8,948 bytes and a few milliseconds to build.
     it "walks 1,106 records, so no fixed budget below that survives" do
-      content = stream_of(rec(70, 8) * 1105, eof20)
+      content = stream_of(rec(33, 8) * 1105, eof20)
 
       expect(content.bytesize).to eq(8948)
       expect(issues_for(content)).to eq([])
@@ -1393,13 +1627,10 @@ RSpec.describe "Claricle metafile handler" do
     # for that pattern -- never walking the records at all -- reports this
     # stream as well-formed when it declares no EOF.
     #
-    # Built inline rather than with `rec`, which zero-fills and so cannot
-    # express `SizeLast`. MS-EMF 2.3.4.1 requires `SizeLast == Size`, and
-    # `rec(14, 20)` leaves it 0 -- an EOF that a stricter scanner would reject
-    # anyway, which would let that scanner pass this example for free.
+    # The EMR_EOF inside is valid, SizeLast included, so a scanner that also
+    # checks SizeLast cannot pass this example for free.
     it "does not read EOF-shaped bytes inside a record payload as an end of stream" do
-      valid_eof = [14, 20, 0, 16, 20].pack("V*")
-      content = stream_of([70, 28].pack("VV") + valid_eof)
+      content = stream_of([70, 28].pack("VV") + eof20)
 
       expect(content.bytesize).to eq(116)
       expect(issues_for(content).map(&:code)).to eq(["emf.missing_eof"])
@@ -1531,7 +1762,7 @@ RSpec.describe "Claricle metafile handler" do
     end
 
     it "reports trailing bytes as an offset into the source, not into the walk" do
-      content = extended_header(100) + rec(14, 20) + "\x00".b
+      content = extended_header(100) + eof20 + "\x00".b
 
       expect(content.bytesize).to eq(121)
       result = issues_for(content, 100)
