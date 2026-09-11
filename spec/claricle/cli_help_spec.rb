@@ -1,0 +1,455 @@
+# frozen_string_literal: true
+
+# Required here rather than globbed into spec_helper, because that is how the
+# rest of spec/support is loaded -- pdf_spec.rb reaches its two builders the
+# same way. A glob would also pull those builders into every spec run for no
+# reason.
+require_relative "../support/shell_helpers"
+
+# What `Cli#help` promises a caller's SHELL, kept apart from cli_spec.rb
+# because it is a different subject -- it shares no fixture or helper with the
+# exit-code, inspect, formats or presenter groups there -- and because
+# cli_spec.rb had grown past 1000 lines.
+#
+# Every example here is a caller shape that a BUFFERED help was measured
+# getting wrong. `Cli#help` deliberately does not buffer: it wraps Thor's own
+# help in one wide closed-output rescue, and the comment on that method
+# records the seven ways buffering failed and why it was abandoned. These pin
+# the shapes, so a future attempt at it fails loudly rather than regressing
+# them silently.
+RSpec.describe Claricle::Cli::Runner do
+  # A SIBLING group, so it sees exactly what every other file in the suite
+  # sees. `ShellHelpers` is included one group down and must not reach
+  # here: an earlier version of the support file ended with
+  # `RSpec.configure { config.include ShellHelpers }`, which put both
+  # helpers on every group in the suite -- but only when this file happened
+  # to be in the run, so `rspec spec/claricle/registry_spec.rb` alone and a
+  # full `rspec` disagreed about what a group could call.
+  #
+  # This asserts a property rather than watching a route: the helpers are
+  # not globally visible. Restoring that `RSpec.configure` block turns it
+  # red, which is the whole reason it is here rather than in a comment.
+  describe "helper reach" do
+    it "does not leak the help specs' helpers into a sibling group" do
+      expect(respond_to?(:shell_factory)).to be(false)
+      expect(respond_to?(:shell_writing_to)).to be(false)
+    end
+  end
+
+  describe "help's shell contract" do
+    include ShellHelpers
+
+    # `help`'s rescue deliberately covers generation as well as the write.
+    # Every other command narrows its own rescue to the write half -- see
+    # the `broken pipe to 4` examples in cli_spec.rb -- and these two pin
+    # that help is the exception, so narrowing it cannot happen by
+    # accident. The comment on `Cli#help` records the three rounds of
+    # measurement that settled it. `printable_commands` builds the general
+    # help page; `banner` builds one command's.
+    it "returns 0 when help generation hits a broken pipe" do
+      allow(Claricle::Cli).to receive(:printable_commands).and_raise(Errno::EPIPE)
+
+      expect(described_class.run(["help"], output: StringIO.new)).to eq(0)
+    end
+
+    it "returns 0 when command help generation hits a broken pipe" do
+      allow(Claricle::Cli).to receive(:banner).and_raise(Errno::EPIPE)
+
+      expect(described_class.run(%w[help version], output: StringIO.new)).to eq(0)
+    end
+
+    # The stored writer stays OPEN; it is the pipe's READER that is gone,
+    # so the first write raises EPIPE. Closing the writer itself would
+    # raise IOError instead and exit 4, which is a different contract and
+    # deliberately not what this pins.
+    it "returns 0 when a custom shell's stored output has lost its reader" do
+      reader, writer = IO.pipe
+      reader.close
+      custom_shell = Class.new(Thor::Shell::Basic) do
+        attr_reader :calls
+
+        def initialize(output)
+          super()
+          @output = output
+          @pending = []
+          @calls = []
+        end
+
+        def say(message = "", *)
+          @calls << :say
+          @pending << message
+        end
+
+        def print_table(*)
+          @calls << :print_table
+          @output.puts(*@pending)
+        end
+      end.new(writer)
+      allow(Thor::Base).to receive(:shell).and_return(shell_factory(custom_shell))
+
+      expect(described_class.run(["help"], output: StringIO.new)).to eq(0)
+      expect(custom_shell.calls).to eq(%i[say print_table])
+    ensure
+      writer&.close
+    end
+
+    # WHEN a write reached the shell, not merely that it did. Thor's general
+    # help calls `class_options_help` AFTER its three shell writes, so at
+    # that moment a live `help` has already delivered all three and a `help`
+    # that recorded them to replay later has delivered none.
+    #
+    # The two examples below need this and an output assertion cannot give
+    # it to them: a recorder replaying in order produces byte-identical
+    # output, so the finished page proves the calls happened and says
+    # nothing about what drove them. Measured -- a record-and-replay `help`
+    # passed both of these on their output alone.
+    #
+    # `prepend` on the singleton, not a stub: `class_options_help` is
+    # protected on `Thor::Base::ClassMethods`, and the hook has to survive
+    # being called with Thor's own arguments.
+    #
+    # The `ensure` is the load-bearing half. A prepended module cannot be
+    # un-prepended, so without it every hook stays in the dispatch chain
+    # for the rest of the process and its closure fires on every later
+    # `help` -- measured with a TracePoint on `class_options_help`: after
+    # two examples here had run, an example in `cli_spec.rb` invoked it
+    # SIX times, four of them through leaked hooks holding dead `sink` and
+    # `reached` objects. Nothing broke, because these hooks only append to
+    # arrays nobody reads any more. The first hook that closes over an IO
+    # or a frozen object would fail an unrelated example in another file
+    # with nothing pointing back to here.
+    #
+    # `remove_method` leaves the empty module in `ancestors` -- Ruby gives
+    # no way to remove it -- but takes its override out of the chain,
+    # which is the part that matters.
+    #
+    # It refuses a second invocation rather than returning the first and
+    # dropping the rest. Two `help` calls inside one block is a reasonable
+    # thing for a later example to try, and silently answering about the
+    # first one is how it would waste an afternoon.
+    def observing_generation(probe)
+      seen = []
+      hook = generation_hook(seen, probe)
+      Claricle::Cli.singleton_class.prepend(hook)
+      yield
+      raise "observing_generation saw #{seen.length} generations, expected 1" unless seen.one?
+
+      seen.first
+    ensure
+      hook&.send(:remove_method, :class_options_help)
+    end
+
+    def generation_hook(seen, probe)
+      Module.new do
+        define_method(:class_options_help) do |shell, groups = {}|
+          seen << probe.call
+          super(shell, groups)
+        end
+      end
+    end
+
+    # `observing_generation` prepends a module to `Claricle::Cli`'s singleton
+    # and a prepended module cannot be un-prepended, so without the
+    # `remove_method` in its `ensure` every hook stays in the dispatch chain
+    # for the rest of the PROCESS. Measured with a TracePoint: after two
+    # examples had used it, one help call in another file ran
+    # `class_options_help` six times, four of them through leaked closures
+    # holding dead objects.
+    #
+    # Both examples count invocations OUTSIDE any observation scope, so
+    # neither depends on which examples ran first. Removing the cleanup
+    # leaves every other example in this file green and turns these red.
+    describe "the generation hook's cleanup" do
+      def help_generations
+        count = 0
+        trace = TracePoint.new(:call) { |tp| count += 1 if tp.method_id == :class_options_help }
+        trace.enable { described_class.run(["help"], output: StringIO.new) }
+        count
+      end
+
+      it "leaves no hook behind after a completed observation" do
+        observing_generation(-> { :sampled }) do
+          described_class.run(["help"], output: StringIO.new)
+        end
+
+        expect(help_generations).to eq(1)
+      end
+
+      # The cleanup is an `ensure`, so a block that raises must not strand a
+      # hook either -- that is the case a happy-path-only check would miss.
+      it "leaves no hook behind when the observed block raises" do
+        expect do
+          observing_generation(-> { :sampled }) do
+            described_class.run(["help"], output: StringIO.new)
+            raise "boom"
+          end
+        end.to raise_error("boom")
+
+        expect(help_generations).to eq(1)
+      end
+    end
+
+    # Runner asks the settable `Thor::Base.shell` factory for each
+    # invocation's shell. Returning this exact instance exercises the real
+    # Runner path while proving its singleton output behaviour is preserved.
+    it "preserves a caller-supplied shell's singleton help behaviour" do
+      sink = StringIO.new
+      injected = Thor::Base.shell.new
+      injected.define_singleton_method(:say) do |message = "", *|
+        sink.puts("custom:#{message}")
+      end
+      injected.define_singleton_method(:print_table) do |rows, **|
+        sink.puts("custom-table:#{rows.length}")
+      end
+      allow(Thor::Base).to receive(:shell).and_return(shell_factory(injected))
+
+      mid_generation = observing_generation(-> { sink.string.dup }) do
+        expect do
+          expect(described_class.run(["help"], output: StringIO.new)).to eq(0)
+        end.to output("").to_stdout
+      end
+
+      # Deliberately NOT an equality check on the row count. The command
+      # inventory is pinned once, by "lists only the documented command" in
+      # cli_spec.rb; matching it here as well would make adding a command
+      # look like a regression in WHOSE SHELL got used, which is a
+      # different question and the only one this example asks.
+      expect(sink.string).to match(/\Acustom:Commands:\ncustom-table:\d+\ncustom:\n\z/)
+      # The singleton ran DURING generation, not in a replay afterwards.
+      expect(mid_generation).to start_with("custom:Commands:\n")
+    end
+
+    # Thor drives a shell that answers `say`, `print_table`,
+    # `print_wrapped` and `respond_to?` -- FOUR, not the three it calls.
+    # Measured: a `BasicObject` shell without `respond_to?` never reaches
+    # help at all, dying in Thor's own construction with
+    # `NoMethodError: respond_to?`, which is why this one defines it.
+    #
+    # What `BasicObject` still withholds is everything else Object
+    # supplies, `public_send` included, so any future indirection through
+    # `help` has to reach this shell the way Thor does rather than
+    # narrowing the shells this CLI accepts below Thor's own set.
+    it "writes onto a shell that does not inherit Object's methods" do
+      reached = []
+      bare = Class.new(BasicObject) do
+        define_method(:respond_to?) { |*| false }
+        define_method(:say) { |*, **, &_block| reached << :say }
+        define_method(:print_table) { |*, **, &_block| reached << :print_table }
+        define_method(:print_wrapped) { |*, **, &_block| reached << :print_wrapped }
+      end.new
+      allow(Thor::Base).to receive(:shell).and_return(shell_factory(bare))
+
+      mid_generation = observing_generation(-> { reached.dup }) do
+        expect(described_class.run(["help"], output: StringIO.new)).to eq(0)
+      end
+
+      expect(reached).to eq(%i[say print_table say])
+      # Thor drove THIS object while generating, rather than something
+      # else that copied its calls over afterwards.
+      expect(mid_generation).to eq(%i[say print_table say])
+    end
+
+    # Thor hands the shell to `Cli.help` and `Cli.command_help`, so a
+    # subclass overriding either one can call ANY shell method on it, not
+    # just the writing ones. `set_color` is a query: it has to return the
+    # real shell's real answer, in the middle of building the page.
+    it "forwards a non-writing shell method that a subclass asks for" do
+      sink = StringIO.new
+      subclass = Class.new(Claricle::Cli) do
+        def self.help(shell, *)
+          shell.say(shell.set_color("Coloured heading", :green))
+          super
+        end
+      end
+      coloured = []
+      shell = shell_writing_to(sink)
+      shell.define_singleton_method(:set_color) do |text, *colors|
+        next text unless colors.include?(:green)
+
+        coloured << text
+        "REAL(#{text})"
+      end
+
+      subclass.new([], {}, shell: shell).help
+
+      # The marker is what makes this a query rather than an echo. A
+      # proxy that returned `set_color`'s ARGUMENT without ever asking the
+      # real shell would still print "Coloured heading", so asserting that
+      # alone passes on a shell whose answer was thrown away.
+      expect(sink.string).to include("REAL(Coloured heading)")
+      expect(coloured).to eq(["Coloured heading"])
+      expect(sink.string).to include("Commands:")
+    end
+
+    # `help` is public, so a library caller can hold one Cli instance and
+    # call it twice and get the page twice. Anything `help` installs on the
+    # instance for the duration of a call has to come back off it.
+    it "restores the caller's shell so a second help still reaches it" do
+      sink = StringIO.new
+      shell = shell_writing_to(sink)
+      cli = Claricle::Cli.new([], {}, shell: shell)
+
+      cli.help("version")
+      first = sink.string.dup
+      cli.help("version")
+
+      # The CONTENT twice, not twice the byte count. A second call that
+      # wrote the same number of junk bytes satisfies a length check --
+      # measured, it stayed green -- so the length says nothing about
+      # whether the page was printed.
+      expect(first).to include("Display Claricle version")
+      expect(cli.shell).to be(shell)
+      expect(sink.string).to eq(first * 2)
+    end
+
+    # The examples from here down all pin ONE property: `help` writes
+    # through the caller's shell as it goes, so every state that shell is
+    # holding at the moment of a write still applies to it. Each is a shape
+    # that a buffered `help` was measured getting wrong, and together they
+    # are what a future attempt at buffering has to keep working. The
+    # comment on `Cli#help` records why that attempt was abandoned.
+    #
+    # Thor's `indent` raises the padding, yields, and lowers it again, so a
+    # write held past the block prints flush left.
+    it "writes at the padding in force when the write is made" do
+      sink = StringIO.new
+      subclass = Class.new(Claricle::Cli) do
+        def self.help(shell, *)
+          shell.indent(2) { shell.say("Indented heading") }
+          super
+        end
+      end
+      shell = shell_writing_to(sink)
+
+      subclass.new([], {}, shell: shell).help
+
+      expect(sink.string).to start_with("    Indented heading\n")
+      expect(sink.string).to include("\nCommands:\n")
+    end
+
+    # Thor assigns `@shell` during construction (thor's shell.rb, in
+    # `initialize`), so a frozen Cli is frozen WITH a shell in it and
+    # prints from one happily. Any scheme that swaps `self.shell` loses
+    # this caller entirely.
+    it "prints help on a frozen instance" do
+      sink = StringIO.new
+      shell = shell_writing_to(sink)
+      cli = Claricle::Cli.new([], {}, shell: shell).freeze
+
+      expect { cli.help("version") }.not_to raise_error
+      expect(sink.string).to include("Display Claricle version")
+    end
+
+    # A real pipe, not a stub: the errno has to come from the OS write,
+    # which is the only thing that proves the rescue actually covers it.
+    it "tolerates a closed pipe on a frozen instance" do
+      reader, writer = IO.pipe
+      reader.close
+      shell = Thor::Base.shell.new
+      shell.define_singleton_method(:stdout) { writer }
+
+      expect(Claricle::Cli.new([], {}, shell: shell).freeze.help("version").code).to eq(0)
+    ensure
+      writer&.close
+    end
+
+    # `mute` yields with writes suppressed and clears the flag afterwards,
+    # so a write held past the block prints exactly what the caller
+    # silenced.
+    it "does not print a write the caller muted" do
+      sink = StringIO.new
+      subclass = Class.new(Claricle::Cli) do
+        def self.help(shell, *)
+          shell.mute { shell.say("suppressed") }
+        end
+      end
+      shell = shell_writing_to(sink)
+
+      subclass.new([], {}, shell: shell).help
+
+      expect(sink.string).to eq("")
+    end
+
+    # A SECOND suppression switch, and it is not `mute?`. Thor's `say`
+    # also returns early when `base.options[:quiet]` is set, so a shell
+    # that is not muted can still be silent. The two are separate: a
+    # buffered `help` that consulted only `mute?` printed "suppressed"
+    # here while every mute example above stayed green.
+    #
+    # "visible" is written after quiet is cleared, so a run that printed
+    # nothing at all would fail too -- the assertion is which of the two
+    # lines survives, not that the page is empty.
+    it "does not print a write the caller silenced with the quiet option" do
+      sink = StringIO.new
+      subclass = Class.new(Claricle::Cli) do
+        def self.help(shell, *)
+          original = shell.base.options
+          shell.base.options = original.merge(quiet: true)
+          shell.say("suppressed")
+          shell.base.options = original
+          shell.say("visible")
+        end
+      end
+      shell = shell_writing_to(sink)
+
+      subclass.new([], {}, shell: shell).help
+
+      expect(sink.string).to eq("visible\n")
+    end
+
+    # Thor prints from a frozen shell happily. Reproducing shell state for
+    # a held write means assigning to it, which raises FrozenError here
+    # before any output reaches the sink.
+    it "prints through a shell frozen after construction" do
+      sink = StringIO.new
+      shell = shell_writing_to(sink)
+      cli = Claricle::Cli.new([], {}, shell: shell)
+      shell.freeze
+
+      expect { cli.help("version") }.not_to raise_error
+      expect(sink.string).to include("Display Claricle version")
+    end
+
+    # A shell may report its padding and refuse to have it set, driving
+    # its own `indent` internally. Thor prints such a shell indented; a
+    # held write has no way to put that padding back, so it flattens.
+    it "keeps indentation on a shell whose padding cannot be set" do
+      sink = StringIO.new
+      read_only = Class.new(Thor::Shell::Basic) do
+        undef_method :padding=
+
+        def indent(count = 1)
+          original = @padding
+          @padding = original + count
+          yield
+        ensure
+          @padding = original
+        end
+      end.new
+      read_only.define_singleton_method(:stdout) { sink }
+      subclass = Class.new(Claricle::Cli) do
+        def self.help(shell, *)
+          shell.indent(2) { shell.say("indented") }
+        end
+      end
+
+      subclass.new([], {}, shell: read_only).help
+
+      expect(sink.string).to eq("    indented\n")
+    end
+
+    it "writes help through a print/puts/flush-only stream" do
+      contents = +""
+      sink = Object.new
+      sink.define_singleton_method(:print) { |text| contents << text }
+      sink.define_singleton_method(:puts) { |text = ""| contents << text << "\n" }
+      sink.define_singleton_method(:flush) { nil }
+      injected = shell_writing_to(sink)
+      allow(Thor::Base).to receive(:shell).and_return(shell_factory(injected))
+
+      expect(sink).not_to respond_to(:write)
+      expect(described_class.run(["help"], output: StringIO.new)).to eq(0)
+      expect(contents).to match(/\ACommands:\n(?:\s+\S+ .+\n)+\n\z/)
+    end
+  end
+end
