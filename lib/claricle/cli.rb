@@ -101,6 +101,29 @@ module Claricle
       Runner::Status.new(result.exit_code)
     end
 
+    desc "convert SOURCE...", "Convert files to another format"
+    option :pattern, type: :string,
+                     desc: "Read this as a glob, whatever the filename looks like"
+    option :to, type: :string, desc: "Target format"
+    option :output, type: :string, desc: "Destination file, or - for stdout"
+    option :json, type: :boolean, default: false, desc: "Emit JSON"
+    option :force, type: :boolean, default: false, desc: "Overwrite an existing destination"
+    def convert(*files)
+      stdout_mode = options[:output] == Writer::STDOUT_DESTINATION
+      raise InvocationError, "--json is not supported with --output -" if stdout_mode && options[:json]
+
+      result = Claricle.convert_batch(*files, pattern: options[:pattern], to: options[:to],
+                                              output: options[:output], force: options[:force])
+      # Bytes for `--output -` are already on stdout by the time this runs --
+      # `Writer#write` streams them as a side effect inside `Batch.run`'s
+      # per-file operation, above. `write_convert` only ever adds stderr
+      # after that (or a `--json` array on stdout, which `stdout_mode`
+      # already refused above), so the byte stream stays pipe-safe either
+      # way.
+      tolerate_closed_output { write_convert(result) }
+      Runner::Status.new(result.exit_code)
+    end
+
     # Rendering, kept together so the commands only choose a payload and
     # write it. Nothing here touches `options` or writes output.
     module Presenter
@@ -416,6 +439,23 @@ module Claricle
 
       verdicts = Presenter.conformance(result.items)
       puts verdicts unless verdicts.empty?
+      Presenter.conformance_failures(result.items).each { |line| warn line }
+    end
+
+    # No handler completes a conversion yet (same state `conform` is in),
+    # so there is never a successful item to render a human summary line
+    # for in this milestone -- only the failure branch is reachable end to
+    # end. Item 04 adds the per-conversion lossiness classification the
+    # success line needs (04-convert.md's design: "source, target format,
+    # written path, and the lossiness classification"); until then there is
+    # nothing honest to print for a success, so this reports failures only,
+    # the same shape `write_conformance` uses for its own failure half.
+    # `--json` is unreachable together with stdout mode -- `convert` above
+    # already refuses that combination before this ever runs -- so reading
+    # `options[:json]` here is safe in both modes.
+    def write_convert(result)
+      return puts(Models::BatchItem.to_json(result.items)) if options[:json]
+
       Presenter.conformance_failures(result.items).each { |line| warn line }
     end
   end

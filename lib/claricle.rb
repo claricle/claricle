@@ -10,6 +10,7 @@ require_relative "claricle/models/inspection"
 require_relative "claricle/models/batch_item"
 require_relative "claricle/fault"
 require_relative "claricle/batch"
+require_relative "claricle/writer"
 require_relative "claricle/registry"
 require_relative "claricle/detector"
 require_relative "claricle/image"
@@ -128,5 +129,110 @@ module Claricle
     raise InvocationError, "no format defines a profile yet: #{profile.inspect}"
   end
 
-  private_class_method :accumulate, :conclusive?, :conformant?, :checked_profile
+  # A batch predicate loses information, so a caller can have the whole
+  # result instead: ordered per-file outcomes plus the aggregate status.
+  # Same argument shape as `conformance_batch` (paths, pattern:), plus
+  # `to:`/`output:`/`force:` for the target and the write lifecycle, so
+  # the CLI command and the Ruby API cannot drift about what "which files"
+  # or "where to" mean.
+  #
+  # 04-convert.md's own item 3 scope: the command + batch + boundary specs.
+  # There is no single-file `Claricle.convert` convenience wrapper yet --
+  # that line sits in the design's item-2 prose, not item 3's "## Do" list,
+  # and building it now would be undocumented scope creep. It is deferred
+  # to item 4, alongside `Models::Conversion`, which is what would give it
+  # something real to return.
+  #
+  # The whole destination set is preflighted -- collision, overwrite,
+  # case-fold aliasing -- BEFORE any file is converted, per 04-convert.md's
+  # whole-batch-atomic rule. That is why this resolves the expanded file
+  # list and every destination up front, rather than letting `Batch.run`
+  # derive them one file at a time the way `conformance_batch` does.
+  def self.convert_batch(*paths, to: nil, output: nil, force: false, pattern: nil)
+    files = Batch.expand(paths, pattern)
+    if output && files.length > 1
+      raise InvocationError, "--output takes a single source; #{files.length} files matched"
+    end
+
+    target = resolved_convert_target(to: to, output: output)
+    destinations = files.to_h { |file| [file, convert_destination(file, target: target, output: output)] }
+    writer = Writer.new(destinations.values, sources: files, force: force)
+
+    # `classify` always answers 0: the block below either returns normally
+    # -- always `nil`, since `Models::BatchItem#result` is still typed to
+    # `Report` and item 04 is what widens it for a real conversion result
+    # -- or raises, which `Batch.run`'s own rescue already turns into a
+    # failed item with its own exit code. There is no success/failure
+    # distinction left for `classify` to make.
+    Batch.run(files, classify: ->(_result) { 0 }) do |file|
+      convert_one(file, target: target, destination: destinations.fetch(file), writer: writer)
+    end
+  end
+
+  def self.convert_one(file, target:, destination:, writer:)
+    image = Image.from_path(file)
+    if image.format == target
+      raise InvocationError, "#{file} is already #{target}; nothing to convert to"
+    end
+
+    # No handler implements `convert` yet (item 04), so this always raises
+    # `UnsupportedFormat` today -- exit 3, the same state `conform` is in.
+    bytes = image.convert(to: target)
+    writer.write(bytes, to: destination)
+    nil
+  end
+
+  # `--to` wins outright when given, once it does not conflict with a
+  # recognised `--output` extension. `--output` alone must name a
+  # recognised extension to infer from; `--output -` alone cannot, since
+  # stdout has no extension.
+  def self.resolved_convert_target(to:, output:)
+    if to
+      check_to_output_conflict(to, output)
+      return to.to_sym
+    end
+    if output == Writer::STDOUT_DESTINATION
+      raise InvocationError, "--output - needs --to; there is no extension to infer from"
+    end
+    raise InvocationError, "give --to, or an --output with a recognised format extension" if output.nil?
+
+    convert_extension_format(output) ||
+      raise(InvocationError, "--output #{output.inspect} has no recognised format extension; give --to")
+  end
+
+  # A conflict, not a preference: 04-convert.md is explicit that one
+  # silently winning is wrong. `output:` naming stdout or an
+  # unrecognised extension carries no claim about the target, so there is
+  # nothing for `--to` to conflict with in either case.
+  def self.check_to_output_conflict(to, output)
+    return if output.nil? || output == Writer::STDOUT_DESTINATION
+
+    inferred = convert_extension_format(output)
+    return if inferred.nil? || inferred == to.to_sym
+
+    raise InvocationError, "--to #{to} conflicts with --output #{output} (looks like #{inferred})"
+  end
+
+  # The canonical extension for a target is the format symbol itself --
+  # there is no central extension table, only `Registry.formats`.
+  def self.convert_extension_format(name)
+    ext = File.extname(name.to_s).delete_prefix(".").downcase
+    return nil if ext.empty?
+
+    format = ext.to_sym
+    Registry.formats.include?(format) ? format : nil
+  end
+
+  # The issue's own example: `convert("diagram.emf", to: :svg)` writes
+  # `diagram.svg` -- the source's own name, the target's extension,
+  # alongside the source.
+  def self.convert_destination(file, target:, output:)
+    return output if output
+
+    File.join(File.dirname(file), "#{File.basename(file, ".*")}.#{target}")
+  end
+
+  private_class_method :accumulate, :conclusive?, :conformant?, :checked_profile,
+                        :convert_one, :resolved_convert_target, :check_to_output_conflict,
+                        :convert_extension_format, :convert_destination
 end

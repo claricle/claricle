@@ -295,7 +295,7 @@ RSpec.describe Claricle::Cli::Runner do
     # inherited command cannot slip into the public inventory.
     it "exposes exactly the intended commands" do
       expect(Claricle::Cli.all_commands.keys)
-        .to contain_exactly("conform", "formats", "help", "inspect", "version")
+        .to contain_exactly("conform", "convert", "formats", "help", "inspect", "version")
     end
   end
 

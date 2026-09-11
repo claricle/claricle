@@ -82,7 +82,11 @@ The name reflects what the library is for:
   than a list, so it cannot claim an operation that is not there.
   The `conform` command and `Claricle.conform?` do exist -- they take
   files, expand globs and report per file -- but every format currently
-  answers exit 3, so the command is plumbing waiting on its handlers
+  answers exit 3, so the command is plumbing waiting on its handlers.
+  So does `claricle convert` and `Claricle.convert_batch`: batching,
+  `--force`, `--output`, `--to` inference and the exit-2 boundary checks
+  are all real, but every format still answers exit 3 until a handler
+  implements the edge
 * `--profile` for `conform`. PDF and SVG will name stricter standards
   through it, but no handler defines one yet, so supplying `profile:`
   is refused rather than accepted and ignored
@@ -101,6 +105,7 @@ The name reflects what the library is for:
 
 | `claricle inspect FILE` | Report a file's format and metadata
 | `claricle conform FILE...` | Check files against their format's conformance rules
+| `claricle convert SOURCE...` | Convert files to another format
 | `claricle formats` | List the formats Claricle handles, and what it can do with each
 | `claricle version` | Print the version
 |===
@@ -155,6 +160,23 @@ the command exits with the highest code any of them reached. Matching
 no files at all is a bad invocation, not a silent pass. `--json` always
 emits an array, a single file included, so a consumer never gets one
 shape for one file and another for many.
+
+`claricle convert` takes the same positional/`--pattern` shape as
+`conform`. `--to FORMAT` names the target; when it is omitted,
+`--output FILE` must name a recognised format extension to infer it
+from -- `--output -` (stdout) cannot, since stdout has no extension, so
+that combination requires `--to`. `--to` and `--output`'s extension
+disagreeing is a bad invocation, not a silent preference for one over
+the other. `--output` names a single destination, so it is refused
+whenever more than one source resolves; a multi-source run derives each
+destination from its own source name and the target's extension
+instead. The whole destination set -- derived or given -- is
+preflighted for collisions and overwrites before anything is converted,
+and an existing destination needs `--force` to be replaced. `--output
+-` writes only the converted bytes to stdout, with no trailing newline;
+everything else -- the summary, warnings, error text -- goes to stderr.
+No handler implements convert yet, so every real invocation still
+answers exit 3.
 
 == Usage
 
