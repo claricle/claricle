@@ -55,6 +55,14 @@ RSpec.describe "Claricle metafile handler" do
     [70, 12 + data.bytesize, data.bytesize].pack("VVV") + data
   end
 
+  # A zero-filled record declaring `type` and `size`. Not a generalisation of
+  # `carrier`, which packs a three-field comment header plus an `EMF+` body.
+  # `size` must be >= 8 -- the padding below is negative otherwise -- which is
+  # why the below-minimum framing examples pack their bytes directly instead.
+  def rec(type, size)
+    [type, size].pack("VV") + ("\x00".b * (size - 8))
+  end
+
   describe "dimensions" do
     it "reads the picture bounds" do
       expect(inspect_emf("valid")).to have_attributes(width: 100.0, height: 50.0)
@@ -1194,5 +1202,354 @@ RSpec.describe "Claricle metafile handler" do
 
     expect($CHILD_STATUS).to be_success, "handler could not load alone: #{output}"
     expect(output).to eq("100.0")
+  end
+
+  # The structural pre-pass. Built and spec'd here; it is deliberately NOT
+  # wired to `conformance_report`, because `Base.capabilities` is derived from
+  # which methods a handler overrides, so overriding it would add `conform` to
+  # `claricle formats` and change output this PR must leave byte-identical.
+  describe "the structural pre-pass" do
+    let(:structure) do
+      Claricle.const_get(:Handlers).const_get(:EmfStructure)
+    end
+    let(:scan_limit) { 200 * 1024 * 1024 }
+    let(:eof20) { rec(14, 20) }
+
+    def issues_for(content, declared = 88)
+      structure.issues(content, declared, scan_limit)
+    end
+
+    # The baseline header with `nSize` rewritten, plus the filler that carries
+    # the stream out to that declaration. Records then begin at `declared`,
+    # not at 88, which is what makes the offsets below discriminate. `declared`
+    # must be >= 88 -- the padding below is negative otherwise -- which every
+    # call site already respects.
+    def extended_header(declared)
+      header = File.binread(fixture("valid")).byteslice(0, 88).dup
+      header[4, 4] = [declared].pack("V")
+      header + ("\x00".b * (declared - 88))
+    end
+
+    it "reports nothing for a stream that ends at an EMR_EOF with nothing after it" do
+      expect(issues_for(File.binread(fixture("valid")))).to eq([])
+    end
+
+    # Both shapes are the same property: the stream runs out before an
+    # EMR_EOF. The header-only case is here because a `return [] if
+    # content.bytesize == declared` shortcut passes every other example in
+    # this block while calling a file with no records at all well-formed.
+    [["records but no EMR_EOF", [[70, 16], [1, 12]]],
+     ["a header and nothing else", []]].each do |label, records|
+      it "reports a missing EMR_EOF for #{label}" do
+        result = issues_for(stream_of(*records.map { |type, size| rec(type, size) }))
+
+        expect(result.map(&:code)).to eq(["emf.missing_eof"])
+        expect(result.first).to be_a(Claricle::Models::Issue)
+        expect(result.first).to have_attributes(
+          severity: "error",
+          message: "EMF record stream ends without an EMR_EOF record",
+          location: nil
+        )
+      end
+    end
+
+    # 20 bytes is EMR_EOF's MINIMUM, not its size. Proven from both sides:
+    # a shorter type-14 record does not close the stream, a longer one does.
+    # Weakened to `size == EOF_RECORD_BYTES` the 24-byte case walks past a
+    # real end of stream and reports a missing EOF.
+    it "treats 20 bytes as the EMR_EOF minimum, not its size" do
+      expect(issues_for(stream_of(rec(14, 16))).map(&:code)).to eq(["emf.missing_eof"])
+      expect(issues_for(stream_of(rec(14, 16), eof20))).to eq([])
+      expect(issues_for(stream_of(rec(14, 24)))).to eq([])
+    end
+
+    it "reports bytes after the EMR_EOF with the range they occupy" do
+      result = issues_for(File.binread(fixture("after_eof")))
+
+      expect(result.map(&:code)).to eq(["emf.trailing_bytes"])
+      expect(result.first).to be_a(Claricle::Models::Issue)
+      expect(result.first).to have_attributes(
+        severity: "error",
+        message: "28 bytes follow the EMR_EOF record"
+      )
+      expect(result.first.location).to have_attributes(byte_offset: 364, byte_length: 28)
+    end
+
+    # The smallest overrun there is, and the one that reads wrong: a bare
+    # "#{count} bytes follow" renders "1 bytes follow" here.
+    it "reports a one-byte overrun, and says so in the singular" do
+      result = issues_for(stream_of(eof20) + "\x00".b)
+
+      expect(result.map(&:code)).to eq(["emf.trailing_bytes"])
+      expect(result.first.message).to eq("1 byte follows the EMR_EOF record")
+      expect(result.first.location).to have_attributes(byte_offset: 108, byte_length: 1)
+    end
+
+    # No other stream anywhere in this block holds two EMR_EOF records, so a
+    # walk that stops at the LAST one rather than the first passes every one
+    # of them. Here the trailing run IS a second EMR_EOF: such a walk reads it
+    # as the ending and calls 20 bytes of spurious record a clean stream,
+    # reporting nothing at all.
+    it "stops at the first EMR_EOF, not the last" do
+      content = stream_of(eof20, eof20)
+
+      expect(content.bytesize).to eq(128)
+      result = issues_for(content)
+
+      expect(result.map(&:code)).to eq(["emf.trailing_bytes"])
+      expect(result.first.location)
+        .to have_attributes(byte_offset: 108, byte_length: 20)
+    end
+
+    # The walk is bounded by BYTES, and without this row nothing would notice
+    # if it were bounded by a record count instead. Measured 2026-09-02 by
+    # framing every `spec/fixtures/**/*.emf` with `EmfRecords.record_at`: the
+    # longest of the 36 frames 18 records, and every OTHER stream built inline
+    # in this block is shorter still. Measured the same day by running the
+    # whole file against a walk carrying a flat 18-record budget: 121
+    # examples, and the only one that failed was this row.
+    #
+    # `EmfPlus.walk`, the sibling in this same file, shipped exactly that
+    # defect and had to lose it. Its flat 500,000-record budget refused
+    # ordinary files, because EMR_SETMETARGN is a valid parameterless 8-byte
+    # record and half a million of them is a legal 4 MiB EMF.
+    #
+    # Be clear what one row buys: it kills every fixed budget at or below
+    # 1,105 and no more than that, since the EMR_EOF here is the 1,106th
+    # record. One example cannot kill an arbitrarily large budget. What it
+    # does pin is that a count-shaped bound is reachable at all, at a cost of
+    # 8,948 bytes and a few milliseconds to build.
+    it "walks 1,106 records, so no fixed budget below that survives" do
+      content = stream_of(rec(70, 8) * 1105, eof20)
+
+      expect(content.bytesize).to eq(8948)
+      expect(issues_for(content)).to eq([])
+    end
+
+    # Arm-independence. `record_at` refuses for four different reasons and
+    # returns a bare nil carrying none of them, so every arm must report the
+    # same code at the byte where the walk stopped. 88 is `declared` AND the
+    # walk's start, so the 416 and 116 rows are what stop an implementation
+    # reporting `declared` instead of the real break offset.
+    [["fewer than 8 bytes left", "truncated_117", 116],
+     ["a size below the 8-byte minimum", "broken_suffix", 416],
+     ["a misaligned size", "misaligned_record", 88],
+     ["a size overrunning the stream", "truncated_99", 88]].each do |label, name, offset|
+      it "reports broken framing at byte #{offset} for #{label}" do
+        result = issues_for(File.binread(fixture(name)))
+
+        expect(result.map(&:code)).to eq(["emf.record_framing"])
+        expect(result.first).to be_a(Claricle::Models::Issue)
+        expect(result.first).to have_attributes(
+          severity: "error",
+          message: "EMF record framing breaks at byte #{offset}"
+        )
+        expect(result.first.location).to have_attributes(
+          byte_offset: offset, byte_length: nil, line: nil, column: nil
+        )
+      end
+    end
+
+    # None of the four fixture rows above declares a size in 1..7:
+    # `truncated_117` has no complete size field at all, `broken_suffix`
+    # declares 0, `misaligned_record` declares a misaligned size, and
+    # `truncated_99` must pass both the minimum and the alignment check to
+    # reach the overrun arm. Zero is caught by any forward-progress guard, so
+    # this row -- declaring 4, below the eight-byte minimum but above zero --
+    # is what pins the minimum itself, and with it the "every step advances at
+    # least eight bytes" claim the walk rests on. Lowered to 4, the walk steps
+    # to 92 and reports the break at the wrong offset.
+    it "reports a framing break for a size below the minimum but above zero" do
+      result = issues_for(stream_of([70, 4].pack("VV")))
+
+      expect(result.map(&:code)).to eq(["emf.record_framing"])
+      expect(result.first.location.byte_offset).to eq(88)
+    end
+
+    # Every framing fixture happens to have no valid EMR_EOF behind the break,
+    # so none of them can tell "stops at the break" from "reports a break it
+    # noticed while carrying on". A walk that resynchronises -- skip four
+    # bytes and keep going -- walks past this break, finds the EOF behind it
+    # and calls a structurally broken stream well-formed.
+    #
+    # The blob occupies SIXTEEN bytes while declaring 13, so the EOF starts at
+    # 112. That is deliberate: at 13 physical bytes it would start at 109, and
+    # a resync stepping 4 at a time (100, 104, 108, 112) never lands on 109 --
+    # the example would then pass by an accident of alignment rather than
+    # because the walk stops.
+    it "stops at the first framing break rather than resynchronising past it" do
+      misaligned = [70, 13].pack("VV") + ("\x00".b * 8)
+      content = stream_of(rec(33, 8), misaligned, eof20)
+
+      result = issues_for(content)
+
+      expect(result.map(&:code)).to eq(["emf.record_framing"])
+      expect(result.first.location.byte_offset).to eq(96)
+    end
+
+    # The walk must FRAME records, not hunt for something EOF-shaped. Here a
+    # single comment record's payload contains a valid 20-byte EMR_EOF ending
+    # precisely at `bytesize`. An implementation scanning 4-aligned offsets
+    # for that pattern -- never walking the records at all -- reports this
+    # stream as well-formed when it declares no EOF.
+    #
+    # Built inline rather than with `rec`, which zero-fills and so cannot
+    # express `SizeLast`. MS-EMF 2.3.4.1 requires `SizeLast == Size`, and
+    # `rec(14, 20)` leaves it 0 -- an EOF that a stricter scanner would reject
+    # anyway, which would let that scanner pass this example for free.
+    it "does not read EOF-shaped bytes inside a record payload as an end of stream" do
+      valid_eof = [14, 20, 0, 16, 20].pack("V*")
+      content = stream_of([70, 28].pack("VV") + valid_eof)
+
+      expect(content.bytesize).to eq(116)
+      expect(issues_for(content).map(&:code)).to eq(["emf.missing_eof"])
+    end
+
+    # Over the limit NOTHING is read, which is a different claim from the
+    # answer being nil. The property is pinned by RESTRICTING the interface
+    # rather than by watching one route out of it. Watching `byteslice` was
+    # both too weak and too strong -- an implementation reading everything
+    # through `unpack` or `index` passed it, and a correct one peeking a fixed
+    # four bytes failed it.
+    #
+    # `BasicObject`, not `Object`: an `Object` stub still answers `to_s`, and
+    # `content.to_s.each_byte` traverses every byte of a real String while
+    # this example stays green. Measured at 5 MiB.
+    #
+    # `method_missing` alone is not enough either -- it never fires for a
+    # method that EXISTS, and `BasicObject` still ships eight, including `==`,
+    # which `String#==` answers by comparing real bytes. So the surface is
+    # undefined from `BasicObject.instance_methods` rather than from a guess
+    # at which routes exist; `__id__` and `__send__` stay because Ruby needs
+    # them and neither reads content.
+    #
+    # `NotImplementedError` rather than `NoMethodError`, because it descends
+    # from ScriptError and so sits OUTSIDE StandardError. A read wrapped in
+    # `rescue StandardError` would otherwise swallow the proof and answer nil
+    # for the wrong reason -- measured, an implementation walking every byte
+    # through `each_byte` behind such a rescue passed all 121 examples.
+    #
+    # One escape is structural and is deliberately NOT chased. `::String ===
+    # content` is `Module#===`: it dispatches nothing on the receiver, so a
+    # type check never reaches this object at all -- measured, it answers
+    # `false` against this stub with its whole inherited surface undefined,
+    # and never raises. No amount of further undefining reaches it. That is
+    # the residual of proving a negative with a stub, and naming it is worth
+    # more than another undef that would not close it.
+    it "reads nothing at all when the content is over the byte limit" do
+      unreadable = Class.new(BasicObject) do
+        (BasicObject.instance_methods - %i[__id__ __send__]).each { |m| undef_method(m) }
+
+        def initialize(size)
+          @size = size
+        end
+
+        def bytesize = @size
+
+        def method_missing(name, *)
+          Kernel.raise(NotImplementedError, "read attempted via ##{name}")
+        end
+
+        def respond_to_missing?(*) = false
+      end.new(10_000)
+
+      expect(structure.issues(unreadable, 88, 9_999)).to be_nil
+    end
+
+    # The limit binds on a real String too. The stub above was the only
+    # over-limit call in this block and it is deliberately not a String, so a
+    # guard that skips the check for real Strings passed every example while
+    # walking a genuine stream far past its own limit. Measured: with that
+    # guard, `issues(valid.emf, 88, 10)` walked all 364 bytes and answered
+    # `[]` -- 36 times over the limit it was given.
+    it "refuses a real String over the byte limit" do
+      content = File.binread(fixture("valid"))
+
+      expect(content.bytesize).to eq(364)
+      expect(structure.issues(content, 88, 10)).to be_nil
+    end
+
+    # Both sides of the guard at the boundary. The well-formed row kills
+    # `>` -> `>=`; the malformed row kills `return [] if bytesize == limit`,
+    # which otherwise waves through every broken stream that lands exactly on
+    # the limit without examining it.
+    it "examines a well-formed stream exactly on the limit" do
+      content = File.binread(fixture("valid"))
+
+      expect(structure.issues(content, 88, content.bytesize)).to eq([])
+    end
+
+    it "examines a malformed stream exactly on the limit" do
+      content = stream_of([70, 13].pack("VV") + ("\x00".b * 5))
+
+      expect(content.bytesize).to eq(101)
+      expect(structure.issues(content, 88, content.bytesize).map(&:code))
+        .to eq(["emf.record_framing"])
+    end
+
+    # `described_emf_plus.emf` declares 92, and the ARGUMENT is what carries
+    # the property. The SECOND arm is what pins it: with only the clean one,
+    # an implementation ignoring the parameter and reading
+    # `content.byteslice(4, 4).unpack1("V")` for itself reaches the same
+    # offset and passes.
+    #
+    # The fixture is chosen, not incidental. Every other stream here that
+    # declares more than 88 pads bytes 88...declared with NUL -- nobody chose
+    # that, it is just how they were built -- so on those the second arm holds
+    # off a hardcoded-88 walk only because such a walk would have to skip NUL
+    # to reach the records. This fixture's 88...92 is `[68, 0, 0, 0]`: real
+    # description bytes, which a hardcoded-88 walk reads as a record and
+    # breaks on. The arm therefore rests on the bytes themselves rather than
+    # on a property the whole corpus happens to share.
+    #
+    # It does not pin that a walk which recovers to a 4-aligned offset is
+    # refused. The resynchronising case is pinned separately above.
+    it "starts the walk at the declared argument, not the stream's own nSize" do
+      content = File.binread(fixture("described_emf_plus"))
+
+      expect(issues_for(content, 92)).to eq([])
+
+      result = issues_for(content, 88)
+
+      expect(result.map(&:code)).to eq(["emf.record_framing"])
+      expect(result.first.location.byte_offset).to eq(88)
+    end
+
+    # Every other location assertion in this block uses `declared == 88`, so
+    # `at - declared + 88` -- a walk reporting offsets relative to where it
+    # started rather than into the source -- passes all of them. `Location`
+    # documents byte_offset as an offset into the SOURCE
+    # (`models/location.rb`), so both arms are pinned on a stream that
+    # declares 100.
+    it "reports a framing break as an offset into the source, not into the walk" do
+      content = extended_header(100) + [70, 13].pack("VV") + ("\x00".b * 5)
+
+      result = issues_for(content, 100)
+
+      expect(result.map(&:code)).to eq(["emf.record_framing"])
+      expect(result.first.location.byte_offset).to eq(100)
+    end
+
+    it "reports trailing bytes as an offset into the source, not into the walk" do
+      content = extended_header(100) + rec(14, 20) + "\x00".b
+
+      expect(content.bytesize).to eq(121)
+      result = issues_for(content, 100)
+
+      expect(result.map(&:code)).to eq(["emf.trailing_bytes"])
+      expect(result.first.location)
+        .to have_attributes(byte_offset: 120, byte_length: 1)
+    end
+
+    # The third arm on an extended header. The two rows above walk a stream
+    # declaring 100 and report a break and a trailing run; this one reports a
+    # missing EMR_EOF in the same shape, so all three codes are pinned off a
+    # non-88 declaration rather than only the two that carry an offset.
+    it "examines an extended-header stream rather than waving it through" do
+      content = extended_header(100) + rec(70, 16)
+
+      expect(content.bytesize).to eq(116)
+      expect(issues_for(content, 100).map(&:code)).to eq(["emf.missing_eof"])
+    end
   end
 end
