@@ -126,6 +126,53 @@ RSpec.describe "Claricle SVG handler" do
       end
     end
 
+    # SVG 1.1 5.1.2: "A negative value is an error ... A value of zero
+    # disables rendering of the element." The spec draws the line at the
+    # sign, not at zero -- a negative width/height is unusable the same
+    # way an unparseable or relative one is, and zero is a real,
+    # degenerate measurement, not an error.
+    it "leaves a negative width nil" do
+      expect(inspect_svg(svg(%(width="-10")))).to have_attributes(width: nil)
+    end
+
+    it "leaves a negative height nil" do
+      expect(inspect_svg(svg(%(height="-10")))).to have_attributes(height: nil)
+    end
+
+    # Every other negative example here has magnitude >= 2, so on its own
+    # this table cannot tell "any negative value is unusable" apart from
+    # "a value negative enough is unusable" -- a magnitude-threshold guard
+    # would pass all of them. This one sits a hair below zero and rules
+    # that out.
+    it "leaves a barely negative width nil" do
+      expect(inspect_svg(svg(%(width="-0.0001")))).to have_attributes(width: nil)
+    end
+
+    # Every ABSOLUTE_UNITS factor is a positive constant (svg.rb:43-51), so
+    # unit conversion cannot flip a value's sign -- checking before or after
+    # conversion is mathematically indistinguishable through this handler,
+    # and no example can prove the guard runs on one side rather than the
+    # other. This one only pins that a negative value survives conversion
+    # and is still rejected, which conversion alone does not guarantee (a
+    # bug that dropped the guard after introducing `scale` would pass the
+    # bare-number examples above and fail only here).
+    it "leaves a negative width nil after unit conversion" do
+      expect(inspect_svg(svg(%(width="-10cm")))).to have_attributes(width: nil)
+    end
+
+    it "keeps a plain zero as a real measurement" do
+      expect(inspect_svg(svg(%(width="0")))).to have_attributes(width: 0.0)
+    end
+
+    # -0.0 == 0.0 in IEEE 754, so a declared "-0" does not trip the
+    # negative guard above -- it stays a real measurement, not nil. The
+    # matcher below only proves that (eq treats -0.0 and 0.0 as equal);
+    # it does not assert which of the two signs comes back, because the
+    # contract never promised one.
+    it "keeps a declared negative zero as a real measurement, not nil" do
+      expect(inspect_svg(svg(%(width="-0")))).to have_attributes(width: 0.0)
+    end
+
     it "keeps the declaration in meta whatever the unit" do
       inspection = inspect_svg(svg(%(width="100%" height="10mm")))
 
@@ -664,8 +711,11 @@ RSpec.describe "Claricle SVG handler" do
   describe "SVG's number grammar" do
     # Ruby's Float is broader: Float("1.") is 1.0 and Float("1.e2") is
     # 100.0, but SVG requires a digit after the decimal point.
+    # "-2" reads as a negative NUMBER -- the grammar accepts the sign --
+    # but a negative width/height is an error (see "dimensions" above),
+    # so the dimension it becomes is nil, not -2.0.
     { "1." => nil, "1.e2" => nil, ".5" => 0.5, "1.5" => 1.5,
-      "+2" => 2.0, "-2" => -2.0, "1e2" => 100.0 }.each do |declared, expected|
+      "+2" => 2.0, "-2" => nil, "1e2" => 100.0 }.each do |declared, expected|
       it "reads #{declared.inspect} as #{expected.inspect}" do
         expect(inspect_svg(svg(%(width="#{declared}"))).width).to eq(expected)
       end
