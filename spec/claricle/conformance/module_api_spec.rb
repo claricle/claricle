@@ -129,28 +129,76 @@ RSpec.describe "Claricle conformance API" do
     end
   end
 
-  # No handler implements conformance_report, so no format defines a profile
-  # yet -- and a profile a format does not define is a bad invocation. The
-  # flag is not silently accepted and then ignored.
+  # A profile is refused on TWO different grounds, and they are separate
+  # answers a caller fixes by different means: a name no format defines at
+  # all is a typo, and a name some format defines but this file's format
+  # does not is the wrong pairing. The flag is never accepted and ignored.
   describe "profile:" do
-    it "refuses a profile on conformance_report, naming it" do
-      expect { Claricle.conformance_report(png, profile: "base") }
-        .to raise_error(Claricle::InvocationError, /"base"/)
+    let(:svg) { File.join(__dir__, "..", "..", "fixtures", "conform", "valid.svg") }
+
+    it "refuses a name no format defines, naming it" do
+      expect { Claricle.conformance_report(svg, profile: "no-such-profile") }
+        .to raise_error(Claricle::InvocationError, /no format defines a profile named "no-such-profile"/)
     end
 
-    it "refuses a profile on conform?" do
-      workspace(["a.png", png]) do
-        expect { Claricle.conform?("a.png", profile: "base") }
-          .to raise_error(Claricle::InvocationError, /"base"/)
+    # PNG has a conform handler on a sibling branch and declares no
+    # profiles either way, so this stays the "defines none" case. The
+    # message says which, rather than leaving the caller to guess whether
+    # they mistyped the profile or brought the wrong file.
+    # A unit test, because no CLI input can reach this branch TODAY:
+    # a name only survives `checked_profile` if some format defines it,
+    # and SVG is the only format that defines any, so anything reaching
+    # the per-format check for :svg is by construction in SVG's own list.
+    # The branch becomes reachable the moment a second format declares a
+    # different set, and this is what will already be pinning it.
+    it "names what the format does accept, when it accepts anything" do
+      error = Claricle::UnsupportedProfile.new(:svg, "nope", %i[base metanorma])
+
+      expect(error.message)
+        .to eq('format :svg does not define profile "nope"; it defines :base, :metanorma')
+    end
+
+    it "refuses a name the file's own format does not define" do
+      expect { Claricle.conformance_report(png, profile: "base") }
+        .to raise_error(Claricle::UnsupportedProfile, /:png does not define profile "base"/)
+    end
+
+    it "accepts a profile the format does define, and records it" do
+      expect(Claricle.conformance_report(svg, profile: "base"))
+        .to have_attributes(profile: "base", valid: :yes)
+    end
+
+    # The report names the profile it ran under, and the same public API
+    # accepts that name back. Those two disagreeing is the defect this
+    # example exists to catch, so it asserts the round trip rather than
+    # either half.
+    it "accepts back the profile a plain report says it ran" do
+      ran = Claricle.conformance_report(svg).profile
+
+      expect(Claricle.conformance_report(svg, profile: ran).profile).to eq(ran)
+    end
+
+    # The regex pins the current message, not just the profile name: the
+    # old wording ("no format defines a profile yet: ...") also contained
+    # the name, so a looser pattern here would pass unchanged against
+    # code that never checks `Registry.profiles` at all -- measured by
+    # mutation-check.sh, which is exactly the gap this file's other
+    # `/no format defines a profile named/` pattern (above) already
+    # closes.
+    it "refuses a bad profile on conform?" do
+      workspace(["a.svg", File.join(__dir__, "..", "..", "fixtures", "conform", "valid.svg")]) do
+        expect { Claricle.conform?("a.svg", profile: "no-such-profile") }
+          .to raise_error(Claricle::InvocationError, /no format defines a profile named "no-such-profile"/)
       end
     end
 
-    # Once per call, not once per file: a bad profile is one invocation
-    # error about the command, never a row in a report.
-    it "refuses a profile before the batch runs" do
+    # Once per call, not once per file: an unknown name is one invocation
+    # error about the command, never a row in a report. Same pinning as
+    # above, for the same measured reason.
+    it "refuses an unknown profile before the batch runs" do
       workspace(["a.png", png], ["b.eps", eps]) do
-        expect { Claricle.conformance_batch(pattern: "*", profile: "base") }
-          .to raise_error(Claricle::InvocationError, /"base"/)
+        expect { Claricle.conformance_batch(pattern: "*", profile: "no-such-profile") }
+          .to raise_error(Claricle::InvocationError, /no format defines a profile named "no-such-profile"/)
       end
     end
   end

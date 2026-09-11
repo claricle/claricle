@@ -47,7 +47,7 @@ RSpec.describe "Claricle::Registry" do
       expect(registry.capabilities_for(:eps)).to eq([:inspect])
       expect(registry.capabilities_for(:png)).to eq([:inspect])
       expect(registry.capabilities_for(:ps)).to eq([:inspect])
-      expect(registry.capabilities_for(:svg)).to eq([:inspect])
+      expect(registry.capabilities_for(:svg)).to eq(%i[inspect conform])
     end
   end
 
@@ -78,6 +78,37 @@ RSpec.describe "Claricle::Registry" do
     it "reports every declared format, sorted" do
       stub_const("#{registry}::HANDLERS", registry.send(:build, [handler.call(:svg, :png)]))
       expect(registry.formats).to eq(%i[png svg])
+    end
+
+    # Through Registry.profiles_for, not the raw declaration: asserting
+    # `handler.supported_profiles.sort` would pass even if profiles_for
+    # stopped sorting. Declared in reverse so sorted output cannot pass
+    # by accident.
+    it "reports one format's profiles, sorted" do
+      reversed = Class.new(base) do
+        formats(:svg)
+        profiles(:svg_1_2_rfc, :metanorma, :base)
+      end
+      stub_const("#{registry}::HANDLERS", registry.send(:build, [reversed]))
+
+      expect(registry.profiles_for(:svg)).to eq(%i[base metanorma svg_1_2_rfc])
+    end
+
+    # The union, not one handler's own list: a format with no profiles must
+    # not truncate what another format contributes, and a name two formats
+    # share must not appear twice.
+    it "reports every format's profiles, deduplicated and sorted" do
+      svg_like = Class.new(base) do
+        formats(:svg)
+        profiles(:metanorma, :base)
+      end
+      png_like = Class.new(base) do
+        formats(:png)
+        profiles(:base, :strict)
+      end
+      stub_const("#{registry}::HANDLERS", registry.send(:build, [svg_like, png_like]))
+
+      expect(registry.profiles).to eq(%i[base metanorma strict])
     end
 
     # Each key's exact owner: asserting only that the two differ would pass

@@ -113,6 +113,89 @@ RSpec.describe "Claricle::Handlers::Base" do
     end
   end
 
+  # The same seven properties as `formats` above, on the sibling
+  # declaration. Written out rather than shared with a loop: the two
+  # declarations answer different questions, their error messages differ,
+  # and folding them together would hide the day one of them stops
+  # behaving like the other.
+  #
+  # Every one of these was measured MISSING first. `profiles` shipped with
+  # no direct spec at all, and a mutation matrix found four rules here
+  # whose removal left the whole 1062-example suite green -- the second
+  # declaration guard, the non-Symbol guard, and both freezes.
+  describe "the profiles declaration" do
+    it "reads back what a subclass declared, in the declared order" do
+      subclass = Class.new(base) { profiles :metanorma, :base }
+      expect(subclass.supported_profiles).to eq(%i[metanorma base])
+    end
+
+    # The first is what a plain conform runs, so the order is meaning and
+    # not presentation. Sorting it would silently change which profile a
+    # format defaults to.
+    it "keeps the declared order rather than sorting it" do
+      subclass = Class.new(base) { profiles :zulu, :alpha }
+      expect(subclass.supported_profiles.first).to eq(:zulu)
+    end
+
+    it "refuses a second declaration" do
+      subclass = Class.new(base) { profiles :base }
+
+      expect { subclass.profiles(:metanorma) }
+        .to raise_error(Claricle::Error, /already declared profiles \[:base\]/)
+    end
+
+    it "keeps the original declaration after a refused one" do
+      subclass = Class.new(base) { profiles :base }
+      begin
+        subclass.profiles(:metanorma)
+      rescue Claricle::Error
+        nil
+      end
+
+      expect(subclass.supported_profiles).to eq([:base])
+    end
+
+    it "does not leak to a sibling or to Base" do
+      Class.new(base) { profiles :base }
+      sibling = Class.new(base)
+      expect(sibling.supported_profiles).to be_empty
+      expect(base.supported_profiles).to be_empty
+    end
+
+    it "freezes the declaration" do
+      subclass = Class.new(base) { profiles :base }
+      expect(subclass.supported_profiles).to be_frozen
+    end
+
+    # Declaring nothing is a real answer -- PNG conformance is one fixed
+    # requirement set -- so the empty case is handed out as often as any
+    # other and must not be a fresh mutable array each time.
+    it "freezes the empty default" do
+      expect(Class.new(base).supported_profiles).to be_frozen
+    end
+
+    # `Registry.profiles_for` sorts these, and `Registry.profiles` sorts
+    # the union, so one String among them raises on comparison rather
+    # than at the typo.
+    it "refuses a non-Symbol declaration, naming the offender" do
+      expect { Class.new(base) { profiles "base", :metanorma } }
+        .to raise_error(Claricle::Error, /non-Symbol profiles \["base"\]/)
+    end
+
+    it "declares nothing when the declaration is refused" do
+      subclass = Class.new(base)
+      begin
+        subclass.profiles("base")
+      rescue Claricle::Error
+        nil
+      end
+
+      expect(subclass.supported_profiles).to be_empty
+      expect { subclass.profiles(:base) }.not_to raise_error
+      expect(subclass.supported_profiles).to eq([:base])
+    end
+  end
+
   # A handler that has not implemented an operation says which one, rather
   # than returning nil and failing somewhere else.
   describe "unimplemented operations" do

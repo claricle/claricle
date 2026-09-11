@@ -16,6 +16,26 @@ module Claricle
   # ordinary StandardError row; there is no blanket Claricle::Error row.
   class ConversionError < Error; end
 
+  # Raised when a profile is recognised as a name some format defines, but
+  # not by the format of the file in hand. Separate from UnsupportedFormat
+  # because the format IS supported -- it is the pairing that is wrong,
+  # and a caller fixes the two by different means. Names what the format
+  # does accept, because a refusal that does not is a second question.
+  class UnsupportedProfile < Error
+    def initialize(format, profile, accepted)
+      super(build_message(format, profile, accepted))
+    end
+
+    private
+
+    def build_message(format, profile, accepted)
+      message = "format #{format.inspect} does not define profile #{profile.inspect}"
+      return "#{message}; it defines none" if accepted.empty?
+
+      "#{message}; it defines #{accepted.map(&:inspect).join(", ")}"
+    end
+  end
+
   # Raised when a format is recognised but nothing handles it, or handles
   # the operation asked for. The class builds its own sentence: callers
   # pass what they were doing, not a phrase.

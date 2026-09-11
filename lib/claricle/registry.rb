@@ -31,6 +31,20 @@ module Claricle
         handler_for(format).capabilities
       end
 
+      # The profile names one format accepts. Sorted, so the order a
+      # handler happens to declare them in never leaks into a message.
+      def profiles_for(format)
+        handler_for(format).supported_profiles.sort
+      end
+
+      # Every profile name ANY registered format accepts. This is what
+      # lets a batch reject a typo before it opens a single file --
+      # whether the name fits the format in hand is a per-file question
+      # and is asked again there.
+      def profiles
+        HANDLERS.values.flat_map(&:supported_profiles).uniq.sort
+      end
+
       private
 
       # Two classes claiming a format is a configuration defect, not a

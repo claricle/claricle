@@ -42,5 +42,6 @@ Gem::Specification.new do |spec|
   spec.add_dependency "png_conform", "~> 0.1.4"
   spec.add_dependency "postscript", "~> 0.2.0"
   spec.add_dependency "rexml", "~> 3.4.4"
+  spec.add_dependency "svg_conform", "~> 0.2.2"
   spec.add_dependency "thor", "~> 1.2"
 end
