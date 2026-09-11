@@ -288,10 +288,10 @@ module Claricle
       # naming `base` again -- one rule in two places is one that can
       # drift, and `profiles` already puts the default first.
       def conformance_report(image, profile: nil)
-        # Lazily required (D5), matching `Png#conformance_report`: the
-        # detector's `emf` is the only eager delegate, and svg_conform
-        # pulls in a profile loader and a SAX stack that a plain
-        # `inspect` run has no use for.
+        # Lazily required (D5), matching `Png#read_chunks`'s own lazy
+        # `require "png_conform"`: the detector's `emf` is the only eager
+        # delegate, and svg_conform pulls in a profile loader and a SAX
+        # stack that a plain `inspect` run has no use for.
         require "svg_conform"
 
         ConformanceMapper.report(image, profile: profile || self.class.supported_profiles.first)

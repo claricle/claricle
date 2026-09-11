@@ -763,6 +763,37 @@ RSpec.describe "Claricle SVG handler" do
       end
     end
 
+    # `not_well_formed` rescues three classes, and only `ParseException`
+    # is reachable from a real fixture: measured against REXML 3.4.4,
+    # `REXML::Document.new(File.read(path))` never lets a raw
+    # `EncodingError` or `ArgumentError` escape -- `IOSource#read`'s own
+    # `rescue Exception, NameError` swallows an internal
+    # `Encoding::InvalidByteSequenceError` and the parse surfaces as
+    # `ParseException: Malformed XML: No root element` instead (probed
+    # with a UTF-16 BOM followed by a dangling byte, and with a bogus
+    # `encoding="..."` declaration -- both wrap). Deleting `EncodingError`
+    # and `ArgumentError` from the rescue clause left every other example
+    # in this file green, so the three shapes above cannot stand in for
+    # these two. Mocked for the same reason `errors it must not swallow`
+    # mocks `REXML::Text.unnormalize` above: the class the rescue answers
+    # to is what it promises, not a fixture that happens to reach it.
+    {
+      EncodingError => "a document Ruby cannot decode",
+      ArgumentError => "an argument REXML itself rejects"
+    }.each do |error_class, reason|
+      it "refuses a document whose parse raises #{error_class} (#{reason})" do
+        allow(REXML::Document).to receive(:new).and_raise(error_class, "boom")
+
+        with_svg_file.call(%(<svg xmlns="http://www.w3.org/2000/svg"/>)) do |path|
+          report = handler.conformance_report(Claricle::Image.from_path(path))
+
+          expect(report.valid).to eq(:no)
+          expect(report.issues.map(&:code)).to eq(["svg.not_well_formed"])
+          expect(report.issues.first.message).to include("boom")
+        end
+      end
+    end
+
     # Bytes that are not markup at all are deliberately NOT in that table.
     # `Image.from_path` refuses them with `UnknownFormat` before any
     # handler is chosen -- measured, the example failed with "no known
