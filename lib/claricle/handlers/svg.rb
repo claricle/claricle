@@ -326,9 +326,17 @@ module Claricle
       end
 
       # nil rather than a wrong number, in every case it cannot answer:
-      # no attribute, an unparseable one, a relative unit, or a value
-      # that overflows. The viewBox is deliberately not consulted -- it
-      # defines an aspect ratio, not an intrinsic size (D15).
+      # no attribute, an unparseable one, a relative unit, a negative
+      # value, or one that overflows. The viewBox is deliberately not
+      # consulted -- it defines an aspect ratio, not an intrinsic size
+      # (D15).
+      #
+      # Negative is nulled, zero is not: SVG 1.1 5.1.2 on width/height,
+      # "A negative value is an error ... A value of zero disables
+      # rendering of the element." The spec draws the line at the sign,
+      # not at zero, so a declared zero is a real (if degenerate)
+      # measurement and only a negative one joins the unusable cases
+      # above.
       def dimension(declared)
         match = DIMENSION.match(declared.to_s)
         return nil unless match
@@ -337,7 +345,11 @@ module Claricle
         factor = unit.empty? ? 1.0 : ABSOLUTE_UNITS[unit]
         return nil unless factor
 
-        scale(match[:number], factor)
+        value = scale(match[:number], factor)
+        # -0.0.negative? is false (-0.0 == 0.0 under IEEE 754), so a
+        # declared "-0" falls through as a kept zero, not a nulled
+        # negative -- no separate case needed for it.
+        value&.negative? ? nil : value
       end
 
       # Finiteness is checked on the CONVERTED value, not the parsed one:
