@@ -1,10 +1,12 @@
 # frozen_string_literal: true
 
-# A NEW pattern in spec/, and stated as new: claricle.rb does not require
-# writer.rb yet (that wiring is a later step), so spec_helper's
-# `require "claricle"` does not load it. `require_relative` is the norm
+# claricle.rb now requires writer.rb (04-convert.md item 3's
+# `convert_batch` needs `Writer`), so spec_helper's `require "claricle"`
+# loads this already -- this require is redundant and kept only as this
+# file's own explicit dependency statement, the same reason writer_spec
+# does not rely on load order elsewhere. `require_relative` is the norm
 # under lib/ (44 hits there), but has no precedent under spec/ -- so this
-# is a plain require off the gem's own load path instead.
+# stays a plain require off the gem's own load path.
 require "claricle/writer"
 require "fileutils"
 require "pathname"

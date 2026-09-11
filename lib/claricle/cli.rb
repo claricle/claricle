@@ -82,6 +82,50 @@ module Claricle
       tolerate_closed_output { puts payload }
     end
 
+    desc "conform FILE...", "Check files against their format's conformance rules"
+    option :pattern, type: :string,
+                     desc: "Read this as a glob, whatever the filename looks like"
+    option :json, type: :boolean, default: false, desc: "Emit JSON"
+    option :strict, type: :boolean, default: false,
+                    desc: "Require a clean verdict, not merely the absence of errors"
+    option :profile, type: :string,
+                     desc: "Require conformance to this profile; no format defines one yet"
+    def conform(*files)
+      result = Claricle.conformance_batch(*files, pattern: options[:pattern],
+                                                  strict: options[:strict],
+                                                  profile: options[:profile])
+      # The status is settled before anything is written. `tolerate_closed_output`
+      # answers 0, which is right for a command that can only succeed and
+      # would silently turn a nonconformant batch into a passing one here.
+      tolerate_closed_output { write_conformance(result) }
+      Runner::Status.new(result.exit_code)
+    end
+
+    desc "convert SOURCE...", "Convert files to another format"
+    option :pattern, type: :string,
+                     desc: "Read this as a glob, whatever the filename looks like"
+    option :to, type: :string, desc: "Target format"
+    option :output, type: :string, desc: "Destination file, or - for stdout"
+    option :json, type: :boolean, default: false, desc: "Emit JSON"
+    option :force, type: :boolean, default: false, desc: "Overwrite an existing destination"
+    def convert(*files)
+      refuse_stdout_json_conflict
+      result = Claricle.convert_batch(*files, pattern: options[:pattern], to: options[:to],
+                                              output: options[:output], force: options[:force])
+      # Bytes for `--output -` are written to stdout as a side effect INSIDE
+      # `Claricle.convert_batch`, above -- unlike every other command, whose
+      # write happens afterward, guarded by `tolerate_closed_output` below.
+      # A closed consumer there is caught by Batch's own per-file rescue
+      # before it ever reaches this line, and reads as an ordinary
+      # conversion failure (exit 4) rather than the closed-pipe exit 0
+      # every sibling command gives. Restored explicitly here, since
+      # `tolerate_closed_output` cannot see a failure that already happened.
+      return Runner::Status.new(0) if closed_stdout_write?(result)
+
+      tolerate_closed_output { write_convert(result) }
+      Runner::Status.new(result.exit_code)
+    end
+
     # Rendering, kept together so the commands only choose a payload and
     # write it. Nothing here touches `options` or writes output.
     module Presenter
@@ -93,9 +137,64 @@ module Claricle
       # definition. Nothing here is a character a file has a reason to
       # put in its metadata.
       CONTROL = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/
-      private_constant :CONTROL
+      # Named here rather than read off the model, so the printed order is
+      # chosen rather than whatever order the attributes happen to sit in.
+      LOCATION_FIELDS = %i[chunk byte_offset byte_length line column node_path].freeze
+      private_constant :CONTROL, :LOCATION_FIELDS
 
       module_function
+
+      # Per file: the path, the tri-state verdict, and every mapped issue on
+      # one line. A conformant file prints its path and verdict, nothing
+      # more. A file whose operation could not run has no verdict to print
+      # and is reported on stderr instead.
+      def conformance(items)
+        items.reject { |item| item.status == "error" }
+             .flat_map { |item| ["#{visible(item.path)}: #{item.result.valid}", *issues(item)] }
+             .join("\n")
+      end
+
+      # Generic: a `BatchItem`'s failure shape (path + error message) is the
+      # same whatever operation produced it, so this is what `convert`'s own
+      # failure rendering calls too, rather than the conform-named method
+      # below or a near-duplicate of it.
+      def batch_failures(items)
+        items.select { |item| item.status == "error" }
+             .map { |item| "claricle: #{visible(item.path)}: #{visible(item.error.message)}" }
+      end
+
+      def conformance_failures(items)
+        batch_failures(items)
+      end
+
+      def issues(item)
+        item.result.issues.map do |issue|
+          ["  #{visible(issue.severity)}", code(issue.code),
+           visible(issue.message), location(issue.location)].compact.join(" ")
+        end
+      end
+
+      # Absent, not `[]`: Issue#code is optional, and an empty bracket
+      # pair would read as a code nobody chose rather than one the
+      # delegate never reported.
+      def code(code)
+        return if code.nil?
+
+        "[#{visible(code)}]"
+      end
+
+      # Only what a delegate actually reported. Spelling out six fields
+      # would print four nils, and printing none would lose the ones that
+      # were measured.
+      def location(location)
+        return if location.nil?
+
+        populated = LOCATION_FIELDS.filter_map do |name|
+          value = location.public_send(name)
+          "#{name}: #{visible(value)}" unless value.nil?
+        end
+        "(#{populated.join(", ")})" unless populated.empty?
+      end
 
       # Capabilities are derived from the handler, so this cannot
       # advertise an operation that is still a raising stub. `convert_to`
@@ -303,12 +402,12 @@ module Claricle
           Status.valid?(code) ? code : 4
         end
 
+        # The library owns the map, because a batch has to reach the same
+        # answer for the same exception. Thor's own errors are the one row
+        # that belongs here: they cannot arise inside an operation, and
+        # Fault is deliberately Thor-free.
         def exit_code(error)
-          case error
-          when Thor::Error, Errno::ENOENT, InvocationError then 2
-          when UnknownFormat, UnsupportedFormat then 3
-          else 4
-          end
+          error.is_a?(Thor::Error) ? 2 : Fault.exit_code(error)
         end
 
         # An unexpected failure names its class: "claricle: missing gem" is
@@ -316,7 +415,7 @@ module Claricle
         # does not need one -- ENOENT included, now that `inspect` takes a
         # path and a typo is an ordinary user error rather than a defect.
         def error_message(error)
-          message = utf8_message(error.message)
+          message = Fault.message(error)
           # Errno::ENOENT joins the bare-message set now that a command
           # takes a path. It was already exit code 2, but its message was
           # unreachable while nothing opened a file, so naming the class
@@ -325,12 +424,6 @@ module Claricle
           return "claricle: #{message}" if MAPPED.any? { |kind| error.is_a?(kind) }
 
           "claricle: #{error.class}: #{message}"
-        end
-
-        def utf8_message(message)
-          message.encode(Encoding::UTF_8, invalid: :replace)
-        rescue EncodingError
-          message.b.encode(Encoding::UTF_8, undef: :replace)
         end
       end
     end
@@ -341,6 +434,59 @@ module Claricle
       yield
     rescue Errno::EPIPE
       Runner::Status.new(0)
+    end
+
+    # `--output -` puts converted bytes alone on stdout; `--json` wants the
+    # same stream for its array. Checked here, before `Claricle.convert_batch`
+    # runs anything, so this is a pure invocation error rather than a
+    # partially-converted batch discovering the conflict mid-write.
+    def refuse_stdout_json_conflict
+      return unless options[:output] == Writer::STDOUT_DESTINATION && options[:json]
+
+      raise InvocationError, "--json is not supported with --output -"
+    end
+
+    # `--output -` always processes exactly one file: `convert_batch`
+    # refuses more than one source whenever `--output` is given at all, so
+    # `result.highest_error` unambiguously means the one write this command
+    # made. `BatchResult#highest_error` returns the actual raised exception
+    # (not the stringified `BatchError` on the item), so `Errno::EPIPE` is
+    # checked directly here.
+    def closed_stdout_write?(result)
+      options[:output] == Writer::STDOUT_DESTINATION && result.highest_error.is_a?(Errno::EPIPE)
+    end
+
+    # JSON is always an array, a single result included: a filename may
+    # legally contain glob characters and a shell expands an unquoted glob
+    # before Claricle sees it, so which form the user typed is not knowable
+    # and the shape must not depend on it.
+    #
+    # Human output splits: verdicts to stdout, one line per failed file to
+    # stderr. Skipped entirely when every file failed, so `puts` cannot
+    # print a bare blank line where the JSON form prints a whole array.
+    def write_conformance(result)
+      return puts(Models::BatchItem.to_json(result.items)) if options[:json]
+
+      verdicts = Presenter.conformance(result.items)
+      puts verdicts unless verdicts.empty?
+      Presenter.conformance_failures(result.items).each { |line| warn line }
+    end
+
+    # No handler completes a conversion yet (same state `conform` is in),
+    # so there is never a successful item to render a human summary line
+    # for in this milestone -- only the failure branch is reachable end to
+    # end. A real conversion result will carry a per-conversion lossiness
+    # classification the success line needs ("source, target format,
+    # written path, and the lossiness classification"); until a handler
+    # produces one there is nothing honest to print for a success, so this
+    # reports failures only, the same shape `write_conformance` uses for
+    # its own failure half. `--json` is unreachable together with stdout
+    # mode -- `convert` above already refuses that combination before this
+    # ever runs -- so reading `options[:json]` here is safe in both modes.
+    def write_convert(result)
+      return puts(Models::BatchItem.to_json(result.items)) if options[:json]
+
+      Presenter.batch_failures(result.items).each { |line| warn line }
     end
   end
 end
