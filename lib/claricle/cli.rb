@@ -154,9 +154,17 @@ module Claricle
              .join("\n")
       end
 
-      def conformance_failures(items)
+      # Generic: a `BatchItem`'s failure shape (path + error message) is the
+      # same whatever operation produced it, so this is what `convert`'s own
+      # failure rendering calls too, rather than the conform-named method
+      # below or a near-duplicate of it.
+      def batch_failures(items)
         items.select { |item| item.status == "error" }
              .map { |item| "claricle: #{visible(item.path)}: #{visible(item.error.message)}" }
+      end
+
+      def conformance_failures(items)
+        batch_failures(items)
       end
 
       def issues(item)
@@ -478,7 +486,7 @@ module Claricle
     def write_convert(result)
       return puts(Models::BatchItem.to_json(result.items)) if options[:json]
 
-      Presenter.conformance_failures(result.items).each { |line| warn line }
+      Presenter.batch_failures(result.items).each { |line| warn line }
     end
   end
 end

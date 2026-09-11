@@ -162,9 +162,10 @@ module Claricle
     # `classify` always answers 0: the block below either returns normally
     # -- always `nil`, since `Models::BatchItem#result` is still typed to
     # `Report` and stays that way until a handler produces a real
-    # conversion result to widen it for -- or raises, which `Batch.run`'s
-    # own rescue already turns into a failed item with its own exit code.
-    # There is no success/failure distinction left for `classify` to make.
+    # conversion result to widen it for -- or raises, which Batch's own
+    # per-file rescue already turns into a failed item with its own exit
+    # code. There is no success/failure distinction left for `classify` to
+    # make.
     #
     # `run_files`, not `run`: `files` is already the expanded list built
     # above for the destination preflight. `run` would expand it a SECOND
@@ -202,7 +203,13 @@ module Claricle
   # skipped the guard below entirely, and the derived destination for a
   # bare `--to SVG` carried the wrong-cased extension.
   def self.resolved_convert_target(to:, output:)
-    return resolved_to_target(to, output) if to
+    # `if to` alone treats an explicit `--to ""` as given: truthy, but
+    # `to.to_s.downcase.to_sym` then builds the bogus target `:""`, which
+    # went on to derive a destination with no extension and a garbled
+    # "not supported for convert to :\"\"" message instead of the clean
+    # invocation error below. `--to ""` and no `--to` at all mean the same
+    # thing -- there is no target -- so both take this branch.
+    return resolved_to_target(to, output) if to && !to.to_s.empty?
     if output == Writer::STDOUT_DESTINATION
       raise InvocationError, "--output - needs --to; there is no extension to infer from"
     end

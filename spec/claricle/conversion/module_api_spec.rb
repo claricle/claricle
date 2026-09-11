@@ -102,17 +102,12 @@ RSpec.describe "Claricle conversion API" do
 
     # `--to` equal to the source's own detected format, with an explicit
     # `--output` distinct from the source -- so this reaches convert's own
-    # same-format guard rather than Writer's would-overwrite-an-input
-    # check, which a bare `--to <own format>` (no `--output`) hits instead
-    # because the derived destination is then the source itself. Both are
-    # exercised at the CLI layer; this is the guard's own direct proof.
-    # A per-file failure again (Batch.run's own rescue catches it), not a
-    # raise -- proven the same way the two examples above are. `--output`
-    # is given here and distinct from the source, which is what reaches
-    # this guard rather than Writer's would-overwrite-an-input check (see
-    # the CLI-level spec for the bare `--to <own format>` case, where no
-    # `--output` derives a destination identical to the source itself and
-    # that check fires first instead).
+    # same-format guard rather than Writer's would-overwrite-an-input check
+    # (see the CLI-level spec for the bare `--to <own format>` case, where
+    # no `--output` derives a destination identical to the source itself
+    # and that check fires first instead). A per-file failure again
+    # (Batch's own per-file rescue catches it), not a raise -- proven the
+    # same way the two examples above are.
     it "collects a same-format --to as a per-file failure, before any delegate is touched" do
       workspace(["a.eps", eps]) do
         result = Claricle.convert_batch("a.eps", to: "eps", output: "copy.eps")
@@ -171,6 +166,15 @@ RSpec.describe "Claricle conversion API" do
     it "case-folds --to to the registry's own lowercase spelling" do
       expect(Claricle.send(:resolved_convert_target, to: "SVG", output: nil)).to eq(:svg)
       expect(Claricle.send(:resolved_convert_target, to: "SVG", output: "copy.svg")).to eq(:svg)
+    end
+
+    # `to: ""` is truthy in Ruby, so `if to` alone treated it as given --
+    # building the bogus target `:""` instead of falling through to this
+    # same "no target given" error, and going on to a garbled "not
+    # supported for convert to :\"\"" instead.
+    it "treats an empty --to the same as no --to at all" do
+      expect { Claricle.send(:resolved_convert_target, to: "", output: nil) }
+        .to raise_error(Claricle::InvocationError, /give --to, or an --output/)
     end
 
     it "infers the target from a recognised --output extension" do

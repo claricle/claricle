@@ -830,6 +830,17 @@ RSpec.describe Claricle::Cli::Runner do
       end
     end
 
+    # An explicit empty `--to ""` is Ruby-truthy, so it used to slip past
+    # the "no target" check and build a bogus `:""` target instead --
+    # `%w[]` can't spell a literal empty argument, hence the plain array.
+    it "exits 2 for an empty --to, the same as no --to at all" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect(described_class.run(["convert", "a.png", "--to", ""], output: StringIO.new)).to eq(2)
+        expect { described_class.run(["convert", "a.png", "--to", ""], output: $stderr) }
+          .to output(/give --to, or an --output with a recognised format extension/).to_stderr
+      end
+    end
+
     it "exits 2 for --output - with no --to, since there is no extension to infer from" do
       workspace.call(["a.png", "valid.png"]) do
         expect(described_class.run(%w[convert a.png --output -], output: StringIO.new)).to eq(2)
