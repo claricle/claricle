@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "English"
+require "open3"
 # The DOM parser, required only by the specs: it is what "malformed"
 # means in the root-prefix examples, and the library never loads it.
 require "rexml/document"
@@ -582,15 +582,19 @@ RSpec.describe "Claricle SVG handler" do
       print handler.inspection(image).width
     RUBY
     lib = File.expand_path("../../../lib", __dir__)
-    output = IO.popen([RbConfig.ruby, "-I#{lib}", "-e", script], err: %i[child out], &:read)
-    status = $CHILD_STATUS
+    # Open3.capture3 keeps stdout and stderr separate, so a stray stderr
+    # line -- rubygems or git chattering outside a clean checkout, a
+    # deprecation warning -- can never land inside the string this
+    # compares with eq. Merging the streams (the previous
+    # `err: %i[child out]` form) failed on any such line.
+    stdout, stderr, status = Open3.capture3(RbConfig.ruby, "-I#{lib}", "-e", script)
 
     # Bundler's inherited RUBYOPT puts lib on the child's path too, so a
     # wrong -I passes here unnoticed -- and did, one directory short at
     # spec/lib. This is what makes the -I mean anything.
     expect(File).to exist(File.join(lib, "claricle", "handlers", "svg.rb"))
-    expect(status).to be_success, "handler could not load alone: #{output}"
-    expect(output).to eq("7.0")
+    expect(status).to be_success, "handler could not load alone: #{stdout}\nSTDERR: #{stderr}"
+    expect(stdout).to eq("7.0")
   end
 
   describe "meta" do
