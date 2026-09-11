@@ -79,7 +79,13 @@ The name reflects what the library is for:
 * `conform` and `convert` for every format. No handler implements
   either yet, so both raise `Claricle::UnsupportedFormat`. `claricle
   formats` reports this per format, and it reads the handlers rather
-  than a list, so it cannot claim an operation that is not there
+  than a list, so it cannot claim an operation that is not there.
+  The `conform` command and `Claricle.conform?` do exist -- they take
+  files, expand globs and report per file -- but every format currently
+  answers exit 3, so the command is plumbing waiting on its handlers
+* `--profile` for `conform`. PDF and SVG will name stricter standards
+  through it, but no handler defines one yet, so supplying `profile:`
+  is refused rather than accepted and ignored
 * WMF beyond detection. `detect` returns `:wmf`, but no handler
   registers it, so every operation on a WMF raises
   `UnsupportedFormat`. That is deliberate: the upstream parser this
@@ -94,6 +100,7 @@ The name reflects what the library is for:
 | Command | What it does
 
 | `claricle inspect FILE` | Report a file's format and metadata
+| `claricle conform FILE...` | Check files against their format's conformance rules
 | `claricle formats` | List the formats Claricle handles, and what it can do with each
 | `claricle version` | Print the version
 |===
@@ -133,8 +140,21 @@ A command may also exit with a status of its own choosing. A status in
 because a process status has to be a byte. The codes above are the ones
 this library assigns.
 
-Exit code 1 is reserved for a nonconformant file, which arrives with
-`conform`.
+Exit code 1 is reserved for a nonconformant file. `claricle conform`
+ships, but no handler judges conformance yet, so it reaches 2 and 3
+today and 1 becomes reachable with the first handler.
+
+`claricle conform` takes any number of files. A positional is a literal
+path when it names an existing file and a glob otherwise, and
+`--pattern` reads its argument as a glob whatever the filename looks
+like -- which is how a file genuinely called `star[1].png` stays
+reachable both ways. A pattern adds to the positionals rather than
+replacing them, the combined set is deduplicated and processed in
+sorted order, a file that fails does not stop the ones after it, and
+the command exits with the highest code any of them reached. Matching
+no files at all is a bad invocation, not a silent pass. `--json` always
+emits an array, a single file included, so a consumer never gets one
+shape for one file and another for many.
 
 == Usage
 
@@ -222,21 +242,28 @@ lib/claricle/
   handlers/png.rb      # PNG metadata
   handlers/postscript.rb # EPS and PS DSC header metadata
   handlers/svg.rb      # SVG root metadata
-  models/              # Location, Issue, Report, Inspection
+  models/              # Location, Issue, Report, Inspection, BatchItem
+  batch.rb             # one file set, one envelope per file
+  fault.rb             # an exception's exit code and renderable message
   errors.rb            # Error, UnknownFormat, UnsupportedFormat, ...
   cli.rb               # Thor CLI and the exit-code Runner
 ----
 
-`Detector`, `Registry`, `Handlers::Base`, `Models::Base`,
-`Models::FreeFormHash`, `Models::Validation`,
-`Models::Location::POSITIONS`, `Cli::Runner::Status::RANGE` and
+`Detector`, `Registry`, `Batch`, `Fault`, `Handlers::Base`,
+`Models::Base`, `Models::FreeFormHash`, `Models::UncoercedInteger`,
+`Models::Validation`, `Models::Location::POSITIONS`,
+`Models::BatchItem::CODES`, `Cli::Runner::Status::RANGE` and
 `UnsupportedFormat::ABSENT` are private constants.
-The public surface is `Claricle.detect`, `Claricle::Image`,
+The public surface is `Claricle.detect`, `Claricle.conform?`,
+`Claricle.conformance_report`, `Claricle.conformance_batch`,
+`Claricle::Image`,
+`Claricle::BatchResult`,
 `Claricle::Cli` (including `Cli::Runner` and `Runner::Status`),
 `Claricle::VERSION`, the error classes, the model classes
-`Models::Inspection`, `Models::Issue`, `Models::Location` and
-`Models::Report`, and the two vocabularies those models validate
-against, `Inspection::PARSE_STATUSES` and `Issue::SEVERITIES`.
+`Models::BatchError`, `Models::BatchItem`, `Models::Inspection`,
+`Models::Issue`, `Models::Location` and `Models::Report`, and the two
+vocabularies those models validate against,
+`Inspection::PARSE_STATUSES` and `Issue::SEVERITIES`.
 
 === Adding a format
 

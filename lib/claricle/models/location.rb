@@ -3,33 +3,10 @@
 require "lutaml/model"
 
 require_relative "base"
+require_relative "uncoerced_integer"
 
 module Claricle
   module Models
-    # An integer attribute that hands validation the value it was given,
-    # rather than a coercion of it.
-    #
-    # lutaml's own `:integer` casts before anything can look at the
-    # value, and the cast destroys the evidence a check would need --
-    # measured on 0.8.19, at construction and through `from_json` alike:
-    # `-0.5` becomes `0`, `1.5` becomes `1`, `true` becomes `1`, `false`
-    # becomes `0` and `"3"` becomes `3`. A non-negative check running
-    # after that sees only the result, so `{"byte_offset":-0.5}`
-    # deserialized, sealed, and rendered `0` for a position the document
-    # never carried.
-    #
-    # So the cast is the identity, and `Location#validate_types` decides.
-    # One rule, in one place, with the value the caller actually supplied
-    # still in hand to name in the message. Everything a model stores is
-    # an Integer or nil by the time the lifecycle seals it, so
-    # `Type::Integer.serialize` -- which renders through this same cast
-    # -- has nothing left to convert.
-    class UncoercedInteger < Lutaml::Model::Type::Integer
-      def self.cast(value, _options = {})
-        value
-      end
-    end
-
     # Where an issue sits in its source. Every field is nullable, because
     # what a delegate can report varies by format. `byte_offset` and
     # `byte_length` are a zero-based half-open range -- issue #1 asks for a
@@ -70,8 +47,5 @@ module Claricle
         end
       end
     end
-
-    # Location's own coercion problem, not a type a caller ever names.
-    private_constant :UncoercedInteger
   end
 end
