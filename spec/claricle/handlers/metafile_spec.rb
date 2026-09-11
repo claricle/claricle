@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "English"
+require "open3"
 require "emf"
 require "json"
 require "tempfile"
@@ -1190,9 +1190,14 @@ RSpec.describe "Claricle metafile handler" do
     RUBY
     lib = File.expand_path("../../../lib", __dir__)
     command = [RbConfig.ruby, "-I#{lib}", "-e", script]
-    output = IO.popen(command, err: %i[child out], &:read)
+    # Open3.capture3 keeps stdout and stderr separate, so a stray stderr
+    # line -- rubygems or git chattering outside a clean checkout, a
+    # deprecation warning -- can never land inside the string this
+    # compares with eq. Merging the streams (the previous
+    # `err: %i[child out]` form) failed on any such line.
+    stdout, stderr, status = Open3.capture3(*command)
 
-    expect($CHILD_STATUS).to be_success, "handler could not load alone: #{output}"
-    expect(output).to eq("100.0")
+    expect(status).to be_success, "handler could not load alone: #{stdout}\nSTDERR: #{stderr}"
+    expect(stdout).to eq("100.0")
   end
 end
