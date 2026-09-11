@@ -286,12 +286,15 @@ RSpec.describe "the documentation" do
 
     it "leaves exactly the documented public surface, at every depth" do
       expect(surface_of(Claricle)).to eq(
+        BatchResult: {},
         Cli: { Runner: { Status: {} } },
         ConversionError: {},
         Error: {},
         Image: {},
         InvocationError: {},
         Models: {
+          BatchError: {},
+          BatchItem: {},
           Inspection: { PARSE_STATUSES: nil },
           Issue: { SEVERITIES: nil },
           Location: {},
@@ -301,7 +304,12 @@ RSpec.describe "the documentation" do
         UnsupportedFormat: {},
         VERSION: nil
       )
-      expect(Claricle.methods(false)).to eq([:detect])
+      # Set equality, not order: `methods(false)` answers in definition
+      # order, and pinning that would fail on a reshuffle that changes
+      # nothing a caller can see. Exactness is what matters, and
+      # contain_exactly keeps it.
+      expect(Claricle.methods(false))
+        .to contain_exactly(:conform?, :conformance_batch, :conformance_report, :detect)
     end
 
     # The tree above is what the code exposes; this is what the README
@@ -322,16 +330,23 @@ RSpec.describe "the documentation" do
       # public, least of all" stayed green, and before the private
       # sentence was pinned, reversing it to "are public constants" did
       # the same.
-      claims("The public surface is `Claricle.detect`, `Claricle::Image`, " \
+      claims("The public surface is `Claricle.detect`, `Claricle.conform?`, " \
+             "`Claricle.conformance_report`, `Claricle.conformance_batch`, " \
+             "`Claricle::Image`, " \
+             "`Claricle::BatchResult`, " \
              "`Claricle::Cli` (including `Cli::Runner` and " \
              "`Runner::Status`), `Claricle::VERSION`, the error classes, " \
-             "the model classes `Models::Inspection`, `Models::Issue`, " \
+             "the model classes `Models::BatchError`, `Models::BatchItem`, " \
+             "`Models::Inspection`, `Models::Issue`, " \
              "`Models::Location` and `Models::Report`, and the two " \
              "vocabularies those models validate against, " \
              "`Inspection::PARSE_STATUSES` and `Issue::SEVERITIES`.")
-      claims("`Detector`, `Registry`, `Handlers::Base`, `Models::Base`, " \
-             "`Models::FreeFormHash`, `Models::Validation`, " \
-             "`Models::Location::POSITIONS`, `Cli::Runner::Status::RANGE` " \
+      claims("`Detector`, `Registry`, `Batch`, `Fault`, `Handlers::Base`, " \
+             "`Models::Base`, " \
+             "`Models::FreeFormHash`, `Models::UncoercedInteger`, " \
+             "`Models::Validation`, " \
+             "`Models::Location::POSITIONS`, `Models::BatchItem::CODES`, " \
+             "`Cli::Runner::Status::RANGE` " \
              "and `UnsupportedFormat::ABSENT` are private constants.")
       # `::`, not `const_get` -- measured: `Module#const_get` walks
       # straight past `private_constant` and hands the class back, so an
@@ -340,8 +355,14 @@ RSpec.describe "the documentation" do
         .to raise_error(NameError, /private constant/)
       expect { Claricle::Models::Validation }
         .to raise_error(NameError, /private constant/)
+      expect { Claricle::Models::UncoercedInteger }
+        .to raise_error(NameError, /private constant/)
       expect { Claricle::Models::Location::POSITIONS }
         .to raise_error(NameError, /private constant/)
+      expect { Claricle::Models::BatchItem::CODES }
+        .to raise_error(NameError, /private constant/)
+      expect { Claricle::Batch }.to raise_error(NameError, /private constant/)
+      expect { Claricle::Fault }.to raise_error(NameError, /private constant/)
       expect { Claricle::Cli::Runner::Status::RANGE }
         .to raise_error(NameError, /private constant/)
       expect { Claricle::UnsupportedFormat::ABSENT }
