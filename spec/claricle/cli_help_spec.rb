@@ -416,8 +416,6 @@ RSpec.describe Claricle::Cli::Runner do
     it "keeps indentation on a shell whose padding cannot be set" do
       sink = StringIO.new
       read_only = Class.new(Thor::Shell::Basic) do
-        attr_reader :padding
-
         undef_method :padding=
 
         def indent(count = 1)
