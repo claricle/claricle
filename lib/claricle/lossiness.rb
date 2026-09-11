@@ -33,6 +33,15 @@ module Claricle
     # reason, as models/free_form_hash.rb:28.
     CORE_INSTANCE = ::Object.instance_method(:is_a?)
 
+    # The exact set REXML::SourceFactory.create_from tests for its IO branch
+    # (rexml-3.4.4/lib/rexml/source.rb:42-56). `read` alone is not what it
+    # tests -- an object answering `read` but missing any of the other three
+    # falls through every branch there and hits REXML's own bare
+    # `RuntimeError: ... is not a valid input stream.`, raised from inside
+    # `PullParser.new`, which sits outside every rescue in `Scanner#run`. See
+    # `refuse_unreadable`.
+    REXML_IO_METHODS = %i[read readline nil? eof?].freeze
+
     SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 
     # Per target: features measured LOST, and features measured KEPT. A feature
@@ -230,14 +239,34 @@ module Claricle
       # two below, and this module already converts those, so letting a third
       # leak raw contradicted the contract these comments state. It is raised
       # here, outside the parse, for the same reason they are.
+      #
+      # `respond_to?(:read)` alone used to be the check, and it was WEAKER
+      # than the contract this comment claims: REXML_IO_METHODS is what
+      # actually keeps `PullParser.new` from raising the same bare
+      # RuntimeError for a different reason. Measured, an object exposing
+      # only `read` (and `closed?`) reached `PullParser.new` and raised
+      # `RuntimeError: Claricle::Lossiness::TaggedSource is not a valid
+      # input stream.` unwrapped, because `run`'s own rescue names
+      # `Unreadable, ArgumentError` and deliberately not `RuntimeError` (see
+      # `next_event`'s comment on why constructing the parser sits outside
+      # that boundary).
       def refuse_unreadable(source)
-        # `respond_to?` first, then the ORIGINAL `Object#is_a?` bound and
-        # called via `bind_call`, never `source.is_a?`: a caller may hand
-        # over a bare BasicObject exposing only the reader methods, and
-        # dispatching `is_a?` straight to it is itself a forbidden call --
-        # measured, it broke the bounded-IO example. `bind_call` runs the
-        # real method without depending on `source` still having it.
-        return if source.respond_to?(:read) || CORE_INSTANCE.bind_call(source, ::String)
+        # The ORIGINAL `Object#is_a?` bound and called via `bind_call` first,
+        # never `source.is_a?`: a caller may hand over a bare BasicObject
+        # exposing only the reader methods, and dispatching `is_a?` straight
+        # to it is itself a forbidden call -- measured, it broke the
+        # bounded-IO example. `bind_call` runs the real method without
+        # depending on `source` still having it.
+        #
+        # `respond_to?` itself IS dispatched straight to `source` below,
+        # unlike `is_a?` -- deliberately, not an oversight: a bounded-IO
+        # caller is expected to define its OWN `respond_to?` (the existing
+        # spec's "restricted" double does exactly this) so it governs what
+        # this guard is permitted to probe. Routing it through `bind_call`
+        # instead would bypass that override and defeat the restriction it
+        # exists to enforce.
+        return if CORE_INSTANCE.bind_call(source, ::String)
+        return if REXML_IO_METHODS.all? { |method| source.respond_to?(method) }
 
         raise InvocationError, "source must be a String or a readable IO"
       end
