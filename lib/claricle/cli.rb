@@ -109,17 +109,15 @@ module Claricle
     option :json, type: :boolean, default: false, desc: "Emit JSON"
     option :force, type: :boolean, default: false, desc: "Overwrite an existing destination"
     def convert(*files)
-      stdout_mode = options[:output] == Writer::STDOUT_DESTINATION
-      raise InvocationError, "--json is not supported with --output -" if stdout_mode && options[:json]
-
+      refuse_stdout_json_conflict
       result = Claricle.convert_batch(*files, pattern: options[:pattern], to: options[:to],
                                               output: options[:output], force: options[:force])
       # Bytes for `--output -` are already on stdout by the time this runs --
       # `Writer#write` streams them as a side effect inside `Batch.run`'s
       # per-file operation, above. `write_convert` only ever adds stderr
-      # after that (or a `--json` array on stdout, which `stdout_mode`
-      # already refused above), so the byte stream stays pipe-safe either
-      # way.
+      # after that (or a `--json` array on stdout, which
+      # `refuse_stdout_json_conflict` already refused above), so the byte
+      # stream stays pipe-safe either way.
       tolerate_closed_output { write_convert(result) }
       Runner::Status.new(result.exit_code)
     end
@@ -424,6 +422,16 @@ module Claricle
       yield
     rescue Errno::EPIPE
       Runner::Status.new(0)
+    end
+
+    # `--output -` puts converted bytes alone on stdout; `--json` wants the
+    # same stream for its array. Checked here, before `Claricle.convert_batch`
+    # runs anything, so this is a pure invocation error rather than a
+    # partially-converted batch discovering the conflict mid-write.
+    def refuse_stdout_json_conflict
+      return unless options[:output] == Writer::STDOUT_DESTINATION && options[:json]
+
+      raise InvocationError, "--json is not supported with --output -"
     end
 
     # JSON is always an array, a single result included: a filename may

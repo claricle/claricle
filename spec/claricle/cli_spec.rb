@@ -603,39 +603,46 @@ RSpec.describe Claricle::Cli::Runner do
     end
   end
 
+  # Shared by "conform" and "convert" below -- both drive real files
+  # through the real CLI and need the same workspace and capture helpers.
+  # `fixtures` and `workspace` stay at this outer scope rather than each
+  # describe defining its own, since a lambda assigned inside one `describe`
+  # is a Ruby-scoped local and is not visible to a sibling block; `def`
+  # inside a describe defines an instance method on THAT example group's
+  # class, which a sibling does not inherit either.
+  fixtures = File.join(__dir__, "..", "fixtures", "inspect")
+
+  workspace = lambda do |*names, &block|
+    Dir.mktmpdir do |dir|
+      names.each { |name, source| FileUtils.cp(File.join(fixtures, source), File.join(dir, name)) }
+      Dir.chdir(dir, &block)
+    end
+  end
+
+  def capture_stdout
+    previous = $stdout
+    $stdout = StringIO.new
+    yield
+    $stdout.string
+  ensure
+    $stdout = previous
+  end
+
+  def closed_stdout
+    reader, writer = IO.pipe
+    reader.close
+    previous = $stdout
+    $stdout = writer
+    yield
+  ensure
+    $stdout = previous
+    writer&.close
+  end
+
   # No handler implements conformance_report yet, so every format answers
   # UnsupportedFormat and the reachable codes are 2 and 3. Exit 0 and 1
   # arrive end to end with the first handler.
   describe "conform" do
-    fixtures = File.join(__dir__, "..", "fixtures", "inspect")
-
-    workspace = lambda do |*names, &block|
-      Dir.mktmpdir do |dir|
-        names.each { |name, source| FileUtils.cp(File.join(fixtures, source), File.join(dir, name)) }
-        Dir.chdir(dir, &block)
-      end
-    end
-
-    def capture_stdout
-      previous = $stdout
-      $stdout = StringIO.new
-      yield
-      $stdout.string
-    ensure
-      $stdout = previous
-    end
-
-    def closed_stdout
-      reader, writer = IO.pipe
-      reader.close
-      previous = $stdout
-      $stdout = writer
-      yield
-    ensure
-      $stdout = previous
-      writer&.close
-    end
-
     # The failure is collected into an envelope rather than raised, so it
     # reaches the user through the command's own stderr line, not the
     # runner's exception reporting. Both halves: the code AND what it said.
@@ -768,6 +775,211 @@ RSpec.describe Claricle::Cli::Runner do
     it "stays silent on stderr under --json" do
       workspace.call(["a.png", "valid.png"]) do
         expect { described_class.run(%w[conform a.png --json], output: StringIO.new) }
+          .not_to output.to_stderr
+      end
+    end
+  end
+
+  # No handler implements convert yet either (item 04), so every real
+  # conversion answers UnsupportedFormat -- exit 3, same state `conform` is
+  # in. These specs are the command's own boundary/plumbing: argument
+  # validation, --to inference, the whole-batch destination preflight, and
+  # --force reaching Writer. The one thing no real fixture can prove --
+  # that a successful conversion's bytes reach stdout untouched -- is
+  # driven against a narrow instance_double standing in for the one
+  # delegate call (Image#convert) this milestone cannot exercise for real.
+  describe "convert" do
+    it "exits 2 when given neither a file nor a pattern" do
+      workspace.call do
+        expect(described_class.run(["convert"], output: StringIO.new)).to eq(2)
+        expect { described_class.run(["convert"], output: $stderr) }
+          .to output("claricle: no files given\n").to_stderr
+      end
+    end
+
+    it "exits 2 for a pattern that matched nothing" do
+      workspace.call do
+        expect(described_class.run(["convert", "--pattern", "none-*.png"], output: StringIO.new))
+          .to eq(2)
+      end
+    end
+
+    it "exits 2 when --output is given and more than one source matches" do
+      workspace.call(["a.png", "valid.png"], ["b.png", "valid.png"]) do
+        expect(described_class.run(%w[convert --pattern *.png --to svg --output out.svg],
+                                   output: StringIO.new)).to eq(2)
+        expect do
+          described_class.run(%w[convert --pattern *.png --to svg --output out.svg],
+                              output: $stderr)
+        end
+          .to output(/--output takes a single source; 2 files matched/).to_stderr
+      end
+    end
+
+    it "exits 2 when neither --to nor --output is given" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect(described_class.run(%w[convert a.png], output: StringIO.new)).to eq(2)
+        expect { described_class.run(%w[convert a.png], output: $stderr) }
+          .to output(/give --to, or an --output with a recognised format extension/).to_stderr
+      end
+    end
+
+    it "exits 2 for --output - with no --to, since there is no extension to infer from" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect(described_class.run(%w[convert a.png --output -], output: StringIO.new)).to eq(2)
+        expect { described_class.run(%w[convert a.png --output -], output: $stderr) }
+          .to output(/--output - needs --to; there is no extension to infer from/).to_stderr
+      end
+    end
+
+    it "exits 2 for an --output extension nothing recognises, with no --to" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect(described_class.run(%w[convert a.png --output out.bogus], output: StringIO.new))
+          .to eq(2)
+        expect { described_class.run(%w[convert a.png --output out.bogus], output: $stderr) }
+          .to output(/--output "out\.bogus" has no recognised format extension; give --to/).to_stderr
+      end
+    end
+
+    it "exits 2 when --to and --output's extension name different formats" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect(described_class.run(%w[convert a.png --to svg --output result.emf],
+                                   output: StringIO.new)).to eq(2)
+        expect do
+          described_class.run(%w[convert a.png --to svg --output result.emf],
+                              output: $stderr)
+        end
+          .to output(/--to svg conflicts with --output result\.emf \(looks like emf\)/).to_stderr
+      end
+    end
+
+    # `--to` is not given at all here, so this is the only end-to-end proof
+    # that a recognised `--output` extension actually resolves the target:
+    # UnsupportedFormat names the target it was asked to convert TO, so a
+    # wrong inference would print a different format in this message.
+    it "infers --to from a recognised --output extension" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect(described_class.run(%w[convert a.png --output out.svg], output: StringIO.new))
+          .to eq(3)
+        expect { described_class.run(%w[convert a.png --output out.svg], output: $stderr) }
+          .to output(/:png is not supported for convert to :svg/).to_stderr
+      end
+    end
+
+    it "exits 3 for a real conversion attempt, and says which format and target" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect(described_class.run(%w[convert a.png --to svg], output: StringIO.new)).to eq(3)
+        expect { described_class.run(%w[convert a.png --to svg], output: StringIO.new) }
+          .to output(/:png is not supported for convert to :svg/).to_stderr
+      end
+    end
+
+    # `--output` is given explicitly here, and given a DIFFERENT name than
+    # the source: with no `--output`, the derived destination for
+    # `a.eps --to eps` is `a.eps` itself, which Writer's own
+    # would-overwrite-an-input check refuses first (proven separately
+    # below) -- so an explicit, distinct `--output` is what actually
+    # reaches this check rather than the write-lifecycle one.
+    it "exits 2 when --to names the file's own already-detected format" do
+      workspace.call(["a.eps", "basic.eps"]) do
+        expect(described_class.run(%w[convert a.eps --to eps --output copy.eps],
+                                   output: StringIO.new)).to eq(2)
+        expect do
+          described_class.run(%w[convert a.eps --to eps --output copy.eps],
+                              output: StringIO.new)
+        end
+          .to output(/a\.eps is already eps; nothing to convert to/).to_stderr
+      end
+    end
+
+    # With no `--output`, `--to` equal to the source's own format derives a
+    # destination identical to the source itself. That destination already
+    # exists -- it IS the source -- so Writer's own file-exists preflight
+    # refuses it before `convert_one`'s dedicated same-format check, or even
+    # the overwrite-an-input check behind it, is ever reached. A
+    # *different* invocation error, same exit code, and it is the one a
+    # bare `--to <own format>` actually hits in practice.
+    it "exits 2 for --to naming the source's own format with no --output, via the file-exists check" do
+      workspace.call(["a.eps", "basic.eps"]) do
+        expect(described_class.run(%w[convert a.eps --to eps], output: StringIO.new)).to eq(2)
+        expect { described_class.run(%w[convert a.eps --to eps], output: $stderr) }
+          .to output(/output file exists.*a\.eps/).to_stderr
+      end
+    end
+
+    describe "--force" do
+      # The destination collides with a file that already exists, so this
+      # is the one end-to-end proof `--force` reaches the write lifecycle
+      # at all in this milestone -- without it, no real conversion ever
+      # gets far enough to ask Writer anything.
+      it "reaches the preflight collision check, not just the CLI flag" do
+        workspace.call(["a.png", "valid.png"]) do
+          File.write("a.svg", "already here")
+
+          expect(described_class.run(%w[convert a.png --to svg], output: StringIO.new)).to eq(2)
+          expect { described_class.run(%w[convert a.png --to svg], output: $stderr) }
+            .to output(/output file exists.*a\.svg/).to_stderr
+
+          expect(described_class.run(%w[convert a.png --to svg --force], output: StringIO.new))
+            .to eq(3)
+          expect { described_class.run(%w[convert a.png --to svg --force], output: StringIO.new) }
+            .to output(/:png is not supported for convert to :svg/).to_stderr
+        end
+      end
+    end
+
+    # Two real fixtures whose DERIVED destinations collide -- proves the
+    # whole-batch preflight runs before any file's conversion is attempted,
+    # not just before the write. If preflight ran per file instead of for
+    # the whole set up front, the first file would reach a real (failing)
+    # conversion attempt before the second file's collision was ever seen.
+    it "refuses the whole batch before any file is converted, on a derived-destination collision" do
+      workspace.call(["x.emf", "valid.emf"], ["x.eps", "basic.eps"]) do
+        expect(Claricle::Image).not_to receive(:from_path)
+
+        expect(described_class.run(%w[convert --pattern x.* --to svg], output: StringIO.new))
+          .to eq(2)
+        expect { described_class.run(%w[convert --pattern x.* --to svg], output: $stderr) }
+          .to output(/two outputs are the same file.*x\.svg.*x\.svg/).to_stderr
+      end
+    end
+
+    it "exits 2 for --output - with --json, without reaching Claricle.convert_batch" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect(Claricle).not_to receive(:convert_batch)
+
+        expect(described_class.run(%w[convert a.png --to svg --output - --json],
+                                   output: StringIO.new)).to eq(2)
+        expect do
+          described_class.run(%w[convert a.png --to svg --output - --json],
+                              output: $stderr)
+        end
+          .to output(/--json is not supported with --output -/).to_stderr
+      end
+    end
+
+    # 04-convert.md's own explicit ask for this step: "`--output -` spec
+    # asserts stdout carries bytes only, with no trailing newline." No
+    # handler completes a real conversion in this milestone, so this
+    # stands in for the one call (Image#convert) nothing else can drive --
+    # `instance_double` is verified against Image's real public interface,
+    # so a renamed or dropped method here fails this spec, not silently.
+    it "writes exactly the converted bytes to stdout, with no trailing newline" do
+      workspace.call(["a.png", "valid.png"]) do
+        fake = instance_double(Claricle::Image, format: :png, convert: "RAWBYTES")
+        allow(Claricle::Image).to receive(:from_path).with("a.png").and_return(fake)
+
+        expect { described_class.run(%w[convert a.png --to svg --output -], output: StringIO.new) }
+          .to output("RAWBYTES").to_stdout
+      end
+    end
+
+    it "puts nothing on stderr for a converted file written to stdout" do
+      workspace.call(["a.png", "valid.png"]) do
+        fake = instance_double(Claricle::Image, format: :png, convert: "RAWBYTES")
+        allow(Claricle::Image).to receive(:from_path).with("a.png").and_return(fake)
+
+        expect { described_class.run(%w[convert a.png --to svg --output -], output: StringIO.new) }
           .not_to output.to_stderr
       end
     end

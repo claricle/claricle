@@ -150,9 +150,7 @@ module Claricle
   # derive them one file at a time the way `conformance_batch` does.
   def self.convert_batch(*paths, to: nil, output: nil, force: false, pattern: nil)
     files = Batch.expand(paths, pattern)
-    if output && files.length > 1
-      raise InvocationError, "--output takes a single source; #{files.length} files matched"
-    end
+    raise InvocationError, "--output takes a single source; #{files.length} files matched" if output && files.length > 1
 
     target = resolved_convert_target(to: to, output: output)
     destinations = files.to_h { |file| [file, convert_destination(file, target: target, output: output)] }
@@ -171,9 +169,7 @@ module Claricle
 
   def self.convert_one(file, target:, destination:, writer:)
     image = Image.from_path(file)
-    if image.format == target
-      raise InvocationError, "#{file} is already #{target}; nothing to convert to"
-    end
+    raise InvocationError, "#{file} is already #{target}; nothing to convert to" if image.format == target
 
     # No handler implements `convert` yet (item 04), so this always raises
     # `UnsupportedFormat` today -- exit 3, the same state `conform` is in.
@@ -233,6 +229,6 @@ module Claricle
   end
 
   private_class_method :accumulate, :conclusive?, :conformant?, :checked_profile,
-                        :convert_one, :resolved_convert_target, :check_to_output_conflict,
-                        :convert_extension_format, :convert_destination
+                       :convert_one, :resolved_convert_target, :check_to_output_conflict,
+                       :convert_extension_format, :convert_destination
 end
