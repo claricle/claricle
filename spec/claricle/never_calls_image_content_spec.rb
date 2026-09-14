@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "../support/inspect_fixture"
+
 # Handed a PATH-BORN image, no handler calls `Image#content`, and none
 # leaves bytes in that image's `@content`.
 #
@@ -20,45 +22,45 @@
 # and svg bring a good file only -- no FAILING file exists for them,
 # because their handlers answer "ok" for every byte string the detector
 # accepts as that format.
-registry = Claricle.const_get(:Registry)
-
-# Only the formats whose handler implements inspect. A convert-only
-# handler would otherwise fail here for the wrong reason.
-inspectable = registry.formats.select do |format|
-  registry.capabilities_for(format).include?(:inspect)
-end
-
-# format => fixture file => the parse status that file must produce.
-samples = {
-  # The pdf pair was BUILT rather than found, because the PDF handler that
-  # arrived with it builds its own inputs at runtime and left no fixture
-  # behind. Reproduce them with #12's own builder, so nobody has to guess
-  # what these bytes are:
-  #
-  #   require_relative "spec/support/pdf_builder"
-  #   FileUtils.cp(PdfBuilder.path, "spec/fixtures/inspect/valid.pdf")
-  #   File.binwrite("spec/fixtures/inspect/no_trailer.pdf",
-  #                 File.binread(PdfBuilder.path)[0, 60])
-  #
-  # 60 bytes lands mid-way through the object list -- 51 bytes PAST the
-  # 9-byte header, and well before the xref at 162 or the trailer at 251.
-  # The cut is deliberate rather than convenient: sweeping every truncation
-  # point of this document, bytes 9 through 297 all report no trailer and
-  # inspect "failed", and only 298 onward parse. That is a 288-byte-wide
-  # band, so 60 is nowhere near an edge a pdfrb release could move -- it
-  # would take pdfrb inventing a trailer the bytes never contain.
-  pdf: { "valid.pdf" => "ok", "no_trailer.pdf" => "failed" },
-  png: { "valid.png" => "ok", "short_ihdr.png" => "failed" },
-  emf: { "valid.emf" => "ok", "truncated_44.emf" => "failed" },
-  eps: { "basic.eps" => "ok" },
-  ps: { "bare.ps" => "ok" },
-  svg: { "valid.svg" => "ok" }
-}.freeze
-
 RSpec.describe "Handlers inspect path-born samples without calling Image#content" do
-  def fixture(name)
-    File.join(__dir__, "..", "fixtures", "inspect", name)
+  # Local variables, not `let`: `samples.each` below builds the example
+  # tree once, when this file loads, before any example runs. `let` is
+  # lazy per-example and cannot generate examples at that time -- only
+  # values used INSIDE an `it` block could safely be `let` instead.
+  registry = Claricle.const_get(:Registry)
+
+  # Only the formats whose handler implements inspect. A convert-only
+  # handler would otherwise fail here for the wrong reason.
+  inspectable = registry.formats.select do |format|
+    registry.capabilities_for(format).include?(:inspect)
   end
+
+  # format => fixture file => the parse status that file must produce.
+  samples = {
+    # The pdf pair was BUILT rather than found, because the PDF handler that
+    # arrived with it builds its own inputs at runtime and left no fixture
+    # behind. Reproduce them with #12's own builder, so nobody has to guess
+    # what these bytes are:
+    #
+    #   require_relative "spec/support/pdf_builder"
+    #   FileUtils.cp(PdfBuilder.path, "spec/fixtures/inspect/valid.pdf")
+    #   File.binwrite("spec/fixtures/inspect/no_trailer.pdf",
+    #                 File.binread(PdfBuilder.path)[0, 60])
+    #
+    # 60 bytes lands mid-way through the object list -- 51 bytes PAST the
+    # 9-byte header, and well before the xref at 162 or the trailer at 251.
+    # The cut is deliberate rather than convenient: sweeping every truncation
+    # point of this document, bytes 9 through 297 all report no trailer and
+    # inspect "failed", and only 298 onward parse. That is a 288-byte-wide
+    # band, so 60 is nowhere near an edge a pdfrb release could move -- it
+    # would take pdfrb inventing a trailer the bytes never contain.
+    pdf: { "valid.pdf" => "ok", "no_trailer.pdf" => "failed" },
+    png: { "valid.png" => "ok", "short_ihdr.png" => "failed" },
+    emf: { "valid.emf" => "ok", "truncated_44.emf" => "failed" },
+    eps: { "basic.eps" => "ok" },
+    ps: { "bare.ps" => "ok" },
+    svg: { "valid.svg" => "ok" }
+  }.freeze
 
   # Both directions: a format added to the registry with no sample here
   # fails, and a sample that outlives its format fails too.
@@ -69,7 +71,7 @@ RSpec.describe "Handlers inspect path-born samples without calling Image#content
   samples.each do |format, files|
     files.each do |name, parse_status|
       it "inspects path-born #{name} without calling Image#content" do
-        image = Claricle::Image.from_path(fixture(name))
+        image = Claricle::Image.from_path(InspectFixture.path(name))
         # Every Image, not only this one: a handler that dups the image
         # and slurps the copy would leave this receiver untouched.
         expect_any_instance_of(Claricle::Image).not_to receive(:content)
