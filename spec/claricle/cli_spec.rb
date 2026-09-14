@@ -586,22 +586,24 @@ RSpec.describe Claricle::Cli::Runner do
 
     # The command must not advertise an operation a handler has not
     # implemented. Asserting the whole line, because "prints no conform"
-    # would also pass if the command printed nothing at all. emf is the
-    # only format with a real convert edge so far (item 04); every other
-    # format stays inspect-only.
+    # would also pass if the command printed nothing at all. emf and svg
+    # are the two formats with a real convert edge so far (item 04); every
+    # other format stays inspect-only.
     it "does not claim conform, and claims convert only where a handler implements it" do
       expect { described_class.run(["formats"]) }
         .to output("emf\tinspect, convert\neps\tinspect\npng\tinspect\n" \
-                   "ps\tinspect\nsvg\tinspect\n").to_stdout
+                   "ps\tinspect\nsvg\tinspect, convert\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
-      other = %w[eps png ps svg].map do |format|
+      other = %w[eps png ps].map do |format|
         %({"format":"#{format}","inspect":true,"conform":false,"convert":false,"convert_to":[]})
       end
       emf = %({"format":"emf","inspect":true,"conform":false,"convert":true,) +
             %("convert_to":["svg","eps","ps"]})
-      expected = "[#{([emf] + other).join(",")}]\n"
+      svg = %({"format":"svg","inspect":true,"conform":false,"convert":true,) +
+            %("convert_to":["eps","ps"]})
+      expected = "[#{([emf] + other + [svg]).join(",")}]\n"
 
       expect { described_class.run(["formats", "--json"]) }.to output(expected).to_stdout
     end

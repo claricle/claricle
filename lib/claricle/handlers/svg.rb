@@ -1,9 +1,30 @@
 # frozen_string_literal: true
 
+require "vectory"
+require "postsvg"
+
 require_relative "base"
 require_relative "../detector"
 require_relative "../models/inspection"
 require_relative "../models/issue"
+require_relative "../models/conversion"
+require_relative "../lossiness"
+
+# `Postsvg::Model::UnknownOperator` (postsvg-0.3.0, model/operators.rb:59) is
+# declared via a WRONG-FILE autoload -- model.rb:13 points at the singular
+# model/operator.rb, where the class does not live. Measured: a genuinely
+# fresh process raises `NameError` converting any SVG whose rendered output
+# needs it (embedded_raster.svg, both to_eps and to_ps), and it stops
+# reproducing forever once anything else in the process has gone through the
+# same path first -- an ordinary autoload race, not input-dependent.
+# `Operators.load_all!` (model/operators.rb:49-53, public, documented "force-
+# load every operator category... call this once") forces the whole registry
+# to populate up front, closing the race. Every real CLI invocation is cold,
+# so this runs once, here, at require time -- not lazily inside `#convert`,
+# and not left to warm by accident the way metafile.rb's identical exposure
+# is (that file's own scope, not fixed here). Costs ~0.008s, measured
+# idempotent.
+Postsvg::Model::Operators.load_all!
 
 module Claricle
   module Handlers
@@ -31,6 +52,18 @@ module Claricle
     # has to be parsed.
     class Svg < Base
       formats :svg
+      convert_to :eps, :ps
+
+      # Symbol -> the vectory method it dispatches to, matching
+      # Handlers::Metafile's own TARGET_METHODS convention for the same job.
+      CONVERT_TARGET_METHODS = { eps: :to_eps, ps: :to_ps }.freeze
+
+      # Matches Handlers::Metafile's own MAX_CONVERT_BYTES: bound the READ
+      # itself, not the bytesize checked after the fact -- #content and
+      # #bytesize are different filesystem calls for a path-born image, so a
+      # stat-then-read check still materialises an oversized file before
+      # refusing it.
+      MAX_CONVERT_BYTES = 200 * 1024 * 1024
 
       # CSS absolute lengths, all defined against 1in = 96px. Computed
       # from that anchor rather than copied: 72pt, 6pc and 1in all come
@@ -68,7 +101,15 @@ module Claricle
       ISSUE_MESSAGE = "SVG root element could not be read"
 
       private_constant :PX_PER_INCH, :ABSOLUTE_UNITS, :NUMBER, :XML_SPACE, :DIMENSION,
-                       :ISSUE_CODE, :ISSUE_MESSAGE
+                       :ISSUE_CODE, :ISSUE_MESSAGE, :CONVERT_TARGET_METHODS, :MAX_CONVERT_BYTES
+
+      def convert(image, to:)
+        raise UnsupportedFormat.new(image.format, :convert, target: to) unless self.class.convert_targets.include?(to)
+
+        content = bounded_content(image)
+        converted = convert_content(content, to)
+        build_conversion(image, to, content, converted)
+      end
 
       def inspection(image)
         # Detector.read_root, not a second reader: it owns the 8192-byte
@@ -86,6 +127,61 @@ module Claricle
       end
 
       private
+
+      # Bounds the READ itself rather than trusting a stat taken on a
+      # separate filesystem call -- the same reasoning as MetafileConvert's
+      # own `bounded_content` (metafile.rb). Reading MAX_CONVERT_BYTES + 1
+      # and getting that many back is the proof the stream is over the
+      # limit whatever a stat would have said.
+      def bounded_content(image)
+        content = image.with_source { |source| bounded_read(source, MAX_CONVERT_BYTES + 1) }
+        return content if content.bytesize <= MAX_CONVERT_BYTES
+
+        raise ConversionError, "svg image exceeds the #{MAX_CONVERT_BYTES}-byte convert limit"
+      end
+
+      # Near-verbatim copy of MetafileConvert#bounded_read (metafile.rb) --
+      # kept as its own small copy rather than a shared Handlers::Base
+      # helper: metafile.rb belongs to a separate, independently-mergeable,
+      # already-approved PR, and editing it here to extract a shared helper
+      # would be cross-PR coupling into a diff this branch doesn't own.
+      def bounded_read(source, length)
+        return source.read(length) || "".b if source.respond_to?(:read)
+
+        source.byteslice(0, length)
+      end
+
+      # Scoped to only the delegate call, not `build_conversion` below --
+      # that method's own Lossiness.classify/Models::Conversion.new are
+      # this file's local logic, not the delegate chain this rescue exists
+      # to cover.
+      #
+      # NOT an exhaustive list of what the delegate chain can raise --
+      # `rescue StandardError` mirrors Handlers::Metafile's own documented
+      # deviation (metafile.rb) rather than a narrower explicit-class list.
+      # `utf16_gradient.svg` is a real, permanent input-shape failure
+      # (Vectory::ParsingError) with no equivalent fix; the cold-process
+      # `Postsvg::Model::UnknownOperator` NameError this same rescue used to
+      # exist for is fixed outright above, at file-load time.
+      def convert_content(content, to)
+        ::Vectory::Svg.from_content(content).public_send(CONVERT_TARGET_METHODS.fetch(to))
+      rescue StandardError => e
+        raise ConversionError, "#{e.class}: #{e.message}"
+      end
+
+      # `output_path` is deliberately absent here -- the caller
+      # (Claricle.convert_one) does not know the real written path until
+      # after Writer#write runs, and Models::Base seals (and therefore
+      # freezes) every instance at construction.
+      def build_conversion(image, to, content, converted)
+        Models::Conversion.new(
+          source_path: image.path,
+          source_format: image.format.to_s,
+          target_format: to.to_s,
+          lossiness: Lossiness.classify(source_format: image.format, target_format: to, source: content),
+          content: converted.content
+        )
+      end
 
       def readable(image, attributes)
         Models::Inspection.new(

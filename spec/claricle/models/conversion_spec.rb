@@ -165,8 +165,10 @@ RSpec.describe "conversion lossiness" do
   end
 
   describe "the classifier" do
+    # :png, not :ps -- this slice adds a real RULES[:ps] entry, so :ps no
+    # longer proves "no measured rule set"; :png still has none.
     it "never calls a target with no measured rule set lossless" do
-      expect(classify("rect_and_line", to: :ps)).to eq("unknown")
+      expect(classify("rect_and_line", to: :png)).to eq("unknown")
     end
 
     it "never calls a source format it cannot inspect lossless" do
@@ -186,17 +188,18 @@ RSpec.describe "conversion lossiness" do
       end
     end
 
-    # Widened from the three fixtures above to every committed fixture, both
-    # targets -- 132 pairs. The three-fixture version stayed green while
-    # `d471aa9` made a File source raise on 7 fixtures the String source
-    # classified `unknown` for: none of DOCTYPE-bearing or UTF-16 fixtures
-    # this regression needs was among the three it checked. This is the
-    # check that must catch the next one, not just this one.
+    # Widened from the three fixtures above to every committed fixture, all
+    # three targets -- 198 pairs (66 fixtures x eps/ps/emf). The
+    # three-fixture version stayed green while `d471aa9` made a File source
+    # raise on 7 fixtures the String source classified `unknown` for: none
+    # of DOCTYPE-bearing or UTF-16 fixtures this regression needs was among
+    # the three it checked. This is the check that must catch the next
+    # one, not just this one.
     it "agrees between String and File source across every fixture and target" do
       names = Dir[File.join(fixtures, "*.svg")].map { |path| File.basename(path, ".svg") }
       disagreements = []
       names.each do |name|
-        %i[eps emf].each do |target|
+        %i[eps ps emf].each do |target|
           string_verdict = begin
             classify(name, to: target)
           rescue StandardError => e
@@ -223,7 +226,7 @@ RSpec.describe "conversion lossiness" do
     it "classifies a File source unknown, not a raise, on DOCTYPE and UTF-16 fixtures" do
       %w[attlist_default_opacity entity_bomb entity_gradient external_entity_ref
          public_doctype_attlist system_dtd_rect utf16_gradient].each do |name|
-        %i[eps emf].each do |target|
+        %i[eps ps emf].each do |target|
           expect(classify_io(name, to: target)).to eq("unknown"),
                                                    "#{name} -> #{target} via File should classify unknown, not raise"
         end
@@ -232,16 +235,20 @@ RSpec.describe "conversion lossiness" do
 
     it "calls a document lossless only when every feature present is proven kept" do
       expect(classify("rect_and_line")).to eq("lossless")
+      expect(classify("rect_and_line", to: :ps)).to eq("lossless")
       expect(classify("rect_and_line", to: :emf)).to eq("lossless")
     end
 
+    # ps mirrors eps exactly -- postsvg-0.3.0's `to_eps` is `to_ps(eps:
+    # true)`, one rendering pipeline, so RULES[:ps] is the same table as
+    # RULES[:eps] and every eps figure gets a ps counterpart here.
     it "classifies each measured loss against its measured target" do
       table = {
-        %w[gradient_linear] => { eps: "lossy", emf: "lossy" },
-        %w[gradient_radial] => { eps: "lossy", emf: "lossy" },
-        %w[clip_path_element] => { eps: "lossy", emf: "lossy" },
-        %w[clip_path_attribute] => { eps: "lossy", emf: "lossy" },
-        %w[embedded_raster] => { eps: "lossy", emf: "unknown" }
+        %w[gradient_linear] => { eps: "lossy", ps: "lossy", emf: "lossy" },
+        %w[gradient_radial] => { eps: "lossy", ps: "lossy", emf: "lossy" },
+        %w[clip_path_element] => { eps: "lossy", ps: "lossy", emf: "lossy" },
+        %w[clip_path_attribute] => { eps: "lossy", ps: "lossy", emf: "lossy" },
+        %w[embedded_raster] => { eps: "lossy", ps: "lossy", emf: "unknown" }
       }
       table.each do |(name), targets|
         targets.each do |target, want|
@@ -261,6 +268,7 @@ RSpec.describe "conversion lossiness" do
     it "never waves through an element nobody has measured" do
       %w[text_rect_line path_and_rect].each do |name|
         expect(classify(name)).to eq("unknown"), "#{name} -> eps"
+        expect(classify(name, to: :ps)).to eq("unknown"), "#{name} -> ps"
         expect(classify(name, to: :emf)).to eq("unknown"), "#{name} -> emf"
       end
     end
@@ -690,12 +698,14 @@ RSpec.describe "conversion lossiness" do
     # "lossless" satisfies.
     it "never calls a document of only unmeasured elements lossless" do
       expect(classify("text")).to eq("unknown")
+      expect(classify("text", to: :ps)).to eq("unknown")
       expect(classify("text", to: :emf)).to eq("unknown")
     end
 
     it "pins every rule table against silent growth" do
       expect(lossiness::RULES).to eq(
         eps: { lost: %i[gradient clip_path embedded_raster], kept: %i[basic_shape] },
+        ps: { lost: %i[gradient clip_path embedded_raster], kept: %i[basic_shape] },
         emf: { lost: %i[gradient clip_path], kept: %i[basic_shape] }
       )
       expect(lossiness::ELEMENTS).to eq(
@@ -745,6 +755,7 @@ RSpec.describe "conversion lossiness" do
 
     it "never waves through an attribute nobody has proven harmless" do
       expect(classify("opacity_rect")).to eq("unknown")
+      expect(classify("opacity_rect", to: :ps)).to eq("unknown")
       expect(classify("opacity_rect", to: :emf)).to eq("unknown")
     end
 
