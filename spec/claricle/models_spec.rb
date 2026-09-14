@@ -1691,6 +1691,29 @@ RSpec.describe Claricle::Models do
       expect(reloaded.result.issues.map(&:message)).to eq(["m"])
     end
 
+    # `result` widened from a plain `Report` to a `[Report, Conversion]`
+    # union for item 04. This is the direction that must work: a
+    # Conversion-shaped document comes back as a Conversion, not silently
+    # as `nil` (the `cast_union`/`match&.last` gap documented on the
+    # attribute) or misrouted to Report (the two are disjoint on mapped
+    # field names -- `source_format`/`target_format` are not among
+    # Report's, and `format`/`issues`/`valid` are not among Conversion's).
+    # The existing Report round trip above is the other half of that same
+    # disjointness claim and is asserted UNMODIFIED.
+    it "carries a nested conversion through a round trip, distinct from a report" do
+      item = models::BatchItem.new(
+        path: "a.emf", exit_code: 0,
+        result: models::Conversion.new(source_path: "a.emf", source_format: "emf",
+                                       target_format: "svg", lossiness: "unknown",
+                                       output_path: "a.svg")
+      )
+      reloaded = models::BatchItem.from_json(item.to_json)
+
+      expect(reloaded.result).to be_a(models::Conversion)
+      expect([reloaded.result.target_format, reloaded.result.output_path,
+              reloaded.result.lossiness]).to eq(["svg", "a.svg", "unknown"])
+    end
+
     it "carries a nested error through a round trip" do
       item = models::BatchItem.new(path: "a.png", exit_code: 3,
                                    error: failure.call(message: "no signature"))

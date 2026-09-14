@@ -1177,6 +1177,183 @@ RSpec.describe "Claricle metafile handler" do
     end
   end
 
+  # The one real edge family item 04 wires: emf -> svg/eps/ps through
+  # vectory. Separate fixture directory from `fixture` above -- this is
+  # the one file the plan card names for the conversion path, not the
+  # inspection corpus.
+  describe "#convert" do
+    def convert_fixture
+      File.join(__dir__, "..", "..", "fixtures", "convert", "rect_and_line.emf")
+    end
+
+    def convert_image
+      Claricle::Image.from_path(convert_fixture)
+    end
+
+    # Measured once against the real fixture, not guessed: without these,
+    # swapping TARGET_METHODS (e.g. mapping :svg to :to_eps) leaves every
+    # example in this loop green, because none of them looked at the
+    # bytes themselves -- only that they were non-empty and labelled
+    # correctly (spec-auditor's High, this task).
+    def content_marker_for(target)
+      {
+        svg: '<svg xmlns="http://www.w3.org/2000/svg" ',
+        eps: "%!PS-Adobe-3.0 EPSF-3.0\n%%Creator: Posts",
+        ps: "%!PS-Adobe-3.0\n%%Creator: Postsvg 0.3.0\n"
+      }.fetch(target)
+    end
+
+    %i[svg eps ps].each do |target|
+      it "converts to #{target}" do
+        conversion = handler.convert(convert_image, to: target)
+
+        expect(conversion).to be_a(Claricle::Models::Conversion)
+        expect(conversion.content).not_to be_empty
+        expect(conversion).to have_attributes(
+          source_format: "emf",
+          target_format: target.to_s
+        )
+        expect(conversion.content).to start_with(content_marker_for(target))
+      end
+    end
+
+    # eps and ps share the "%!PS-Adobe-3.0" prefix. The per-target marker
+    # assertions in the loop above already disambiguate them -- eps's own
+    # marker includes " EPSF-3.0", ps's does not -- so this example is
+    # redundant with that coverage (Codex's Low, this task's diff). Kept
+    # anyway, belt-and-suspenders: it names the exact ambiguity (the
+    # shared prefix) directly, rather than leaving it implicit in two
+    # markers that happen to differ.
+    it "does not confuse ps output for eps, despite the shared PS-Adobe prefix" do
+      ps_content = handler.convert(convert_image, to: :ps).content
+
+      expect(ps_content).not_to start_with("%!PS-Adobe-3.0 EPSF")
+    end
+
+    it "produces distinct bytes per target" do
+      outputs = %i[svg eps ps].map { |target| handler.convert(convert_image, to: target).content }
+
+      expect(outputs.uniq.length).to eq(3)
+    end
+
+    it "carries the source path through" do
+      conversion = handler.convert(convert_image, to: :svg)
+
+      expect(conversion.source_path).to eq(convert_fixture)
+    end
+
+    # D23/Lossiness: only an svg SOURCE can be classified more precisely
+    # than "unknown", and this handler's source is always emf.
+    it "classifies lossiness as unknown for every target, because the source is never svg" do
+      %i[svg eps ps].each do |target|
+        expect(handler.convert(convert_image, to: target).lossiness).to eq("unknown")
+      end
+    end
+
+    # The caller (Claricle.convert_one) does not know the real written
+    # path until after Writer#write runs -- see the comment on `#convert`
+    # itself.
+    it "leaves output_path nil, for the caller to fill in once written" do
+      conversion = handler.convert(convert_image, to: :svg)
+
+      expect(conversion.output_path).to be_nil
+    end
+
+    it "refuses a target it does not declare" do
+      expect { handler.convert(convert_image, to: :png) }
+        .to raise_error(Claricle::UnsupportedFormat, /:emf is not supported for convert to :png/)
+    end
+
+    it "wraps a delegate parse failure as ConversionError, through the real chain" do
+      garbage = Claricle::Image.from_content("\x00" * 100, format: :emf)
+
+      expect { handler.convert(garbage, to: :svg) }
+        .to raise_error(Claricle::ConversionError, /unrecognised format/)
+    end
+
+    # Regression for dependency-contract-check's F1: a single-byte-corrupted
+    # CreatePen record raises emfsvg's own IndexError deep in its object
+    # table (object_table.rb), which the original four-class FAILURES list
+    # (Vectory::Error, Emf::Error, Emfsvg::Error, Postsvg::Error) did not
+    # cover -- it escaped #convert unwrapped. Byte 96 was found by fuzzing
+    # the real fixture for the smallest single-byte flip that reaches this
+    # exact exception class; it is not a documented offset of the format.
+    it "wraps a single-byte-corrupted record as ConversionError, not a raw IndexError" do
+      corrupted = File.binread(convert_fixture)
+      corrupted.setbyte(96, 0)
+      image = Claricle::Image.from_content(corrupted, format: :emf)
+
+      expect { handler.convert(image, to: :svg) }
+        .to raise_error(Claricle::ConversionError, /IndexError/)
+    end
+
+    # Regression for dependency-contract-check's F2 (also found
+    # independently by execution-diff): a truncated real fixture makes
+    # bindata (via the emf gem's own parser) raise IOError, which the
+    # same FAILURES list did not cover either. 351 of 364 bytes was found
+    # by truncating the real fixture byte by byte until this exact
+    # exception class appeared; a few bytes shorter raises EOFError
+    # instead, from the same underlying defect.
+    it "wraps a truncated real fixture as ConversionError, not a raw IOError" do
+      truncated = File.binread(convert_fixture)[0, 351]
+      image = Claricle::Image.from_content(truncated, format: :emf)
+
+      expect { handler.convert(image, to: :svg) }
+        .to raise_error(Claricle::ConversionError, /IOError/)
+    end
+
+    # F3 (a genuine postsvg 0.3.0 autoload bug, NameError: uninitialized
+    # constant Postsvg::Model::UnknownOperator) is real and reachable
+    # through any EMF whose rendered SVG embeds a raster image, but
+    # building a fixture that actually exercises the raster-embedding
+    # path is out of proportion to this regression suite -- it is left
+    # covered only by the broadened `rescue StandardError` below (which
+    # is proven, in general, to catch NameError, just not with a fixture
+    # that reaches this exact one), and named here so it is not silently
+    # dropped.
+
+    # multi-agent-review's Medium: reading the whole file into memory
+    # before any bound was checked, unlike this file's own SCAN_LIMIT
+    # convention for inspection. stub_const keeps the test fast --
+    # crossing the real 200MiB limit needs no real 200MiB file, only a
+    # limit small enough for an ordinary string to exceed it.
+    it "refuses content over the convert byte limit before reaching the delegate" do
+      stub_const("Claricle::Handlers::MetafileConvert::MAX_CONVERT_BYTES", 10)
+      oversized = Claricle::Image.from_content("x" * 11, format: :emf)
+
+      expect { handler.convert(oversized, to: :svg) }
+        .to raise_error(Claricle::ConversionError, /exceeds the 10-byte convert limit/)
+    ensure
+      Claricle.const_get(:Handlers).const_get(:MetafileConvert)
+              .send(:private_constant, :MAX_CONVERT_BYTES)
+    end
+
+    # Codex's Medium: the cap has to bound the READ, not just the
+    # delegate call. A content-born image is already fully in memory
+    # before #convert ever runs, so only a path-backed image -- one
+    # whose bytes are not yet read at all -- can prove the fix: without
+    # `bounded_content`'s bounded `#read`, this would go through
+    # `image.content`'s unconditional `File.binread` and materialise the
+    # whole file before the limit could refuse it. `@content` staying
+    # nil afterward is the proof that never happened.
+    it "refuses a path-backed file over the convert byte limit without reading it whole" do
+      stub_const("Claricle::Handlers::MetafileConvert::MAX_CONVERT_BYTES", 10)
+      Tempfile.create(["oversized", ".emf"]) do |file|
+        file.binmode
+        file.write("x" * 11)
+        file.flush
+        image = Claricle::Image.new(format: :emf, path: file.path)
+
+        expect { handler.convert(image, to: :svg) }
+          .to raise_error(Claricle::ConversionError, /10-byte convert limit/)
+        expect(image.instance_variable_get(:@content)).to be_nil
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:MetafileConvert)
+              .send(:private_constant, :MAX_CONVERT_BYTES)
+    end
+  end
+
   it "loads alone and runs an inspection" do
     script = <<~RUBY
       require "claricle/handlers/metafile"

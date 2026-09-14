@@ -1,10 +1,13 @@
 # frozen_string_literal: true
 
 require "emf"
+require "vectory"
 
 require_relative "base"
 require_relative "../models/inspection"
 require_relative "../models/issue"
+require_relative "../models/conversion"
+require_relative "../lossiness"
 
 module Claricle
   module Handlers
@@ -215,11 +218,137 @@ module Claricle
 
     private_constant :EmfPlus
 
+    # The conversion path's own two pieces, kept out of Metafile's body
+    # for the same reason EmfPlus is: this class already carries the
+    # whole header-parse contract, and conversion is a second, unrelated
+    # concern layered on top of it. `module_function` rather than a class
+    # with instance methods -- there is no state to hold between calls.
+    module MetafileConvert
+      # Symbol -> the vectory method it dispatches to. A lookup table
+      # rather than `public_send(:"to_#{to}")`: `to` is already checked
+      # against `convert_targets` before this runs, so nothing
+      # attacker-controlled reaches `public_send` either way, but a
+      # closed table is what a third target (a future `:png` once
+      # vectory gains one) would have to be added to, rather than
+      # trusting every future target's symbol to spell a real
+      # `Vectory::Emf` method.
+      TARGET_METHODS = { svg: :to_svg, eps: :to_eps, ps: :to_ps }.freeze
+
+      # Matches Metafile's own `SCAN_LIMIT` (below) and the underlying
+      # `emf` gem's own `Emf::Emr::Parser::MAX_INPUT_BYTES` -- kept as a
+      # separate constant, not a reference to `Metafile::SCAN_LIMIT`,
+      # because that one is `private_constant` and declared later in this
+      # file. Checked before the delegate ever sees the content: the
+      # gem's own limit runs on `bytesize` *after* the whole file is
+      # already a Ruby String, so refusing here is what actually stops
+      # the parse/render cost from growing on an oversized input --
+      # measured, a 364-byte corrupted EMF was still climbing past 1.2GB
+      # RSS with no cap at all.
+      MAX_CONVERT_BYTES = 200 * 1024 * 1024
+
+      # NOT an exhaustive list of what the delegate chain can raise --
+      # measured otherwise. Originally listed as four explicit classes,
+      # matching the house convention (`PARSE_FAILURES` below,
+      # postscript.rb's `Postscript::ParseError` rescue, png.rb's
+      # `PngConform::Error` rescue). A fuzz of the real fixture found
+      # three real, reachable exceptions outside that list: `IndexError`
+      # from `emfsvg`'s object table on a corrupted CreatePen record,
+      # `IOError`/`EOFError` from `bindata` on a truncated stream, and a
+      # `NameError` that is a genuine bug in `postsvg` 0.3.0's own
+      # autoload (`Postsvg::Model::UnknownOperator` is declared in the
+      # singular `operator.rb`, defined in the plural `operators.rb`),
+      # reachable through any EMF whose rendered SVG embeds a raster
+      # image. None of the three is a defect in THIS file, and this
+      # method's body calls nothing but the delegate chain, so there is
+      # no local bug a wider rescue would hide. Logged as a deviation
+      # from the house convention above -- see
+      # `deviations.md` under this task's entry.
+      module_function
+
+      def run(image, to:, convert_targets:)
+        raise UnsupportedFormat.new(image.format, :convert, target: to) unless convert_targets.include?(to)
+
+        content = bounded_content(image)
+        converted = convert_content(content, to)
+        build(image, to, content, converted)
+      end
+
+      # Bounds the READ itself rather than trusting a stat taken on a
+      # separate filesystem call -- the same reasoning as `Metafile`'s own
+      # `header_prefix` below, and for the same failure mode: `#bytesize`
+      # and `#content` are two different filesystem operations for a
+      # path-born image, so checking a stat first and only THEN calling
+      # `#content` still materialises the whole, oversized file in memory
+      # before the check can refuse it. Reading MAX_CONVERT_BYTES + 1 and
+      # getting that many back is the proof the stream is over the limit
+      # whatever a stat would have said; getting fewer proves these bytes
+      # ARE the whole stream -- which, unlike inspection's own header-only
+      # prefix, is also the entire content a within-limit conversion needs.
+      def bounded_content(image)
+        content = image.with_source { |source| bounded_read(source, MAX_CONVERT_BYTES + 1) }
+        return content if content.bytesize <= MAX_CONVERT_BYTES
+
+        raise ConversionError, "emf image exceeds the #{MAX_CONVERT_BYTES}-byte convert limit"
+      end
+
+      # Duplicated from `Metafile`'s own private `#bounded_read` rather
+      # than shared across the module boundary: both are three-line pure
+      # functions with no state, and `Metafile`'s copy is a `private`
+      # instance method, reachable only through an instance this
+      # `module_function` module has no reason to hold.
+      def bounded_read(source, length)
+        return source.read(length) || "".b if source.respond_to?(:read)
+
+        source.byteslice(0, length)
+      end
+
+      # Scoped to only the delegate calls, not `build` below -- `build`'s
+      # own `Lossiness.classify`/`Models::Conversion.new` are this file's
+      # local logic, not the delegate chain `rescue StandardError` exists
+      # to cover, so a bug inside `build` surfaces as itself rather than
+      # being relabelled a conversion failure.
+      def convert_content(content, to)
+        ::Vectory::Emf.from_content(content).public_send(TARGET_METHODS.fetch(to))
+      rescue StandardError => e
+        raise ConversionError, "#{e.class}: #{e.message}"
+      end
+
+      # `output_path` is deliberately absent here -- the caller
+      # (`Claricle.convert_one`) does not know the real written path
+      # until after `Writer#write` runs, and `Models::Base` seals (and
+      # therefore freezes) every instance at construction, so it cannot
+      # be set on this instance afterward. The caller builds its own
+      # final `Models::Conversion` once the path is known, copying every
+      # field asserted here.
+      #
+      # Takes `content` rather than re-reading `image.content` -- the
+      # bytes `run` already read via `#bounded_content` are already the
+      # right ones (bounded, and the full stream for anything under the
+      # limit), and calling `image.content` here would silently re-read
+      # the whole file a second time for a path-born image, unbounded.
+      def build(image, to, content, converted)
+        Models::Conversion.new(
+          source_path: image.path,
+          source_format: image.format.to_s,
+          target_format: to.to_s,
+          lossiness: Lossiness.classify(source_format: image.format, target_format: to, source: content),
+          content: converted.content
+        )
+      end
+    end
+
+    private_constant :MetafileConvert
+
     # Reads an EMF header. WMF is deliberately absent: the released emf
     # parser reports "WMF parser not yet implemented" (D14), so nothing
     # registers `:wmf` and it reaches exit 3 through the registry.
     class Metafile < Base
       formats :emf
+      # png and pdf have no vectory class (04-convert.md); :emf itself is
+      # not a target -- Base's same-format guard in `Claricle.convert_one`
+      # already refuses that before any handler is reached, and
+      # `Vectory::Emf` has no `#to_emf` to route it to regardless.
+      convert_to :svg, :eps, :ps
 
       # EMR_HEADER's declared size, a 4-byte little-endian value at a
       # fixed offset. Below the minimum there is no header to read.
@@ -250,11 +379,7 @@ module Claricle
       # refuses only the full stream.
       SCAN_LIMIT = 200 * 1024 * 1024
 
-      ISSUE_CODE = "emf.header_unreadable"
-      ISSUE_MESSAGE = "EMF header could not be read"
-
-      private_constant :SIZE_OFFSET, :MINIMUM_HEADER, :ALIGNMENT, :MILLIMETRES_PER_INCH,
-                       :PARSE_FAILURES, :SCAN_LIMIT, :ISSUE_CODE, :ISSUE_MESSAGE
+      private_constant :SIZE_OFFSET, :MINIMUM_HEADER, :ALIGNMENT, :MILLIMETRES_PER_INCH, :PARSE_FAILURES, :SCAN_LIMIT
 
       # The header is parsed by the delegate; the EMF+ marker is found by
       # walking the record framing here. The delegate is not asked for the
@@ -282,6 +407,11 @@ module Claricle
 
         readable(image, header, emf_plus_bytes(prefix, oversized, declared))
       end
+
+      # The target guard, the delegate call and the `Models::Conversion`
+      # it builds all live in `MetafileConvert` above -- see its `build`
+      # for why `output_path` is absent from the result.
+      def convert(image, to:) = MetafileConvert.run(image, to: to, convert_targets: self.class.convert_targets)
 
       private
 
@@ -431,8 +561,8 @@ module Claricle
         Models::Inspection.new(
           format: image.format.to_s,
           parse_status: "failed",
-          issues: [Models::Issue.new(severity: "error", code: ISSUE_CODE,
-                                     message: ISSUE_MESSAGE)]
+          issues: [Models::Issue.new(severity: "error", code: "emf.header_unreadable",
+                                     message: "EMF header could not be read")]
         )
       end
 

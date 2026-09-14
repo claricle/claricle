@@ -43,4 +43,5 @@ Gem::Specification.new do |spec|
   spec.add_dependency "postscript", "~> 0.2.0"
   spec.add_dependency "rexml", "~> 3.4.4"
   spec.add_dependency "thor", "~> 1.2"
+  spec.add_dependency "vectory", "~> 0.12.0"
 end
