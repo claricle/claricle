@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "English"
+require "open3"
 require "stringio"
 require "tempfile"
 require "timeout"
@@ -1116,9 +1116,14 @@ RSpec.describe "Claricle format detection" do
     it "loads REXML for itself in a fresh process" do
       lib = File.expand_path("../../lib", __dir__)
       script = %(require "claricle"; print Claricle.detect(%q(<svg xmlns="#{svg_ns}"/>)))
-      output = IO.popen([RbConfig.ruby, "-I#{lib}", "-e", script], err: %i[child out], &:read)
-      expect($CHILD_STATUS).to be_success, "subprocess failed: #{output}"
-      expect(output).to eq("svg")
+      # Open3.capture3 keeps stdout and stderr separate, so a stray stderr
+      # line -- rubygems or git chattering outside a clean checkout, a
+      # deprecation warning -- can never land inside the string this
+      # compares with eq. Merging the streams (the previous
+      # `err: %i[child out]` form) failed on any such line.
+      stdout, stderr, status = Open3.capture3(RbConfig.ruby, "-I#{lib}", "-e", script)
+      expect(status).to be_success, "subprocess failed: #{stdout}\nSTDERR: #{stderr}"
+      expect(stdout).to eq("svg")
     end
   end
 end
