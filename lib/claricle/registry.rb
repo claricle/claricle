@@ -34,8 +34,16 @@ module Claricle
       # What one format's handler can convert to -- the `formats` command's
       # `convert_to` column builds from this, the same way `capabilities_for`
       # builds the operations column.
+      #
+      # `- [format]` matters only for a handler owning more than one format
+      # (Handlers::Postscript, :eps and :ps): its `convert_to` declares the
+      # union both can reach, since a class-level declaration cannot vary
+      # per image, so the declared list itself still names the format asked
+      # about as one of its own targets. Every single-format handler's own
+      # format was never in its declared list to begin with, so this is a
+      # no-op for them.
       def convert_targets_for(format)
-        handler_for(format).convert_targets
+        handler_for(format).convert_targets - [format]
       end
 
       private

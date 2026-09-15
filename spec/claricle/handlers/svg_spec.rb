@@ -704,8 +704,9 @@ RSpec.describe "Claricle SVG handler" do
     end
   end
 
-  # The two edges item 04 wires from this handler: svg -> eps and svg -> ps
-  # through vectory/postsvg. Mirrors metafile_spec.rb's own "#convert"
+  # The three edges item 04 wires from this handler: svg -> eps and svg -> ps
+  # through vectory/postsvg (feat/convert-svg-to-eps-ps), plus svg -> emf
+  # through vectory (this task). Mirrors metafile_spec.rb's own "#convert"
   # block, adapted for :svg being a REAL source format here (metafile's is
   # always "unknown"; svg's classification is real).
   describe "#convert" do
@@ -720,16 +721,28 @@ RSpec.describe "Claricle SVG handler" do
     # Measured once against the real fixture, not guessed: without these,
     # swapping CONVERT_TARGET_METHODS leaves every example in a bare loop
     # green, because none of them looked at the bytes themselves (spec-
-    # auditor's High, feat/convert-emf-edges).
+    # auditor's High, feat/convert-emf-edges). The emf marker runs through
+    # the fixed header up to and including the " EMF" signature, the same
+    # boundary metafile_spec.rb's own svg-target marker uses in reverse.
     def content_marker_for(target)
       {
         eps: "%!PS-Adobe-3.0 EPSF-3.0\n%%Creator: Postsvg 0.3.0\n",
-        ps: "%!PS-Adobe-3.0\n%%Creator: Postsvg 0.3.0\n"
+        ps: "%!PS-Adobe-3.0\n%%Creator: Postsvg 0.3.0\n",
+        emf: "\x01\x00\x00\x00X\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00d\x00\x00\x00" \
+             "2\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00U\n\x00\x00*\x05\x00\x00 EMF"
       }.fetch(target)
     end
 
-    %i[eps ps].each do |target|
-      it "converts rect_and_line to #{target} losslessly" do
+    # emf's own :lossless verdict was WITHDRAWN by this task (lossiness.rb's
+    # RULES[:emf][:kept]) -- basic_shape's `kept:` claim was measured against
+    # postsvg, not vectory's separate EMF writer, and that writer does not
+    # honour the same SVG-default semantics (Codex finding on this branch).
+    # rect_and_line carries only explicit fill/stroke, so it hits none of the
+    # defaults that are actually wrong, but the classifier has no way to tell
+    # "explicit" from "default" for basic_shape, so it answers `unknown` for
+    # every basic_shape document going to :emf now, correct or not.
+    { eps: "lossless", ps: "lossless", emf: "unknown" }.each do |target, verdict|
+      it "converts rect_and_line to #{target}, #{verdict}" do
         conversion = handler.convert(convert_image("rect_and_line"), to: target)
 
         expect(conversion).to be_a(Claricle::Models::Conversion)
@@ -737,7 +750,7 @@ RSpec.describe "Claricle SVG handler" do
         expect(conversion).to have_attributes(
           source_format: "svg",
           target_format: target.to_s,
-          lossiness: "lossless"
+          lossiness: verdict
         )
         expect(conversion.content).to start_with(content_marker_for(target))
       end
@@ -749,14 +762,30 @@ RSpec.describe "Claricle SVG handler" do
       expect(ps_content).not_to start_with("%!PS-Adobe-3.0 EPSF")
     end
 
-    %i[eps ps].each do |target|
-      %w[gradient_linear embedded_raster].each do |name|
-        it "classifies #{name} -> #{target} as lossy, a real classification (not metafile's always-unknown)" do
-          conversion = handler.convert(convert_image(name), to: target)
+    # emf's own loss rules (lossiness.rb's RULES) list gradient and
+    # clip_path but not embedded_raster -- unlike POSTSCRIPT_RULE, which
+    # lists all three -- so embedded_raster -> emf is measured separately
+    # below rather than folded into this loop.
+    %i[eps ps emf].each do |target|
+      it "classifies gradient_linear -> #{target} as lossy, a real classification (not metafile's always-unknown)" do
+        conversion = handler.convert(convert_image("gradient_linear"), to: target)
 
-          expect(conversion.lossiness).to eq("lossy")
-        end
+        expect(conversion.lossiness).to eq("lossy")
       end
+    end
+
+    %i[eps ps].each do |target|
+      it "classifies embedded_raster -> #{target} as lossy, a real classification (not metafile's always-unknown)" do
+        conversion = handler.convert(convert_image("embedded_raster"), to: target)
+
+        expect(conversion.lossiness).to eq("lossy")
+      end
+    end
+
+    it "classifies embedded_raster -> emf as unknown, because emf's own loss rules don't name embedded rasters" do
+      conversion = handler.convert(convert_image("embedded_raster"), to: :emf)
+
+      expect(conversion.lossiness).to eq("unknown")
     end
 
     it "converts a content-born image, with source_path nil" do
@@ -790,7 +819,10 @@ RSpec.describe "Claricle SVG handler" do
     # an anonymous subclass, never Svg#convert; the registry pin only
     # reads the class-level declaration, not the runtime guard. Restored,
     # mirroring metafile_spec.rb:1262-1264's own equivalent test.
-    %i[svg emf].each do |target|
+    # :emf dropped from this list by this task -- it is now a declared
+    # target (CONVERT_TARGET_METHODS/convert_to above) and has its own
+    # passing coverage in the loops above instead.
+    %i[svg].each do |target|
       it "refuses a target it does not declare (:#{target})" do
         expect { handler.convert(convert_image("rect_and_line"), to: target) }
           .to raise_error(Claricle::UnsupportedFormat, /:svg is not supported for convert to :#{target}/)
@@ -816,7 +848,7 @@ RSpec.describe "Claricle SVG handler" do
     # deliberate guard: keep both, they become the only check that
     # catches a future postsvg/vectory version that makes per-target
     # parsing diverge.
-    %i[eps ps].each do |target|
+    %i[eps ps emf].each do |target|
       it "wraps a delegate parse failure as ConversionError, through the real chain (to: #{target})" do
         content = File.binread(convert_fixture("utf16_gradient"))
         image = Claricle::Image.from_content(content, format: :svg)

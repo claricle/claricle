@@ -52,11 +52,11 @@ module Claricle
     # has to be parsed.
     class Svg < Base
       formats :svg
-      convert_to :eps, :ps
+      convert_to :eps, :ps, :emf
 
       # Symbol -> the vectory method it dispatches to, matching
       # Handlers::Metafile's own TARGET_METHODS convention for the same job.
-      CONVERT_TARGET_METHODS = { eps: :to_eps, ps: :to_ps }.freeze
+      CONVERT_TARGET_METHODS = { eps: :to_eps, ps: :to_ps, emf: :to_emf }.freeze
 
       # Matches Handlers::Metafile's own MAX_CONVERT_BYTES: bound the READ
       # itself, not the bytesize checked after the fact -- #content and

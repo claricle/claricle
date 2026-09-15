@@ -1,9 +1,13 @@
 # frozen_string_literal: true
 
+require "vectory"
+
 require_relative "base"
 require_relative "../detector"
 require_relative "../models/inspection"
 require_relative "../models/issue"
+require_relative "../models/conversion"
+require_relative "../lossiness"
 
 module Claricle
   module Handlers
@@ -553,6 +557,123 @@ module Claricle
 
     private_constant :Dsc, :DscHeader, :DscKeywords, :DscNumbers, :HeaderScanner
 
+    # The conversion path's own pieces, kept out of Postscript's body for
+    # the same reason Handlers::Metafile's own MetafileConvert is: that
+    # class already carries the whole DSC-header-parse contract, and
+    # conversion is a second, unrelated concern layered on top of it --
+    # extracted to stay inside Metrics/ClassLength without an exemption,
+    # the same route lossiness.rb's Scanner/AttributeRules split takes.
+    # `module_function` rather than a class with instance methods -- there
+    # is no state to hold between calls, matching MetafileConvert.
+    module PostscriptConvert
+      # Symbol -> the vectory class that owns that SOURCE format. eps and
+      # ps are different Vectory classes with different available `to_*`
+      # methods (neither exposes a same-format method), unlike svg.rb and
+      # metafile.rb where one delegate class serves the one source format
+      # the handler owns.
+      DELEGATE_CLASSES = { eps: ::Vectory::Eps, ps: ::Vectory::Ps }.freeze
+
+      # Symbol -> the vectory method it dispatches to, matching
+      # Handlers::Svg's own CONVERT_TARGET_METHODS convention for the same
+      # job, extended to every target both delegate classes expose.
+      TARGET_METHODS = { svg: :to_svg, emf: :to_emf, eps: :to_eps, ps: :to_ps }.freeze
+
+      # Matches Handlers::Svg's own MAX_CONVERT_BYTES: bound the READ
+      # itself, not the bytesize checked after the fact.
+      MAX_CONVERT_BYTES = 200 * 1024 * 1024
+
+      module_function
+
+      # `convert_targets` is the class-level declared union both :eps and
+      # :ps can reach (a class-level declaration cannot vary per image), so
+      # a same-format request (:eps -> :eps, :ps -> :ps) passes that check
+      # and must be refused here explicitly, the same UnsupportedFormat a
+      # genuinely undeclared target raises. Neither Vectory::Eps nor
+      # Vectory::Ps defines a same-format method to fall through to;
+      # refusing first keeps that a clean invocation error rather than a
+      # NoMethodError laundered through ConversionError.
+      def run(image, to:, convert_targets:)
+        unless convert_targets.include?(to) && to != image.format
+          raise UnsupportedFormat.new(image.format, :convert, target: to)
+        end
+
+        content = postscript_section(bounded_content(image))
+        converted = convert_content(image.format, content, to)
+        build(image, to, content, converted)
+      end
+
+      # Near-verbatim copy of Handlers::Svg's own `bounded_content` --
+      # bounds the READ itself rather than trusting a stat taken on a
+      # separate filesystem call, for the same reason.
+      def bounded_content(image)
+        content = image.with_source { |source| bounded_read(source, MAX_CONVERT_BYTES + 1) }
+        return content if content.bytesize <= MAX_CONVERT_BYTES
+
+        raise ConversionError, "postscript image exceeds the #{MAX_CONVERT_BYTES}-byte convert limit"
+      end
+
+      # Near-verbatim copy of Handlers::Svg's own `bounded_read` -- kept as
+      # its own small copy rather than a shared Handlers::Base helper, the
+      # same reasoning svg.rb's own copy states.
+      def bounded_read(source, length)
+        return source.read(length) || "".b if source.respond_to?(:read)
+
+        source.byteslice(0, length)
+      end
+
+      # Scoped to only the delegate call, not `build` below -- mirrors
+      # Handlers::Svg's own `convert_content` deviation from the house
+      # exception-list convention, for the same reason: the delegate chain
+      # here is a third-party render pipeline (vectory/postsvg) whose
+      # exact raised classes are not this file's to enumerate.
+      def convert_content(source_format, content, to)
+        delegate = DELEGATE_CLASSES.fetch(source_format)
+        delegate.from_content(content).public_send(TARGET_METHODS.fetch(to))
+      rescue StandardError => e
+        raise ConversionError, "#{e.class}: #{e.message}"
+      end
+
+      # A DOS/Windows binary-preview EPS carries the actual PostScript
+      # program at a declared offset/length inside a larger container
+      # (DscHeader's own `string_header` reframes the same way). Pass only
+      # that range to the delegate -- never the whole container, whose
+      # preview and any trailing bytes are not PostScript. Check `wrapped?`
+      # and `postscript_range` separately: `postscript_range`'s own nil
+      # means both "unwrapped" (pass content through) and "wrapped with an
+      # invalid range", and those must not collapse into one behaviour --
+      # an invalid range is refused, never treated as unwrapped.
+      def postscript_section(content)
+        return content unless EpsBinary.wrapped?(content)
+
+        range = EpsBinary.postscript_range(content, content.bytesize)
+        raise ConversionError, "eps binary wrapper declares a postscript range outside the file" unless range
+
+        content.byteslice(*range)
+      end
+
+      # `output_path` is deliberately absent here -- mirrors
+      # Handlers::Svg's own `build_conversion` for the same reason: the
+      # caller (Claricle.convert_one) does not know the real written path
+      # until after Writer#write runs.
+      #
+      # `Lossiness.classify` always answers "unknown" here -- it returns
+      # early unless `source_format == :svg` (lossiness.rb), and this
+      # handler's source is always :eps or :ps. Called anyway rather than
+      # hardcoding the string, so a future change to that guard is not
+      # silently bypassed by a handler that stopped asking.
+      def build(image, to, content, converted)
+        Models::Conversion.new(
+          source_path: image.path,
+          source_format: image.format.to_s,
+          target_format: to.to_s,
+          lossiness: Lossiness.classify(source_format: image.format, target_format: to, source: content),
+          content: converted.content
+        )
+      end
+    end
+
+    private_constant :PostscriptConvert
+
     # Reports a PostScript program's DSC header: dimensions from the
     # bounding box, and the comments that 0.2.0 actually populates.
     #
@@ -561,6 +682,11 @@ module Claricle
     # so one class reports both correctly.
     class Postscript < Base
       formats :eps, :ps
+      # The full cross-format matrix -- one class owns both :eps and :ps, so
+      # this declares every OTHER format either can reach; PostscriptConvert.run
+      # refuses same-format explicitly, and Registry#convert_targets_for
+      # subtracts the image's own format before this reaches `claricle formats`.
+      convert_to :svg, :emf, :eps, :ps
 
       # The detector's own PostScript-section signature, not a second copy
       # of it. A plain file carries it at byte zero; a DOS EPS carries it
@@ -574,8 +700,7 @@ module Claricle
       SIGNATURE = Detector::POSTSCRIPT_SIGNATURE
 
       # The `meta` key each box comment supplies.
-      BOX_COMMENTS = { "bounding_box" => "BoundingBox",
-                       "hires_bounding_box" => "HiResBoundingBox" }.freeze
+      BOX_COMMENTS = { "bounding_box" => "BoundingBox", "hires_bounding_box" => "HiResBoundingBox" }.freeze
 
       ISSUE_CODE = "postscript.header_unreadable"
       ISSUE_MESSAGE = "PostScript header could not be read"
@@ -604,9 +729,8 @@ module Claricle
       # longer, exactly the 629 KB case `FIELD_COMMENTS` exists for.
       HEADER_PROBE_BYTES = 8192
 
-      private_constant :SIGNATURE, :BOX_COMMENTS,
-                       :FIELD_COMMENTS, :HEADER_PROBE_BYTES,
-                       :ISSUE_CODE, :ISSUE_MESSAGE
+      private_constant :SIGNATURE, :BOX_COMMENTS, :FIELD_COMMENTS,
+                       :HEADER_PROBE_BYTES, :ISSUE_CODE, :ISSUE_MESSAGE
 
       # `image.content` would cost a path-born image a file-sized
       # allocation it retains for the image's whole lifetime, for a
@@ -623,6 +747,12 @@ module Claricle
 
         readable(image, header, source)
       end
+
+      # The target guard, the delegate call and the `Models::Conversion`
+      # it builds all live in `PostscriptConvert` above -- see its `run`
+      # for why a same-format request is refused there rather than here,
+      # and `build` for why `output_path` is absent from the result.
+      def convert(image, to:) = PostscriptConvert.run(image, to: to, convert_targets: self.class.convert_targets)
 
       private
 

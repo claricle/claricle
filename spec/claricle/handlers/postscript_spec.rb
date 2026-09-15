@@ -1578,4 +1578,205 @@ RSpec.describe "Claricle PostScript handler" do
       expect(seen.first).to eq(bytes[0, bytes.index("%%EndComments") + 14])
     end
   end
+
+  # The six edges item 04 wires from this handler: eps -> svg/emf/ps and
+  # ps -> svg/emf/eps, through vectory (Vectory::Eps / Vectory::Ps). One
+  # class owns both source formats, unlike svg.rb/metafile.rb where the
+  # handler's own format and its delegate class are both singular -- so
+  # every marker and refusal below is checked per SOURCE format, not just
+  # per target. Mirrors svg_spec.rb's own "#convert" block shape.
+  describe "#convert" do
+    def convert_fixture(name)
+      File.join(__dir__, "..", "..", "fixtures", "convert", name)
+    end
+
+    def convert_image(name)
+      Claricle::Image.from_path(convert_fixture(name))
+    end
+
+    # Measured against the real, committed fixture bytes -- without these,
+    # swapping CONVERT_TARGET_METHODS leaves every example in a bare loop
+    # green. Does NOT catch a DELEGATE_CLASSES swap for the svg/emf
+    # targets: Vectory::Eps and Vectory::Ps produce byte-identical
+    # to_svg/to_emf output for this fixture, so only the eps<->ps edges
+    # would go red under that mutant, and only because same-format
+    # conversion is refused, not because the marker caught the swap.
+    # eps -> emf and ps -> emf share one marker on purpose: vectory's Emf
+    # writer does not vary its header by source format.
+    def content_marker_for(target)
+      {
+        svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" ",
+        emf: "\x01\x00\x00\x00X\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00d\x00\x00\x00" \
+             "2\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00U\n\x00\x00*\x05\x00\x00 EMF",
+        eps: "%!PS-Adobe-3.0 EPSF-3.0\n%%Creator: Posts",
+        ps: "%!PS-Adobe-3.0\n%%Creator: Postsvg 0.3.0\n"
+      }.fetch(target)
+    end
+
+    {
+      eps: %i[svg emf ps],
+      ps: %i[svg emf eps]
+    }.each do |source, targets|
+      targets.each do |target|
+        it "converts rect_and_line.#{source} to #{target}, matching the real delegate output" do
+          conversion = handler.convert(convert_image("rect_and_line.#{source}"), to: target)
+
+          expect(conversion.content).to start_with(content_marker_for(target))
+          expect(conversion.target_format).to eq(target.to_s)
+          expect(conversion.source_format).to eq(source.to_s)
+        end
+
+        # Lossiness.classify (lossiness.rb) returns early unless
+        # source_format == :svg, so every edge from THIS handler is
+        # "unknown" whatever the target -- unlike svg.rb, where the
+        # classification is real. Pinned per edge, not asserted once,
+        # the same shape svg_spec.rb pins its own lossy cases in.
+        it "classifies rect_and_line.#{source} -> #{target} as unknown, never a real claim from a non-svg source" do
+          conversion = handler.convert(convert_image("rect_and_line.#{source}"), to: target)
+
+          expect(conversion.lossiness).to eq("unknown")
+        end
+      end
+
+      # convert_to declares the union both :eps and :ps can reach (the
+      # class-level declaration cannot vary per image), so a same-format
+      # request passes that check and must be refused here explicitly --
+      # this is the one case #convert (postscript.rb) guards beyond what
+      # `self.class.convert_targets.include?(to)` alone catches. Proven by
+      # construction: weakening `run`'s combined guard back to
+      # `convert_targets.include?(to)` alone left this example calling
+      # `DELEGATE_CLASSES.fetch(:#{source}).from_content(...).public_send(:to_#{source})`,
+      # and neither Vectory::Eps nor Vectory::Ps defines that method, so it
+      # raised a leaked `ConversionError: NoMethodError` instead of
+      # `UnsupportedFormat`.
+      it "refuses to convert #{source} to itself" do
+        expect { handler.convert(convert_image("rect_and_line.#{source}"), to: source) }
+          .to raise_error(Claricle::UnsupportedFormat, /:#{source} is not supported for convert to :#{source}/)
+      end
+    end
+
+    it "refuses a target no format reaches (:png)" do
+      expect { handler.convert(convert_image("rect_and_line.eps"), to: :png) }
+        .to raise_error(Claricle::UnsupportedFormat, /:eps is not supported for convert to :png/)
+    end
+
+    it "converts a content-born image, with source_path nil" do
+      content = File.binread(convert_fixture("rect_and_line.eps"))
+      image = Claricle::Image.from_content(content, format: :eps)
+
+      conversion = handler.convert(image, to: :svg)
+
+      expect(conversion.source_path).to be_nil
+    end
+
+    it "carries the source path through for a path-born image" do
+      conversion = handler.convert(convert_image("rect_and_line.eps"), to: :svg)
+
+      expect(conversion.source_path).to eq(convert_fixture("rect_and_line.eps"))
+    end
+
+    it "leaves output_path nil, for the caller to fill in once written" do
+      conversion = handler.convert(convert_image("rect_and_line.eps"), to: :svg)
+
+      expect(conversion.output_path).to be_nil
+    end
+
+    # Two independently reproducible delegate failures (measured directly
+    # against Vectory::Eps/Vectory::Ps, not guessed), through the real
+    # chain -- Postsvg::LexError on an unterminated string literal and
+    # Postsvg::SyntaxError on unbalanced procedure braces. Neither is a
+    # defect in postscript.rb: this method's body calls nothing but the
+    # delegate chain, mirroring svg.rb's/metafile.rb's own documented
+    # `rescue StandardError` deviation from the house explicit-class
+    # convention (both cited in convert_content's own comment above).
+    {
+      "an unterminated string literal" => "(unterminated string",
+      "unbalanced procedure braces" => "{" * 100
+    }.each do |description, bad_content|
+      %i[eps ps].each do |source|
+        it "wraps a delegate parse failure (#{description}) as ConversionError (source: #{source})" do
+          image = Claricle::Image.from_content(bad_content, format: source)
+
+          expect { handler.convert(image, to: :svg) }
+            .to raise_error(Claricle::ConversionError, /Postsvg::(Lex|Syntax)Error/)
+        end
+      end
+    end
+
+    # Mirrors svg.rb's own two byte-limit stub tests verbatim in shape,
+    # substituting the PostscriptConvert module/constant name (the convert
+    # path lives there, not on Postscript itself -- see PostscriptConvert's
+    # own comment for why) and content-born format -- stub_const keeps this
+    # fast, crossing the real 200MiB limit needs no real 200MiB file, only
+    # a limit small enough for an ordinary string to exceed it.
+    it "refuses content over the convert byte limit before reaching the delegate" do
+      stub_const("Claricle::Handlers::PostscriptConvert::MAX_CONVERT_BYTES", 10)
+      oversized = Claricle::Image.from_content("x" * 11, format: :eps)
+
+      expect { handler.convert(oversized, to: :svg) }
+        .to raise_error(Claricle::ConversionError, /exceeds the 10-byte convert limit/)
+    ensure
+      Claricle.const_get(:Handlers).const_get(:PostscriptConvert).send(:private_constant, :MAX_CONVERT_BYTES)
+    end
+
+    # The cap has to bound the READ, not just the delegate call -- a
+    # content-born image is already fully in memory before #convert ever
+    # runs, so only a path-backed image can prove the fix, the same
+    # distinction svg.rb's own pair of tests draws.
+    it "refuses a path-backed file over the convert byte limit without reading it whole" do
+      stub_const("Claricle::Handlers::PostscriptConvert::MAX_CONVERT_BYTES", 10)
+      Tempfile.create(["oversized", ".eps"]) do |file|
+        file.binmode
+        file.write("x" * 11)
+        file.flush
+        image = Claricle::Image.new(format: :eps, path: file.path)
+
+        expect { handler.convert(image, to: :svg) }
+          .to raise_error(Claricle::ConversionError, /10-byte convert limit/)
+        expect(image.instance_variable_get(:@content)).to be_nil
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:PostscriptConvert).send(:private_constant, :MAX_CONVERT_BYTES)
+    end
+
+    # A DOS/Windows binary-preview EPS (detector_spec.rb's own `binary_eps`
+    # shape): signature, then the declared [offset, length] fields, then a
+    # binary preview, then the PostScript section, then trailing bytes the
+    # wrapper never declares.
+    def wrap_binary_eps(postscript, preview: "(unterminated".b, trailing: "{bad trailing".b)
+      offset = 30 + preview.bytesize
+      "\xC5\xD0\xD3\xC6".b +
+        [offset, postscript.bytesize, 30, preview.bytesize, 0, 0].pack("V6") +
+        [0xFFFF].pack("v") + preview + postscript + trailing
+    end
+
+    it "converts only the declared postscript section of a DOS-EPS wrapper, ignoring the preview and trailing bytes" do
+      plain = File.binread(convert_fixture("rect_and_line.eps"))
+      wrapped = wrap_binary_eps(plain)
+      image = Claricle::Image.from_content(wrapped, format: :eps)
+
+      wrapped_conversion = handler.convert(image, to: :svg)
+      plain_conversion = handler.convert(convert_image("rect_and_line.eps"), to: :svg)
+
+      # The preview text ("(unterminated) is unbalanced PostScript syntax and
+      # the trailing bytes are not PostScript at all -- either one reaching
+      # the delegate raises or changes the SVG, so byte-identical output to
+      # the plain (unwrapped) conversion is the proof the range, not the
+      # whole container, was what got converted.
+      expect(wrapped_conversion.content).to eq(plain_conversion.content)
+    end
+
+    it "refuses a DOS-EPS wrapper whose declared postscript range runs past the end of the file" do
+      plain = File.binread(convert_fixture("rect_and_line.eps"))
+      wrapped = wrap_binary_eps(plain, trailing: "".b)
+      # Cuts into the declared postscript section itself, not just the
+      # (already absent) trailing bytes -- the header still declares the
+      # ORIGINAL length, which is now longer than what is actually left.
+      truncated = wrapped.byteslice(0, wrapped.bytesize - 1)
+      image = Claricle::Image.from_content(truncated, format: :eps)
+
+      expect { handler.convert(image, to: :svg) }
+        .to raise_error(Claricle::ConversionError, /declares a postscript range outside the file/)
+    end
+  end
 end

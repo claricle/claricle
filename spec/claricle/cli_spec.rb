@@ -586,24 +586,26 @@ RSpec.describe Claricle::Cli::Runner do
 
     # The command must not advertise an operation a handler has not
     # implemented. Asserting the whole line, because "prints no conform"
-    # would also pass if the command printed nothing at all. emf and svg
-    # are the two formats with a real convert edge so far (item 04); every
-    # other format stays inspect-only.
+    # would also pass if the command printed nothing at all. Every format
+    # but png now has a real convert edge (item 04): png stays inspect-only
+    # because png and pdf have no vectory class (04-convert.md).
     it "does not claim conform, and claims convert only where a handler implements it" do
       expect { described_class.run(["formats"]) }
-        .to output("emf\tinspect, convert\neps\tinspect\npng\tinspect\n" \
-                   "ps\tinspect\nsvg\tinspect, convert\n").to_stdout
+        .to output("emf\tinspect, convert\neps\tinspect, convert\npng\tinspect\n" \
+                   "ps\tinspect, convert\nsvg\tinspect, convert\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
-      other = %w[eps png ps].map do |format|
-        %({"format":"#{format}","inspect":true,"conform":false,"convert":false,"convert_to":[]})
-      end
+      png = %({"format":"png","inspect":true,"conform":false,"convert":false,"convert_to":[]})
       emf = %({"format":"emf","inspect":true,"conform":false,"convert":true,) +
             %("convert_to":["svg","eps","ps"]})
+      eps = %({"format":"eps","inspect":true,"conform":false,"convert":true,) +
+            %("convert_to":["svg","emf","ps"]})
+      ps = %({"format":"ps","inspect":true,"conform":false,"convert":true,) +
+           %("convert_to":["svg","emf","eps"]})
       svg = %({"format":"svg","inspect":true,"conform":false,"convert":true,) +
-            %("convert_to":["eps","ps"]})
-      expected = "[#{([emf] + other + [svg]).join(",")}]\n"
+            %("convert_to":["eps","ps","emf"]})
+      expected = "[#{[emf, eps, png, ps, svg].join(",")}]\n"
 
       expect { described_class.run(["formats", "--json"]) }.to output(expected).to_stdout
     end
