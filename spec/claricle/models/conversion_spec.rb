@@ -454,6 +454,82 @@ RSpec.describe "conversion lossiness" do
       end
     end
 
+    # Follow-up #11 (claricle-open-followups.md). Pinned as an ACCEPTED,
+    # documented gap -- not a bug this example is waiting to see fixed -- see
+    # the CALLER CONTRACT comment on `Lossiness.classify`. `classify` sees
+    # only the bytes it is handed, so nothing here can answer "lossless" for
+    # one and "unknown" for the other -- they are not two inputs, they are
+    # one. The `eq(control_document)` line below is illustrative, not
+    # evidence: `full[0...control_document.length]` equals `control_document`
+    # by construction, whatever `classify` does, so it can never fail on its
+    # own. It is kept so the two `classify_source` calls that follow are
+    # visibly comparing the same bytes. The actual proof that no signal
+    # exists is the next example, which counts what `classify` touches on a
+    # String source rather than reasoning about it.
+    #
+    # If this example ever needs to change, it is because `classify` gained a
+    # way to observe more than the bytes of a String (a length the caller
+    # asserts, a checksum, anything external to the String itself) -- not
+    # because a cleverer scan was found. No scan can find a difference that
+    # is not in the bytes.
+    it "cannot distinguish a truncated String from a complete one at a root boundary -- accepted, not a bug" do
+      second_root = %(<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><linearGradient/></svg>)
+      full = "#{control_document}\n#{second_root}"
+      cut_point = control_document.length
+      truncated = full[0...cut_point]
+
+      expect(truncated).to eq(control_document),
+                           "illustrative, true by construction: a prefix of this length is the prefix"
+      expect(classify_source(full)).to eq("unknown"), "control: the untruncated document"
+      expect(classify_source(truncated)).to eq("lossless"),
+                                            "known limitation: identical bytes to a real complete document"
+      expect(classify_source(control_document)).to eq("lossless"),
+                                                   "the truncated slice classifies exactly as the real thing does"
+    end
+
+    # The actual proof behind the example above. A spy that only overrides
+    # `to_str` cannot tell you anything reached NOTHING else -- it is blind to
+    # every other method by construction, and `classify`'s own boundary
+    # checks (`refuse_unreadable`, `refuse_unpositioned`) do call `respond_to?`
+    # and `is_a?` on the raw source before REXML ever sees it, and REXML's own
+    # `SourceFactory` asks a few more `respond_to?` questions through
+    # `TaggedSource#respond_to_missing?` before it settles on `to_str`
+    # (measured with `TracePoint`, which records every method Ruby DISPATCHES
+    # on the object, not just the ones a spy remembered to name). None of
+    # those probes reads the string's CONTENT: `to_str` is called exactly
+    # once and no other method is ever dispatched on this object. That is why
+    # the truncated-prefix example above can never be closed without breaking
+    # every complete single-root document: `respond_to?`/`is_a?` answer
+    # questions about the object's SHAPE, not its bytes, and the one `to_str`
+    # call is the only DISPATCHED call that ever reads them.
+    #
+    # Scope of this proof, stated plainly: `TracePoint` sees Ruby-level method
+    # dispatch on THIS object. It cannot see a C-level buffer read performed
+    # by something built FROM the returned bytes without dispatching back to
+    # this object -- e.g. `StringIO.new(source).size` reads the copied
+    # buffer's length without the call landing on `source` itself, so this
+    # spy would not catch that route. Closing that residual would need
+    # instrumentation below the Ruby method-dispatch layer, which is out of
+    # scope for a spec; the claim here is "no method call reads more", not
+    # "no byte is ever inspected by any means downstream of `to_str`".
+    it "touches a String source through its own boundary probes and exactly one to_str call, and no other dispatch" do
+      target = control_document.dup
+      calls = []
+      tracer = TracePoint.new(:call, :c_call) do |event|
+        calls << event.method_id if event.self.equal?(target)
+      end
+
+      tracer.enable
+      result = classify_source(target)
+      tracer.disable
+
+      expect(result).to eq("lossless")
+      expect(calls.uniq - %i[respond_to? is_a?]).to eq([:to_str]),
+                                                    "classify must dispatch nothing on a String source beyond its " \
+                                                    "own respond_to?/is_a? probes and to_str -- got #{calls.inspect}"
+      expect(calls.count(:to_str)).to eq(1), "to_str must be called exactly once, not on every read"
+    end
+
     it "refuses a source of the wrong type instead of answering about it" do
       [nil, 42, [], {}, :sym, 1.5].each do |bad|
         expect { classify_source(bad) }
