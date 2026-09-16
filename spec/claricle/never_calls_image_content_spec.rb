@@ -22,8 +22,10 @@ require_relative "../support/inspect_fixture"
 # svg bring a good file only -- no FAILING file exists for them, because
 # their handlers answer "ok" for every byte string the detector accepts as
 # that format. eps has one: the four-byte DOS EPS wrapper signature
-# (C5 D0 D3 C6) is detected as eps by magic bytes alone, but carries no
-# `%!PS` anywhere in it, so the PostScript delegate fails to parse it.
+# (C5 D0 D3 C6) is detected as eps by magic bytes alone, but its declared
+# PostScript range is invalid (offset 0 is below the header's own minimum),
+# so `Handlers::Postscript` never even reaches the PostScript delegate --
+# the header scan itself refuses the file first.
 RSpec.describe "Handlers inspect path-born samples without calling Image#content" do
   # Local variables, not `let`: `samples.each` below builds the example
   # tree once, when this file loads, before any example runs. `let` is
