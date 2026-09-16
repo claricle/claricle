@@ -98,9 +98,8 @@ RSpec.describe Claricle::Cli::Runner do
     # assertion alone can't tell the examples below what drove them.
     #
     # `and_wrap_original`, not `prepend`: RSpec tears its own stub down at
-    # the end of THIS example, so a leaked hook can't outlive it (history:
-    # `.claude/gate-runs/help-epipe-scope@b5c2bf4.md`; same pattern at
-    # `spec/claricle/handlers/postscript_spec.rb:965`).
+    # the end of THIS example, so a leaked hook can't outlive it (same
+    # pattern at `spec/claricle/handlers/postscript_spec.rb:965`).
     #
     # Refuses a second `help` call inside one block instead of silently
     # answering about the first.
