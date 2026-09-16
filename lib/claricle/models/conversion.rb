@@ -142,19 +142,12 @@ module Claricle
       end
 
       # `source_format`/`target_format`/`lossiness` are `required: true` on
-      # the attribute itself now, so lutaml's own `validate!` (which runs
-      # before this, per the comment on `normalize` above) already refuses a
-      # missing one, wrapped in `Lutaml::Model::ValidationError` and naming
-      # the attribute ("Missing required attribute: <name>") -- measured. This
-      # used to hand-roll that same check here because `required: true` was
-      # believed to leave the introspectable schema disagreeing with runtime
-      # behaviour; measured instead: `Conversion.attributes[:lossiness]
-      # .options[:required]` was `nil` while a missing `lossiness` still
-      # raised, so a caller reading the schema (docs generator, JSON Schema
-      # export) would have been told the field was optional. `required: true`
-      # closes that gap without changing the error class or losing the
-      # attribute's name from the message. Nothing left to add here, so
-      # `Base#validate_types` runs unmodified -- no override left to define.
+      # the attribute itself, so lutaml's own `validate!` (runs before this,
+      # per the comment on `normalize` above) already refuses a missing one,
+      # wrapped in `Lutaml::Model::ValidationError` and naming the attribute.
+      # Do not re-add a hand-rolled nil check here: see the gate record for
+      # why `required: true` replaced one (the introspectable schema used to
+      # disagree with the runtime refusal).
     end
 
     private_constant :BinaryContent
