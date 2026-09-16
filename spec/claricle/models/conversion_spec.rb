@@ -1231,6 +1231,13 @@ RSpec.describe "conversion lossiness" do
       scanner_class.send(:remove_method, :consume)
     end
 
+    # Deliberately NOT a mutation-check proof for this diff: reverting this
+    # file to before the fix leaves this exact message still caught (the old
+    # blanket rescue also absorbed it), so this example stays green either
+    # way -- see the gate record's probe. What it DOES prove, independent of
+    # the diff's history, is that `rescue Unreadable, ArgumentError` itself
+    # stays in place: line-deletion-check.sh flags `lib/claricle/lossiness.rb`'s
+    # `rescue` line as safely deletable without this example.
     it "still answers unknown, not a raise, for the genuine invalid-UTF-8 ArgumentError it exists to catch" do
       scanner_class = lossiness.const_get(:Scanner)
       scanner_class.send(:define_method, :consume) do |*|
