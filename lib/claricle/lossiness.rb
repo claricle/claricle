@@ -3,6 +3,7 @@
 require "rexml/parsers/pullparser"
 require "rexml/xmltokens"
 
+require_relative "lossiness/levels"
 require_relative "errors"
 # `CharacterRules#unaccounted_text?` calls `AttributeReferences`, which lives
 # in `detector.rb`. `lib/claricle.rb` loads the detector later in its own list,
@@ -26,7 +27,7 @@ module Claricle
   # classifies were measured on vectory 0.12.0 during design; vectory is not a
   # dependency of this gem and is never reached.
   module Lossiness
-    LEVELS = %w[lossless lossy unknown].freeze
+    # Defined in lossiness/levels.rb, required above -- see that file for why.
 
     # A source may be a bare BasicObject exposing only reader methods, so a
     # type test must not dispatch a method to it. Same idiom, and the same
@@ -579,15 +580,14 @@ module Claricle
         @phase = :prolog
       end
 
-      # This rescue no longer covers the parser -- `next_event` does, and
-      # `Unreadable` is how it reports one. What is left for this one is
-      # `consume` and AttributeRules, which genuinely raise ArgumentError:
-      # measured, every value rule raises `ArgumentError: invalid byte sequence
-      # in UTF-8` on invalid-UTF-8 input. That stays unreachable while REXML
-      # transcodes or raises first, and the direction is safe.
-      #
-      # REXML::ParseException is gone from here because it can no longer arrive
-      # here: nothing outside the parser raises it.
+      # `next_event` reports "REXML refused this document" as `Unreadable`.
+      # What is left for `ArgumentError` is `consume` and AttributeRules,
+      # which genuinely raise it on invalid-UTF-8 input -- measured, always
+      # with this exact message. `consume` is OUR code too, though, and a
+      # real bug there (wrong arity, a typo) raises the same class: measured,
+      # injecting one was silently reported as `"unknown"` before `run`
+      # started matching by MESSAGE, not class alone, so a bug in our own
+      # code is never mistaken for a bad document.
       def run
         parser = REXML::Parsers::PullParser.new(@source)
         while (event = next_event(parser))
@@ -595,7 +595,9 @@ module Claricle
         end
         note_truncation
         [@root_ok, @found.uniq]
-      rescue Unreadable, ArgumentError
+      rescue Unreadable, ArgumentError => e
+        raise if e.is_a?(ArgumentError) && e.message != "invalid byte sequence in UTF-8"
+
         [false, [:unclassified]]
       end
 
@@ -645,8 +647,16 @@ module Claricle
         note(:unclassified) unless @depth.zero?
       end
 
+      # Deduplicated at INSERTION, not just once at the end of `run`. `note`
+      # fires once per matched event, and a document can repeat the same
+      # feature (e.g. a `gradient` on every one of a thousand shapes) --
+      # measured, that grew `@found` by one entry per match instead of staying
+      # bounded by the fixed vocabulary of features this module knows about
+      # (`RULES`/`ATTR_FEATURES`/`KEPT_FEATURES`). `include?` here is checked
+      # against that same small, fixed set, so this stays cheap regardless of
+      # document size.
       def note(feature)
-        @found << feature
+        @found << feature unless @found.include?(feature)
       end
 
       # EVERY field of every event, not the character-data ones alone. The

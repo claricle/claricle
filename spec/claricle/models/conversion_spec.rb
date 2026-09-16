@@ -162,6 +162,36 @@ RSpec.describe "conversion lossiness" do
       expect(model::LOSSINESS_LEVELS).to eq(%w[lossless lossy unknown])
       expect(model::LOSSINESS_LEVELS).to be_frozen
     end
+
+    # G1-claricle.md #4: the schema used to say these three were optional
+    # (no `required: true`) while runtime refused a nil one anyway -- a caller
+    # reading the schema (docs generator, JSON Schema export) would have been
+    # told they were optional. Pinned at the introspection layer, not just the
+    # behavioural layer already covered by "refuses to omit...".
+    it "declares the three traceability fields required in the introspectable schema, not only at runtime" do
+      %i[source_format target_format lossiness].each do |name|
+        expect(model.attributes[name].options[:required]).to be(true),
+                                                             "expected #{name}'s schema to say required: true"
+      end
+    end
+
+    # G1-claricle.md #3: requiring only this small result model used to load
+    # the whole `Lossiness` classifier -- and through it REXML and the `emf`
+    # gem -- for one 3-string constant. Run in a fresh subprocess: the parent
+    # process has already loaded everything via `spec_helper`, so only an
+    # isolated `ruby -Ilib` load can tell the two cases apart.
+    it "does not load the Lossiness classifier (REXML, the detector) merely to read LOSSINESS_LEVELS" do
+      probe = <<~RUBY
+        require "claricle/models/conversion"
+        print(defined?(REXML) ? "REXML:loaded" : "REXML:absent")
+      RUBY
+      lib = File.join(root, "lib")
+      output = IO.popen([RbConfig.ruby, "-I#{lib}", "-e", probe], err: %i[child out], &:read)
+
+      expect($CHILD_STATUS.success?).to be(true), "subprocess failed: #{output}"
+      expect(output.lines.last).to eq("REXML:absent"),
+                                   "expected Models::Conversion alone not to load REXML; got: #{output.inspect}"
+    end
   end
 
   describe "the classifier" do
@@ -1181,6 +1211,50 @@ RSpec.describe "conversion lossiness" do
         expect(wrapper.largest_read).to eq(small.largest_read)
         expect(wrapper.largest_read).to be < File.size(path_for("rect_and_line"))
       end
+    end
+
+    # G1-claricle.md #1: `Scanner#run`'s rescue used to catch every
+    # `ArgumentError`, including one raised by OUR OWN `consume`/AttributeRules
+    # code (a real bug: wrong arity, a typo'd method) -- silently reporting it
+    # as `"unknown"` instead of letting it escape. Only the exact message
+    # REXML's value rules raise on invalid-UTF-8 input may be absorbed.
+    it "does not hide a bug in its own consume path behind an unrelated ArgumentError rescue" do
+      scanner_class = lossiness.const_get(:Scanner)
+      scanner_class.send(:define_method, :consume) do |*|
+        raise ArgumentError, "wrong number of arguments (given 1, expected 0)"
+      end
+
+      expect do
+        lossiness.classify(source_format: :svg, target_format: :eps, source: "<svg></svg>")
+      end.to raise_error(ArgumentError, /wrong number of arguments/)
+    ensure
+      scanner_class.send(:remove_method, :consume)
+    end
+
+    it "still answers unknown, not a raise, for the genuine invalid-UTF-8 ArgumentError it exists to catch" do
+      scanner_class = lossiness.const_get(:Scanner)
+      scanner_class.send(:define_method, :consume) do |*|
+        raise ArgumentError, "invalid byte sequence in UTF-8"
+      end
+
+      verdict = lossiness.classify(source_format: :svg, target_format: :eps, source: "<svg></svg>")
+      expect(verdict).to eq("unknown")
+    ensure
+      scanner_class.send(:remove_method, :consume)
+    end
+
+    # G1-claricle.md #2: `@found` used to grow one entry per matched event
+    # instead of staying bounded by the fixed, small feature vocabulary --
+    # deduplication only happened once, at the very end, via `.uniq`.
+    it "keeps its found-feature set bounded by the feature vocabulary, not by how many times a feature is matched" do
+      scanner = lossiness.const_get(:Scanner).new("<svg></svg>")
+
+      2000.times { scanner.send(:note, :gradient) }
+      scanner.send(:note, :clip_path)
+
+      found = scanner.instance_variable_get(:@found)
+      expect(found).to eq(%i[gradient clip_path])
+      expect(found.size).to eq(2)
     end
   end
 
