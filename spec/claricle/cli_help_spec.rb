@@ -93,38 +93,16 @@ RSpec.describe Claricle::Cli::Runner do
       writer&.close
     end
 
-    # WHEN a write reached the shell, not merely that it did. Thor's general
-    # help calls `class_options_help` AFTER its three shell writes, so at
-    # that moment a live `help` has already delivered all three and a `help`
-    # that recorded them to replay later has delivered none.
+    # WHEN a write reached the shell, not merely that it did -- Thor's general
+    # help calls `class_options_help` AFTER its three shell writes, so an
+    # output assertion alone cannot tell the two examples below what drove
+    # them.
     #
-    # The two examples below need this and an output assertion cannot give
-    # it to them: a recorder replaying in order produces byte-identical
-    # output, so the finished page proves the calls happened and says
-    # nothing about what drove them. Measured -- a record-and-replay `help`
-    # passed both of these on their output alone.
-    #
-    # `and_wrap_original` on an RSpec double, not a prepended singleton
-    # module: `class_options_help` is protected on `Thor::Base::ClassMethods`,
-    # but `and_wrap_original` reaches protected methods the same as any other
-    # stub target, and unlike `prepend` its override is torn down by RSpec
-    # itself at the end of THIS example -- verified elsewhere in this repo at
-    # `spec/claricle/handlers/postscript_spec.rb:965`.
-    #
-    # The earlier version of this helper used `Claricle::Cli.singleton_class
-    # .prepend(hook)` with a manual `ensure { hook.send(:remove_method, ...) }`.
-    # `remove_method` takes the override out of the dispatch chain but a
-    # prepended module itself cannot be un-prepended, so any call path that
-    # skipped the `ensure` (an unhandled exception during `prepend` itself, or
-    # a future example copying the pattern without it) left a live hook for
-    # the rest of the process -- measured with a TracePoint: two examples
-    # using an earlier, `ensure`-less draft left `class_options_help` running
-    # SIX times on one later `help` call in `cli_spec.rb`, four of them
-    # through leaked closures holding dead objects. A test that COUNTS
-    # invocations after the fact only proves the one leak it happened to
-    # provoke stayed fixed; it says nothing about a differently-shaped leak.
-    # `and_wrap_original` removes the mechanism that leak needs at all, so
-    # there is nothing left to count.
+    # `and_wrap_original`, not `Claricle::Cli.singleton_class.prepend`: RSpec
+    # tears its own stub down at the end of THIS example, so there is no
+    # leaked-hook risk to guard against with a manual `ensure`/`remove_method`
+    # (history: `.claude/gate-runs/help-epipe-scope@b5c2bf4.md`). Same pattern
+    # at `spec/claricle/handlers/postscript_spec.rb:965`.
     #
     # It refuses a second invocation rather than returning the first and
     # dropping the rest. Two `help` calls inside one block is a reasonable
