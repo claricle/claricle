@@ -249,6 +249,14 @@ module Claricle
           # Capped at MAX_SCAN_BYTES + 1: past it returns `:too_large`
           # instead of reading further (measured: RSS tracked an
           # uncapped read 1:1 with input size).
+          #
+          # keep the `+ 1` argument on `source.read` even though no spec
+          # can catch its removal: an over-cap input returns the same
+          # `:too_large` verdict whether `read` stopped at the cap or
+          # read the whole source, so no output-observable spec
+          # distinguishes them -- only RSS does, which is what this
+          # class is measured against, not asserted in-suite. This
+          # becomes the only check once the cap is dropped.
           def tagged(source)
             bytes = if source.respond_to?(:read)
                       source.read(MAX_SCAN_BYTES + 1)
