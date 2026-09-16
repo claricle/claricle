@@ -3,7 +3,6 @@
 require "rexml/parsers/pullparser"
 require "rexml/xmltokens"
 
-require_relative "lossiness/levels"
 require_relative "errors"
 # `CharacterRules#unaccounted_text?` calls `AttributeReferences`, which lives
 # in `detector.rb`. `lib/claricle.rb` loads the detector later in its own list,
@@ -27,7 +26,9 @@ module Claricle
   # classifies were measured on vectory 0.12.0 during design; vectory is not a
   # dependency of this gem and is never reached.
   module Lossiness
-    # Defined in lossiness/levels.rb, required above -- see that file for why.
+    # `LEVELS` lives in lossiness/levels.rb, not here -- nothing in this file
+    # reads it; only `Models::Conversion` does, and requires that file
+    # directly rather than this whole classifier. See levels.rb for why.
 
     # A source may be a bare BasicObject exposing only reader methods, so a
     # type test must not dispatch a method to it. Same idiom, and the same
