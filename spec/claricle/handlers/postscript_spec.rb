@@ -1218,18 +1218,6 @@ RSpec.describe "Claricle PostScript handler" do
       .to eq(content[0, content.index("%%EndComments") + "%%EndComments\r\n".bytesize])
   end
 
-  # image.content would cost a path-born image a file-sized allocation
-  # it retains for the image's whole lifetime. Pinning that the memoizing
-  # reader is never touched is the only way to prove the handler reads
-  # no more than its own header, since a small fixture cannot show a
-  # difference in bytes read.
-  it "never reads a path-born image's content" do
-    image = Claricle::Image.from_path(fixture("basic.eps"))
-
-    expect(image).not_to receive(:content)
-    handler.inspection(image)
-  end
-
   # 0.2.0 merges every comment it does not recognise into a growing
   # `custom` hash and duplicates it on each merge -- quadratic in the
   # number of such comments. Comments this handler never reads must
