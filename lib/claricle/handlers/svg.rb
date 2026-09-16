@@ -162,33 +162,16 @@ module Claricle
         # ACCEPTS `&nope;`, so that limit is a place the DOM agrees with
         # us, not a case it catches and we miss.
         #
-        # KNOWN FALSE POSITIVE -- the other direction, and the only one.
-        # Four characters are legal in an XML name and REXML's OWN
-        # published NCNAME_STR accepts them, but REXML's live parser
-        # refuses them, so a VALID document is reported as
-        # svg.not_well_formed:
-        #
-        #   U+00B7 middle dot       U+0300 combining grave
-        #   U+203F undertie         U+2040 character tie
-        #
-        # Measured against xmllint, which calls all four valid, and
-        # against U+00C0, U+0660, U+3005 and ASCII, which the same
-        # parser accepts -- so this is about those four characters, not
-        # about extended names in general. U+0300 makes it reachable
-        # rather than exotic: NFD is the macOS filesystem default.
-        #
-        # Pinned to REXML 3.4.4; the gemspec's `~> 3.4.4` admits patch
-        # releases that could change this, so the spec asserts against
-        # REXML's own NCNAME_STR and breaks if the parser is fixed.
-        #
-        # Not fixable in this handler. The ParseException carries no
-        # continued_exception, and its message has already lost the
-        # name's leading character, so the QName cannot be recovered.
-        # Suppressing the exception would not resume parsing either: a
-        # legal affected name followed by genuinely malformed content
-        # would then return [], trading this false positive for a false
-        # negative, which is worse. A real fix means adapting or
-        # replacing REXML's grammar and re-parsing the document.
+        # FIXED, not disclosed: four characters are legal in an XML name
+        # and REXML's OWN published NCNAME_STR accepts them, but REXML's
+        # live grammar refused them, which would have reported a VALID
+        # document as svg.not_well_formed (U+00B7 middle dot, U+0300
+        # combining grave, U+203F undertie, U+2040 character tie --
+        # measured against xmllint, which calls all four valid). Fixed by
+        # parsing through `Detector.canonical_source` (see `count_roots`
+        # below), the same grammar patch `Detector::RootSource` already
+        # applies for the bounded root read, rather than reimplementing
+        # it here.
         NOT_WELL_FORMED_CODE = "svg.not_well_formed"
         ENCODING_UNUSABLE_CODE = "svg.encoding_unusable"
         MULTIPLE_ROOTS_CODE = "svg.multiple_root_elements"
@@ -203,6 +186,13 @@ module Claricle
         # `byteslice` is deliberately not used: it split a CJK codepoint
         # and Models::Issue then refused the value outright.
         MESSAGE_CHARACTER_LIMIT = 200
+        # 64 MiB matches the size class this module's own header comment
+        # measures against (1.7x-12.0x overhead depending on shape); past
+        # this, refuse to scan rather than read further into an
+        # attacker-controlled document with no bound at all.
+        MAX_SCAN_BYTES = 64 * 1024 * 1024
+        TOO_LARGE_CODE = "svg.too_large_to_scan"
+        TOO_LARGE_MESSAGE = "SVG source exceeds the #{MAX_SCAN_BYTES}-byte scan limit".freeze
 
         class << self
           # At most one issue, which is what is currently KNOWABLE
@@ -211,8 +201,32 @@ module Claricle
           # occurred. A document with two genuine problems reports the
           # first. The Array return keeps room for a later non-fatal
           # check, which would coexist with the root count.
+          # `tagged(source)` runs OUTSIDE this rescue on purpose: it is
+          # where the CALLER's reader runs (`source.read`), and an
+          # `ArgumentError` a broken reader raises is that reader's own
+          # bug, not a verdict about the SVG's content. Folding it into
+          # this rescue reported a storage/IO failure as
+          # `svg.encoding_unusable` -- measured with a reader whose
+          # `#read` itself raises `ArgumentError`. Only `do_scan`, which
+          # runs REXML over already-read text, owns this rescue; REXML's
+          # own unusable-encoding-name failure surfaces from inside it,
+          # same as before.
           def scan(source)
-            roots = count_roots(tagged(source))
+            do_scan(tagged(source))
+          end
+
+          private
+
+          # At most one issue, which is what is currently KNOWABLE
+          # rather than a law: the parser stops at its first fatal
+          # error, and the root count is only complete when none
+          # occurred. A document with two genuine problems reports the
+          # first. The Array return keeps room for a later non-fatal
+          # check, which would coexist with the root count.
+          def do_scan(text)
+            return [issue(TOO_LARGE_CODE, TOO_LARGE_MESSAGE)] if text == :too_large
+
+            roots = count_roots(text)
             return [] unless roots > 1
 
             [issue(MULTIPLE_ROOTS_CODE, "document has #{roots} root elements")]
@@ -236,8 +250,6 @@ module Claricle
             [issue(ENCODING_UNUSABLE_CODE, e.message)]
           end
 
-          private
-
           # Tag, never transcode: REXML still finds a BOM or a
           # declaration and switches encodings itself. Both arms arrive
           # binary-tagged -- `Image.from_content` normalises to
@@ -245,8 +257,22 @@ module Claricle
           # measured, a multibyte ROOT NAME reads back as "no root
           # element" from a binary-tagged source and parses from a
           # UTF-8-tagged one.
+          #
+          # Bounded to MAX_SCAN_BYTES + 1: whole-document well-formedness
+          # needs the whole document, but reading an attacker-controlled
+          # source without a cap turns this into a memory-proportional
+          # DoS (measured: RSS tracked input size 1:1 on a 5MB synthetic
+          # SVG with no cap). A document past the cap gets `:too_large`
+          # rather than a silently truncated, wrong verdict.
           def tagged(source)
-            bytes = source.respond_to?(:read) ? source.read : source.dup
+            bytes = if source.respond_to?(:read)
+                      source.read(MAX_SCAN_BYTES + 1)
+                    else
+                      source.byteslice(0, MAX_SCAN_BYTES + 1)
+                    end
+            bytes ||= ::String.new
+            return :too_large if bytes.bytesize > MAX_SCAN_BYTES
+
             bytes.force_encoding(Encoding::UTF_8)
           end
 
@@ -266,8 +292,17 @@ module Claricle
           # The root count is Claricle's own. REXML accepts four of the
           # five second-root shapes measured -- only `<svg/><g></g>`
           # raises -- so nothing here can be delegated to it.
+          #
+          # `Detector.canonical_source`, not a bare `BaseParser.new(text)`:
+          # REXML's own live grammar refuses four characters that are
+          # legal in an XML name (U+00B7, U+0300, U+203F, U+2040) and its
+          # OWN published NCNAME_STR accepts -- `Detector::RootSource`
+          # already patches that gap for the bounded root read, and
+          # reusing it here (over the whole document rather than just the
+          # root) avoids reimplementing the same grammar fix a second
+          # time and risking disagreement with it.
           def count_roots(text)
-            parser = REXML::Parsers::BaseParser.new(text)
+            parser = REXML::Parsers::BaseParser.new(Detector.canonical_source(text))
             roots = 0
             depth = 0
             while (type = parser.pull[0]) != :end_document

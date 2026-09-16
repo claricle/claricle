@@ -991,7 +991,13 @@ RSpec.describe "Claricle SVG handler" do
       {
         "ASCII" => ["a", "Missing attribute equal: <"],
         "CJK" => ["漢", "Missing attribute equal: <"],
-        "astral" => ["\u{1F600}", "Invalid attribute name: <"]
+        # U+1F600 used to fail as "Invalid attribute name" under REXML's
+        # narrower live NAME grammar; `Detector.canonical_source` (wired
+        # in below) widens matching to REXML's own published
+        # NCNAME_STR/NAME/NMTOKEN, under which this astral character is a
+        # valid NameChar, so parsing proceeds past the name and fails on
+        # the next token instead, same as the other two scripts.
+        "astral" => ["\u{1F600}", "Missing attribute equal: <"]
       }.each do |script, (char, anchor)|
         source = %(<svg xmlns="#{svg_ns}"><rect #{char * 50_000})
 
@@ -1231,33 +1237,21 @@ RSpec.describe "Claricle SVG handler" do
       expect(scan(source.b)).to eq([])
     end
 
-    # KNOWN FALSE POSITIVE, characterised rather than endorsed. These
-    # four characters are legal in an XML name and REXML's OWN published
-    # grammar accepts them, but REXML's live parser refuses them, so
-    # `conform` reports a well-formedness error on a valid document.
+    # FIXED, was a known false positive. These four characters are legal
+    # in an XML name and REXML's OWN published grammar accepts them, but
+    # REXML's live parser (a bare `REXML::Parsers::BaseParser`, still
+    # what `drain` below uses) refuses them. `scan` no longer takes that
+    # route: `count_roots` parses through `Detector.canonical_source`,
+    # which widens matching to REXML's published NCNAME_STR/NAME/NMTOKEN,
+    # so these four names read clean.
     #
     # Pinned to REXML 3.4.4 (gemspec `~> 3.4.4`, which admits patch
     # releases that could change this). The four are checked against
     # REXML's own NCNAME_STR rather than a copy of it, so this goes red
-    # if the grammar moves under us.
-    #
-    # This example is a CANARY and is deliberately tight. When a future
-    # REXML accepts these names, `scan` returns [] and this BREAKS --
-    # which is the point: it forces the limitation to be removed from
-    # the class comment rather than quietly outliving the bug. Nothing
-    # here is loosened with `.or`, and no exception prose is pinned,
-    # only the class.
-    #
-    # Not fixable inside this handler: REXML hands back nothing to
-    # recover the name from. Measured on the U+00B7 document, the
-    # ParseException carries `continued_exception == nil` and its
-    # message reads "Invalid attribute name: <·:svg>" -- the leading
-    # `a` is already consumed and gone. Suppressing the exception would
-    # not resume parsing either, so a legal name followed by genuinely
-    # malformed content would return [] and turn this false positive
-    # into a false negative. A real fix means adapting or replacing
-    # REXML's grammar and re-parsing, which is a different design.
-    it "reports a well-formedness error on four names XML actually allows" do
+    # if the grammar moves under us. `drain`, unpatched, still proves the
+    # live parser itself refuses each name -- this is a canary for the
+    # divergence this handler now closes, not for REXML's own behaviour.
+    it "reports no well-formedness error on four names XML actually allows" do
       anchored_ncname = /\A#{REXML::XMLTokens::NCNAME_STR}\z/
 
       {
@@ -1277,8 +1271,7 @@ RSpec.describe "Claricle SVG handler" do
         # real file takes this route. U+0300 arrives by itself -- NFD is
         # the macOS filesystem default.
         expect(Claricle.detect(source)).to eq(:svg), "for #{label}"
-        expect(pairs(scan(source))).to eq([["error", "svg.not_well_formed"]]),
-                                       "for #{label}"
+        expect(scan(source)).to eq([]), "for #{label}"
       end
     end
 
@@ -1299,6 +1292,41 @@ RSpec.describe "Claricle SVG handler" do
         expect(Claricle.detect(source)).to eq(:svg), "for #{label}"
         expect(scan(source)).to eq([]), "for #{label}"
       end
+    end
+
+    # FIXED: `tagged(source)` -- where the caller's own reader runs --
+    # used to sit inside `scan`'s rescue, so a reader bug landed on the
+    # document as `svg.encoding_unusable`. It now runs before the
+    # rescued region, so this propagates uncaught.
+    it "propagates a reader's own ArgumentError instead of reporting it as a bad SVG" do
+      broken_reader = Class.new do
+        def read(*)
+          raise ArgumentError, "storage backend exploded"
+        end
+      end.new
+
+      expect { scan(broken_reader) }.to raise_error(ArgumentError, "storage backend exploded")
+    end
+
+    # FIXED: `tagged` used to call `source.read`/`source.dup` with no
+    # limit, so RSS tracked input size 1:1 on an attacker-controlled
+    # document. It now refuses past MAX_SCAN_BYTES rather than reading
+    # further.
+    it "refuses to scan a source past the byte cap instead of reading it unbounded" do
+      max = scanner.const_get(:MAX_SCAN_BYTES)
+      oversized = "<svg>#{"x" * max}</svg>"
+
+      expect(oversized.bytesize).to be > max
+      expect(pairs(scan(oversized.b))).to eq([["error", "svg.too_large_to_scan"]])
+    end
+
+    it "still scans a source exactly at the byte cap" do
+      max = scanner.const_get(:MAX_SCAN_BYTES)
+      padding = max - "<svg></svg>".bytesize
+      at_cap = "<svg>#{" " * padding}</svg>"
+
+      expect(at_cap.bytesize).to eq(max)
+      expect(scan(at_cap.b)).to eq([])
     end
   end
 end
