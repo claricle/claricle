@@ -1230,6 +1230,7 @@ RSpec.describe "conversion lossiness" do
       end.to raise_error(ArgumentError, /wrong number of arguments/)
     ensure
       scanner_class.send(:define_method, :consume, original_consume)
+      scanner_class.send(:private, :consume)
     end
 
     # Deliberately NOT a mutation-check proof for this diff: reverting this
@@ -1250,6 +1251,7 @@ RSpec.describe "conversion lossiness" do
       expect(verdict).to eq("unknown")
     ensure
       scanner_class.send(:define_method, :consume, original_consume)
+      scanner_class.send(:private, :consume)
     end
 
     # G1-claricle.md #2: `@found` used to grow one entry per matched event
