@@ -104,24 +104,27 @@ RSpec.describe Claricle::Cli::Runner do
     # nothing about what drove them. Measured -- a record-and-replay `help`
     # passed both of these on their output alone.
     #
-    # `prepend` on the singleton, not a stub: `class_options_help` is
-    # protected on `Thor::Base::ClassMethods`, and the hook has to survive
-    # being called with Thor's own arguments.
+    # `and_wrap_original` on an RSpec double, not a prepended singleton
+    # module: `class_options_help` is protected on `Thor::Base::ClassMethods`,
+    # but `and_wrap_original` reaches protected methods the same as any other
+    # stub target, and unlike `prepend` its override is torn down by RSpec
+    # itself at the end of THIS example -- verified elsewhere in this repo at
+    # `spec/claricle/handlers/postscript_spec.rb:965`.
     #
-    # The `ensure` is the load-bearing half. A prepended module cannot be
-    # un-prepended, so without it every hook stays in the dispatch chain
-    # for the rest of the process and its closure fires on every later
-    # `help` -- measured with a TracePoint on `class_options_help`: after
-    # two examples here had run, an example in `cli_spec.rb` invoked it
-    # SIX times, four of them through leaked hooks holding dead `sink` and
-    # `reached` objects. Nothing broke, because these hooks only append to
-    # arrays nobody reads any more. The first hook that closes over an IO
-    # or a frozen object would fail an unrelated example in another file
-    # with nothing pointing back to here.
-    #
-    # `remove_method` leaves the empty module in `ancestors` -- Ruby gives
-    # no way to remove it -- but takes its override out of the chain,
-    # which is the part that matters.
+    # The earlier version of this helper used `Claricle::Cli.singleton_class
+    # .prepend(hook)` with a manual `ensure { hook.send(:remove_method, ...) }`.
+    # `remove_method` takes the override out of the dispatch chain but a
+    # prepended module itself cannot be un-prepended, so any call path that
+    # skipped the `ensure` (an unhandled exception during `prepend` itself, or
+    # a future example copying the pattern without it) left a live hook for
+    # the rest of the process -- measured with a TracePoint: two examples
+    # using an earlier, `ensure`-less draft left `class_options_help` running
+    # SIX times on one later `help` call in `cli_spec.rb`, four of them
+    # through leaked closures holding dead objects. A test that COUNTS
+    # invocations after the fact only proves the one leak it happened to
+    # provoke stayed fixed; it says nothing about a differently-shaped leak.
+    # `and_wrap_original` removes the mechanism that leak needs at all, so
+    # there is nothing left to count.
     #
     # It refuses a second invocation rather than returning the first and
     # dropping the rest. Two `help` calls inside one block is a reasonable
@@ -129,64 +132,14 @@ RSpec.describe Claricle::Cli::Runner do
     # first one is how it would waste an afternoon.
     def observing_generation(probe)
       seen = []
-      hook = generation_hook(seen, probe)
-      Claricle::Cli.singleton_class.prepend(hook)
+      allow(Claricle::Cli).to receive(:class_options_help).and_wrap_original do |original, *args|
+        seen << probe.call
+        original.call(*args)
+      end
       yield
       raise "observing_generation saw #{seen.length} generations, expected 1" unless seen.one?
 
       seen.first
-    ensure
-      hook&.send(:remove_method, :class_options_help)
-    end
-
-    def generation_hook(seen, probe)
-      Module.new do
-        define_method(:class_options_help) do |shell, groups = {}|
-          seen << probe.call
-          super(shell, groups)
-        end
-      end
-    end
-
-    # `observing_generation` prepends a module to `Claricle::Cli`'s singleton
-    # and a prepended module cannot be un-prepended, so without the
-    # `remove_method` in its `ensure` every hook stays in the dispatch chain
-    # for the rest of the PROCESS. Measured with a TracePoint: after two
-    # examples had used it, one help call in another file ran
-    # `class_options_help` six times, four of them through leaked closures
-    # holding dead objects.
-    #
-    # Both examples count invocations OUTSIDE any observation scope, so
-    # neither depends on which examples ran first. Removing the cleanup
-    # leaves every other example in this file green and turns these red.
-    describe "the generation hook's cleanup" do
-      def help_generations
-        count = 0
-        trace = TracePoint.new(:call) { |tp| count += 1 if tp.method_id == :class_options_help }
-        trace.enable { described_class.run(["help"], output: StringIO.new) }
-        count
-      end
-
-      it "leaves no hook behind after a completed observation" do
-        observing_generation(-> { :sampled }) do
-          described_class.run(["help"], output: StringIO.new)
-        end
-
-        expect(help_generations).to eq(1)
-      end
-
-      # The cleanup is an `ensure`, so a block that raises must not strand a
-      # hook either -- that is the case a happy-path-only check would miss.
-      it "leaves no hook behind when the observed block raises" do
-        expect do
-          observing_generation(-> { :sampled }) do
-            described_class.run(["help"], output: StringIO.new)
-            raise "boom"
-          end
-        end.to raise_error("boom")
-
-        expect(help_generations).to eq(1)
-      end
     end
 
     # Runner asks the settable `Thor::Base.shell` factory for each
