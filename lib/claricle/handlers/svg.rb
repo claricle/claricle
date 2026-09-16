@@ -195,22 +195,10 @@ module Claricle
         TOO_LARGE_MESSAGE = "SVG source exceeds the #{MAX_SCAN_BYTES}-byte scan limit".freeze
 
         class << self
-          # At most one issue, which is what is currently KNOWABLE
-          # rather than a law: the parser stops at its first fatal
-          # error, and the root count is only complete when none
-          # occurred. A document with two genuine problems reports the
-          # first. The Array return keeps room for a later non-fatal
-          # check, which would coexist with the root count.
-          # `tagged(source)` runs OUTSIDE this rescue on purpose: it is
-          # where the CALLER's reader runs (`source.read`), and an
-          # `ArgumentError` a broken reader raises is that reader's own
-          # bug, not a verdict about the SVG's content. Folding it into
-          # this rescue reported a storage/IO failure as
-          # `svg.encoding_unusable` -- measured with a reader whose
-          # `#read` itself raises `ArgumentError`. Only `do_scan`, which
-          # runs REXML over already-read text, owns this rescue; REXML's
-          # own unusable-encoding-name failure surfaces from inside it,
-          # same as before.
+          # `tagged(source)` (the caller's own reader) runs OUTSIDE
+          # `do_scan`'s rescue, so a reader's own `ArgumentError` is no
+          # longer reported as `svg.encoding_unusable` -- measured with a
+          # reader whose `#read` itself raises.
           def scan(source)
             do_scan(tagged(source))
           end
@@ -257,13 +245,10 @@ module Claricle
           # measured, a multibyte ROOT NAME reads back as "no root
           # element" from a binary-tagged source and parses from a
           # UTF-8-tagged one.
-          #
-          # Bounded to MAX_SCAN_BYTES + 1: whole-document well-formedness
-          # needs the whole document, but reading an attacker-controlled
-          # source without a cap turns this into a memory-proportional
-          # DoS (measured: RSS tracked input size 1:1 on a 5MB synthetic
-          # SVG with no cap). A document past the cap gets `:too_large`
-          # rather than a silently truncated, wrong verdict.
+
+          # Capped at MAX_SCAN_BYTES + 1: past it returns `:too_large`
+          # instead of reading further (measured: RSS tracked an
+          # uncapped read 1:1 with input size).
           def tagged(source)
             bytes = if source.respond_to?(:read)
                       source.read(MAX_SCAN_BYTES + 1)
