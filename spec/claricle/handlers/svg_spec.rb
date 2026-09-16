@@ -9,6 +9,7 @@ require "rexml/security"
 # the whole example rather than letting a block form delete it early.
 require "fileutils"
 require "tempfile"
+require "stringio"
 
 RSpec.describe "Claricle SVG handler" do
   let(:handler) { Claricle.const_get(:Handlers).const_get(:Svg).new }
@@ -1327,6 +1328,20 @@ RSpec.describe "Claricle SVG handler" do
 
       expect(at_cap.bytesize).to eq(max)
       expect(scan(at_cap.b)).to eq([])
+    end
+
+    # A String source takes the `byteslice` arm of `tagged`; only an
+    # object responding to `:read` (a File, a StringIO) takes the
+    # `source.read(MAX_SCAN_BYTES + 1)` arm above. Both arms carry their
+    # own cap independently, so the String-only spec above never
+    # exercises this one -- line-deletion-check.sh caught it: deleting
+    # the `MAX_SCAN_BYTES + 1` argument off `source.read` left every
+    # existing example green.
+    it "refuses to scan an IO-shaped source past the byte cap instead of reading it unbounded" do
+      max = scanner.const_get(:MAX_SCAN_BYTES)
+      oversized = "<svg>#{"x" * max}</svg>"
+
+      expect(pairs(scan(StringIO.new(oversized.b)))).to eq([["error", "svg.too_large_to_scan"]])
     end
   end
 end
