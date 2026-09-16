@@ -1220,6 +1220,7 @@ RSpec.describe "conversion lossiness" do
     # REXML's value rules raise on invalid-UTF-8 input may be absorbed.
     it "does not hide a bug in its own consume path behind an unrelated ArgumentError rescue" do
       scanner_class = lossiness.const_get(:Scanner)
+      original_consume = scanner_class.instance_method(:consume)
       scanner_class.send(:define_method, :consume) do |*|
         raise ArgumentError, "wrong number of arguments (given 1, expected 0)"
       end
@@ -1228,7 +1229,7 @@ RSpec.describe "conversion lossiness" do
         lossiness.classify(source_format: :svg, target_format: :eps, source: "<svg></svg>")
       end.to raise_error(ArgumentError, /wrong number of arguments/)
     ensure
-      scanner_class.send(:remove_method, :consume)
+      scanner_class.send(:define_method, :consume, original_consume)
     end
 
     # Deliberately NOT a mutation-check proof for this diff: reverting this
@@ -1240,6 +1241,7 @@ RSpec.describe "conversion lossiness" do
     # `rescue` line as safely deletable without this example.
     it "still answers unknown, not a raise, for the genuine invalid-UTF-8 ArgumentError it exists to catch" do
       scanner_class = lossiness.const_get(:Scanner)
+      original_consume = scanner_class.instance_method(:consume)
       scanner_class.send(:define_method, :consume) do |*|
         raise ArgumentError, "invalid byte sequence in UTF-8"
       end
@@ -1247,7 +1249,7 @@ RSpec.describe "conversion lossiness" do
       verdict = lossiness.classify(source_format: :svg, target_format: :eps, source: "<svg></svg>")
       expect(verdict).to eq("unknown")
     ensure
-      scanner_class.send(:remove_method, :consume)
+      scanner_class.send(:define_method, :consume, original_consume)
     end
 
     # G1-claricle.md #2: `@found` used to grow one entry per matched event
