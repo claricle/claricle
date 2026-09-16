@@ -1398,6 +1398,20 @@ RSpec.describe "Claricle PostScript handler" do
       reads
     end
 
+    # Exactly `size` bytes of ordinary, non-structural header lines ("%"
+    # plus filler plus a line break), built to land a caller's own bytes
+    # at a precise offset -- needed to put a straddling boundary exactly
+    # where a spec wants it, which a repeated fixed-width line cannot
+    # guarantee when `size` is not a multiple of that width.
+    def exact_padding(size)
+      count, rest = size.divmod(100)
+      if [1, 2].include?(rest)
+        count -= 1
+        rest += 100
+      end
+      ("%#{"x" * 98}\n" * count) + (rest.zero? ? "" : "%#{"x" * (rest - 2)}\n")
+    end
+
     def program(header_comments, body_lines)
       padding = "%%For: #{"x" * 60}\n" * header_comments
       body = "0 0 moveto showpage\n" * body_lines
@@ -1511,8 +1525,12 @@ RSpec.describe "Claricle PostScript handler" do
     # the sentinel behind it simply gone.
     #
     # Trusting the bytes up to the last line TERMINATOR instead of the
-    # whole chunk is what closes it -- a truncated tail can never decide
-    # where the header ends.
+    # whole chunk is what closes it -- an AMBIGUOUS partial tail, one
+    # `scan_partial_line` cannot yet classify either way, can never decide
+    # where the header ends on its own. A DECISIVE partial tail is a
+    # different case: see "does not report truncated when the header
+    # already ended before a newline-free body" below, where a pending
+    # body line's prefix alone is enough to end the header early.
     it "does not end the header on a line a probe boundary split" do
       # 15 + 14 + 26 = a 55-byte preamble, then 68-byte comments, which
       # puts probe six exactly one byte into a line.
@@ -1537,6 +1555,208 @@ RSpec.describe "Claricle PostScript handler" do
         expect(result.meta).to include("title" => "Kept")
       end
     end
+
+    # The shape none of the above cases produce: no %%EndComments, and
+    # every line satisfies Dsc.header_line? (an ordinary comment), so
+    # neither of HeaderScanner#classify's two exits ever fires. Before the
+    # scan limit existed this read to EOF -- reproduced independently on
+    # this branch at 1-10 MB (0.07s-2.48s, already super-linear) and
+    # reported at 10-100 MB (1.9s-144s, 4.64 GB peak RSS) in the brief that
+    # started this work.
+    #
+    # Stubbed to a small limit so the spec stays fast and deterministic
+    # rather than needing a multi-MB fixture to prove the bound binds. The
+    # limit is an exact multiple of HEADER_PROBE_BYTES (as the real 8 MiB
+    # limit also is: 8*1024*1024 / 8192 == 1024), so the read loop detects
+    # exhaustion on the very chunk that reaches the limit and asks for no
+    # probe beyond it.
+    it "stops well short of a header that never ends, and reports failed" do
+      Tempfile.create(["never_ending", ".ps"]) do |file|
+        file.binmode
+        # 20,000 lines * 50 bytes = ~1 MB, several times the stubbed limit
+        # below, and %%EndComments never appears.
+        file.write("%!PS-Adobe-3.0\n#{"%comment #{"x" * 40}\n" * 20_000}")
+        file.flush
+        image = Claricle::Image.from_path(file.path)
+        stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", 3 * 8192)
+
+        result = nil
+        reads = reads_for(file.path) { result = handler.inspection(image) }
+
+        expect(result.parse_status).to eq("failed")
+        expect(result.issues.map(&:code)).to eq(["postscript.header_unreadable"])
+        expect(reads.sum).to eq(3 * 8192)
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Postscript)
+              .send(:private_constant, :HEADER_LIMIT_BYTES)
+    end
+
+    # What truncating mid-document actually risks: `Dsc.settled?` (and the
+    # `disputed?`/`continued?` checks it composes) can only see the bytes
+    # in front of it. A `%%+` continuation landing one byte past the
+    # limit is invisible to a truncated read, so a naive "publish what was
+    # read" answer would report the fragment as a complete, undisputed
+    # title -- when the full document marks it continued and suppresses
+    # it. Measured against this exact shape before this guard existed: it
+    # reported `title: "First part"`.
+    it "does not publish a title whose continuation falls past the limit" do
+      Tempfile.create(["straddled_continuation", ".ps"]) do |file|
+        file.binmode
+        limit = 3 * 8192
+        preamble = "%!PS-Adobe-3.0\n"
+        title_line = "%%Title: First part\n"
+        # Padding sized so title_line ends exactly 5 bytes before the
+        # limit, leaving "%%+ m" -- an incomplete line -- as the pending
+        # bytes at the cut.
+        padding = exact_padding(limit - preamble.bytesize - title_line.bytesize - 5)
+        file.write("#{preamble}#{padding}#{title_line}%%+ more\n%%EndComments\nshowpage\n")
+        file.flush
+        image = Claricle::Image.from_path(file.path)
+        stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", limit)
+
+        result = handler.inspection(image)
+
+        expect(result.parse_status).to eq("failed")
+        expect(result.meta).to be_nil
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Postscript)
+              .send(:private_constant, :HEADER_LIMIT_BYTES)
+    end
+
+    # The same mechanism on a box rather than a scalar field: a conflicting
+    # %%BoundingBox declared past the limit is invisible to a truncated
+    # read, so `Dsc.disputed?` sees only the first declaration and cannot
+    # refuse it -- a naive "publish what was read" answer would report a
+    # box the full document explicitly disputes.
+    it "does not publish a bounding box whose conflicting repeat falls past the limit" do
+      Tempfile.create(["straddled_dispute", ".ps"]) do |file|
+        file.binmode
+        limit = 3 * 8192
+        preamble = "%!PS-Adobe-3.0\n"
+        box_line = "%%BoundingBox: 0 0 100 50\n"
+        # Padding alone spans the whole limit, so the conflicting second
+        # declaration below is guaranteed to fall entirely past the cut --
+        # the truncated read never sees it.
+        padding = exact_padding(limit)
+        file.write("#{preamble}#{box_line}#{padding}%%BoundingBox: 0 0 200 200\n%%EndComments\nshowpage\n")
+        file.flush
+        image = Claricle::Image.from_path(file.path)
+        stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", limit)
+
+        result = handler.inspection(image)
+
+        expect(result.parse_status).to eq("failed")
+        expect(result.meta).to be_nil
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Postscript)
+              .send(:private_constant, :HEADER_LIMIT_BYTES)
+    end
+
+    # The false positive the ordering inside #scan existed to prevent: a
+    # header that has ALREADY correctly ended -- a disqualifying body line
+    # that plainly is not a comment -- must not be reported as truncated
+    # just because that body line has no terminator yet and pushes the
+    # byte count over the limit while still pending. The header content
+    # here ends well under the limit; only the trailing, newline-free
+    # "showpage" body crosses it.
+    it "does not report truncated when the header already ended before a newline-free body" do
+      Tempfile.create(["ended_before_body", ".ps"]) do |file|
+        file.binmode
+        limit = 3 * 8192
+        preamble = "%!PS-Adobe-3.0\n"
+        header_content = preamble + exact_padding(limit - 7000 - preamble.bytesize)
+        file.write("#{header_content}showpage #{" " * 30_000}")
+        file.flush
+        image = Claricle::Image.from_path(file.path)
+        stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", limit)
+
+        result = handler.inspection(image)
+
+        expect(result.parse_status).to eq("ok")
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Postscript)
+              .send(:private_constant, :HEADER_LIMIT_BYTES)
+    end
+
+    # The same false-positive family, from the sentinel side rather than a
+    # disqualifying line: a lone trailing CR at the very end of a probe is
+    # deliberately left unclassified (`pending_cr?`/`wait_on_cr`), so a
+    # CRLF split across two reads is not misread as a CR-terminated line
+    # followed by a bogus empty LF-only line. `%%EndComments\r` landing
+    # exactly at the ceiling is decisively the sentinel whichever way that
+    # CR resolves, and must not be truncated while still waiting to find
+    # out.
+    it "does not report truncated when a CR-terminated sentinel lands exactly at the limit" do
+      Tempfile.create(["cr_sentinel_at_limit", ".ps"]) do |file|
+        file.binmode
+        limit = 3 * 8192
+        preamble = "%!PS-Adobe-3.0\n"
+        sentinel = "%%EndComments\r"
+        padding = exact_padding(limit - preamble.bytesize - sentinel.bytesize)
+        file.write("#{preamble}#{padding}#{sentinel}showpage title here\n")
+        file.flush
+        image = Claricle::Image.from_path(file.path)
+        stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", limit)
+
+        result = handler.inspection(image)
+
+        expect(result.parse_status).to eq("ok")
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Postscript)
+              .send(:private_constant, :HEADER_LIMIT_BYTES)
+    end
+
+    # What the CR grace above must NOT do: renew itself indefinitely. A
+    # source built so every single probe boundary lands on a CR -- an
+    # ordinary comment line sized to divide HEADER_PROBE_BYTES evenly --
+    # re-armed the exemption on every append before `@cr_grace_used`
+    # existed, so a source many times the limit read to completion with
+    # the scan never truncating at all. This is the never-ending-header
+    # hang this whole change exists to close, reopened through the CR
+    # exemption alone.
+    it "still truncates when every probe boundary lands on a pending CR" do
+      Tempfile.create(["repeated_cr_boundary", ".ps"]) do |file|
+        file.binmode
+        limit = 3 * 8192
+        line = "%#{"x" * 62}\r" # 64 bytes, divides 8192 evenly
+        lines_per_probe = 8192 / line.bytesize
+        preamble = "%!PS-Adobe-3.0\n"
+        first_probe = preamble + "%#{"x" * (64 - preamble.bytesize - 2)}\r" +
+                      (line * (lines_per_probe - 1))
+        # 10 probes' worth, far more than the 3-probe limit, and
+        # %%EndComments never appears.
+        file.write(first_probe + (line * lines_per_probe * 9))
+        file.flush
+        image = Claricle::Image.from_path(file.path)
+        stub_const("Claricle::Handlers::Postscript::HEADER_LIMIT_BYTES", limit)
+
+        result = nil
+        reads = reads_for(file.path) { result = handler.inspection(image) }
+
+        expect(result.parse_status).to eq("failed")
+        # The limit, plus at most one probe of CR grace, plus at most one
+        # probe for the partial-line check -- never the full ten probes.
+        expect(reads.sum).to be <= limit + (2 * 8192)
+        expect(reads.sum).to be < file.size / 2
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Postscript)
+              .send(:private_constant, :HEADER_LIMIT_BYTES)
+    end
+
+    # A header that ends well inside the bound must be unaffected by it --
+    # this holds for the many short-header examples elsewhere in this
+    # file, all of which run against the real 8 MiB HEADER_LIMIT_BYTES and
+    # would fail here if the bound disturbed a normal, short header. A
+    # dedicated example asserting only that would pass identically whether
+    # the bound exists or not (a header this small parses the same either
+    # way), so it cannot prove anything a mutation of the fix would catch
+    # -- see mutation-check.sh's verdict on this diff.
   end
 
   # Nothing guarantees the tag on a String of raw bytes, and these bytes
