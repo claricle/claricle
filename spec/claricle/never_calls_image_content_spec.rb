@@ -2,30 +2,19 @@
 
 require_relative "../support/inspect_fixture"
 
-# Handed a PATH-BORN image, no handler calls `Image#content`, and none
-# leaves bytes in that image's `@content`.
+# Handed a PATH-BORN image, no handler may call `Image#content` or leave
+# bytes in its `@content`: `#content` slurps the whole file into memory,
+# defeating the bound `with_source` exists to keep. A content-born image
+# legitimately reaches `#content` (`with_path` writes it to a temp file);
+# only path-born is in scope here.
 #
-# `#content` is `@content ||= File.binread(path).freeze`. It reads the
-# whole file and keeps it for the life of the image. `with_source` hands
-# over the open File and retains nothing. This regressed once:
-# `Handlers::Metafile#inspection` used to send the whole stream through
-# `image.content`, which defeated the limit it exists to bound.
-#
-# PATH-BORN is the whole scope. A content-born image legitimately reaches
-# `#content`, because `with_path` writes those bytes to a temporary file.
-# Only a path-born image can reach the unbounded read this file forbids.
-#
-# The samples are driven off the registry, so a new inspect-capable format
-# cannot arrive without one. Where a format has a file the detector accepts
-# and the handler then fails on, it brings that file too: a handler that
-# slurps only on the failure path would pass on good input alone. ps and
-# svg bring a good file only -- no FAILING file exists for them, because
-# their handlers answer "ok" for every byte string the detector accepts as
-# that format. eps has one: the four-byte DOS EPS wrapper signature
-# (C5 D0 D3 C6) is detected as eps by magic bytes alone, but its declared
-# PostScript range is invalid (offset 0 is below the header's own minimum),
-# so `Handlers::Postscript` never even reaches the PostScript delegate --
-# the header scan itself refuses the file first.
+# Samples are driven off the registry, so a new inspect-capable format
+# cannot skip this file. Where the detector accepts a file the handler then
+# fails on, add that failing file too -- a handler that slurps only on the
+# failure path would otherwise pass on good input alone. eps's failing
+# sample is the DOS EPS wrapper signature (C5 D0 D3 C6): detected as eps by
+# magic bytes, but its PostScript range is invalid, so the header scan
+# refuses it before ever reaching the PostScript delegate.
 RSpec.describe "Handlers inspect path-born samples without calling Image#content" do
   # Local variables, not `let`: `samples.each` below builds the example
   # tree once, when this file loads, before any example runs. `let` is
@@ -41,23 +30,18 @@ RSpec.describe "Handlers inspect path-born samples without calling Image#content
 
   # format => fixture file => the parse status that file must produce.
   samples = {
-    # The pdf pair was BUILT rather than found, because the PDF handler that
-    # arrived with it builds its own inputs at runtime and left no fixture
-    # behind. Reproduce them with #12's own builder, so nobody has to guess
-    # what these bytes are:
+    # The pdf pair was BUILT, not found: the PDF handler builds its own
+    # inputs at runtime and left no fixture behind. Reproduce with #12's
+    # own builder:
     #
     #   require_relative "spec/support/pdf_builder"
     #   FileUtils.cp(PdfBuilder.path, "spec/fixtures/inspect/valid.pdf")
     #   File.binwrite("spec/fixtures/inspect/no_trailer.pdf",
     #                 File.binread(PdfBuilder.path)[0, 60])
     #
-    # 60 bytes lands mid-way through the object list -- 51 bytes PAST the
-    # 9-byte header, and well before the xref at 162 or the trailer at 251.
-    # The cut is deliberate rather than convenient: sweeping every truncation
-    # point of this document, bytes 9 through 297 all report no trailer and
-    # inspect "failed", and only 298 onward parse. That is a 288-byte-wide
-    # band, so 60 is nowhere near an edge a pdfrb release could move -- it
-    # would take pdfrb inventing a trailer the bytes never contain.
+    # 60 bytes lands well inside the object list, before the xref (162) or
+    # trailer (251) -- every cut from byte 9 through 297 reports the same
+    # "no trailer"/"failed" result, so this point is not fragile.
     pdf: { "valid.pdf" => "ok", "no_trailer.pdf" => "failed" },
     png: { "valid.png" => "ok", "short_ihdr.png" => "failed" },
     emf: { "valid.emf" => "ok", "truncated_44.emf" => "failed" },
