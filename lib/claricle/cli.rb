@@ -21,29 +21,13 @@ module Claricle
     end
 
     # Thor supplies this command. The rescue is WIDE on purpose: it covers
-    # the text generation as well as the write, so an `Errno::EPIPE` raised
+    # text generation as well as the write, so an `Errno::EPIPE` raised
     # while Thor is still building the help page reports success too.
-    #
-    # Narrowing it to the write half was tried and abandoned, and the
-    # reason is worth keeping so it is not tried again. Narrowing needs the
-    # writes buffered, which needs Thor's shell calls recorded and replayed
-    # later -- and a replayed call cannot be given back the shell state it
-    # was made in. Three review rounds found seven separate ways that goes
-    # wrong on shells Thor itself drives correctly: a write recorded inside
-    # `indent` replays flush left, one recorded inside `mute` replays and
-    # prints, one recorded while `base.options[:quiet]` was set replays and
-    # prints, restoring padding raises on a frozen shell, a shell that
-    # reports padding without accepting it loses its indentation, writing
-    # some calls immediately and deferring the rest reorders the page, and
-    # a frozen `Cli` cannot have its shell swapped at all.
-    #
-    # The state a shell carries is Thor's to grow, so that list is not
-    # closeable. What the narrowing would have bought is one distinction --
-    # a broken pipe during generation reporting 4 rather than 0 -- and for
-    # a page the user piped into `head` both answers mean the same thing.
-    # `spec/claricle/cli_help_spec.rb` pins the wide behaviour, and every
-    # caller shape the abandoned design broke, so a future change to any
-    # of it is deliberate rather than accidental.
+    # Narrowing it to the write half needs Thor's shell calls buffered and
+    # replayed, and a replayed call cannot be given back the shell state it
+    # was made in -- see the gate record for the measured failure shapes.
+    # `spec/claricle/cli_help_spec.rb` pins the wide behaviour, so a future
+    # narrowing attempt is deliberate rather than accidental.
     def help(command = nil, subcommand = false) # rubocop:disable Style/OptionalBooleanParameter
       tolerate_closed_output { super(command, subcommand) }
     end
