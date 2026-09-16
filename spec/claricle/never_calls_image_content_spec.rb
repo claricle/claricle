@@ -18,10 +18,12 @@ require_relative "../support/inspect_fixture"
 # The samples are driven off the registry, so a new inspect-capable format
 # cannot arrive without one. Where a format has a file the detector accepts
 # and the handler then fails on, it brings that file too: a handler that
-# slurps only on the failure path would pass on good input alone. eps, ps
-# and svg bring a good file only -- no FAILING file exists for them,
-# because their handlers answer "ok" for every byte string the detector
-# accepts as that format.
+# slurps only on the failure path would pass on good input alone. ps and
+# svg bring a good file only -- no FAILING file exists for them, because
+# their handlers answer "ok" for every byte string the detector accepts as
+# that format. eps has one: the four-byte DOS EPS wrapper signature
+# (C5 D0 D3 C6) is detected as eps by magic bytes alone, but carries no
+# `%!PS` anywhere in it, so the PostScript delegate fails to parse it.
 RSpec.describe "Handlers inspect path-born samples without calling Image#content" do
   # Local variables, not `let`: `samples.each` below builds the example
   # tree once, when this file loads, before any example runs. `let` is
@@ -57,7 +59,7 @@ RSpec.describe "Handlers inspect path-born samples without calling Image#content
     pdf: { "valid.pdf" => "ok", "no_trailer.pdf" => "failed" },
     png: { "valid.png" => "ok", "short_ihdr.png" => "failed" },
     emf: { "valid.emf" => "ok", "truncated_44.emf" => "failed" },
-    eps: { "basic.eps" => "ok" },
+    eps: { "basic.eps" => "ok", "zeroed_wrapper.eps" => "failed" },
     ps: { "bare.ps" => "ok" },
     svg: { "valid.svg" => "ok" }
   }.freeze
