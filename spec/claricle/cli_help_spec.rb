@@ -93,21 +93,17 @@ RSpec.describe Claricle::Cli::Runner do
       writer&.close
     end
 
-    # WHEN a write reached the shell, not merely that it did -- Thor's general
-    # help calls `class_options_help` AFTER its three shell writes, so an
-    # output assertion alone cannot tell the two examples below what drove
-    # them.
+    # WHEN a write reached the shell, not merely that it did -- Thor calls
+    # `class_options_help` AFTER its three shell writes, so an output
+    # assertion alone can't tell the examples below what drove them.
     #
-    # `and_wrap_original`, not `Claricle::Cli.singleton_class.prepend`: RSpec
-    # tears its own stub down at the end of THIS example, so there is no
-    # leaked-hook risk to guard against with a manual `ensure`/`remove_method`
-    # (history: `.claude/gate-runs/help-epipe-scope@b5c2bf4.md`). Same pattern
-    # at `spec/claricle/handlers/postscript_spec.rb:965`.
+    # `and_wrap_original`, not `prepend`: RSpec tears its own stub down at
+    # the end of THIS example, so a leaked hook can't outlive it (history:
+    # `.claude/gate-runs/help-epipe-scope@b5c2bf4.md`; same pattern at
+    # `spec/claricle/handlers/postscript_spec.rb:965`).
     #
-    # It refuses a second invocation rather than returning the first and
-    # dropping the rest. Two `help` calls inside one block is a reasonable
-    # thing for a later example to try, and silently answering about the
-    # first one is how it would waste an afternoon.
+    # Refuses a second `help` call inside one block instead of silently
+    # answering about the first.
     def observing_generation(probe)
       seen = []
       allow(Claricle::Cli).to receive(:class_options_help).and_wrap_original do |original, *args|
