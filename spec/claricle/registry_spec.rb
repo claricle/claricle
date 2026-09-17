@@ -45,12 +45,14 @@ RSpec.describe "Claricle::Registry" do
       expect(registry.handler_for(:svg)).to be(handlers.const_get(:Svg))
     end
 
-    # Derived, so it cannot advertise an operation still on Base. emf and
-    # svg are the two formats with a real convert edge so far (item 04).
+    # Derived, so it cannot advertise an operation still on Base. emf, pdf
+    # and png all implement inspect and conform, and emf and svg are the
+    # two formats with a real convert edge so far (item 04) -- these rows
+    # are what prove this is not just "always [:inspect]".
     it "reports only the capabilities each handler has implemented" do
       expect(registry.capabilities_for(:emf)).to eq(%i[inspect conform convert])
       expect(registry.capabilities_for(:eps)).to eq([:inspect])
-      expect(registry.capabilities_for(:pdf)).to eq([:inspect])
+      expect(registry.capabilities_for(:pdf)).to eq(%i[inspect conform])
       expect(registry.capabilities_for(:png)).to eq(%i[inspect conform])
       expect(registry.capabilities_for(:ps)).to eq([:inspect])
       expect(registry.capabilities_for(:svg)).to eq(%i[inspect conform convert])
