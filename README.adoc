@@ -10,8 +10,9 @@ Claricle is a Ruby library and CLI for working with image files. It
 detects a file's format from its bytes and gives one object and one set
 of models to work with, wrapping specialist tools behind a single API.
 
-Format detection ships today. Inspection, conformance checking and
-conversion are being built on top of it.
+Format detection and inspection ship today, across PNG, SVG, EMF, EPS,
+PS and PDF. Conformance checking and conversion are still being built
+on top of them -- see "What does not work yet" below.
 
 [NOTE]
 ====
@@ -142,6 +143,62 @@ lists a command that does nothing.
 shows control characters escaped. Both are there so a crafted file
 cannot print a line that looks like Claricle's own. `--json` is
 unaffected: it carries the real values.
+
+=== Inspecting a file
+
+Output below is a real transcript, run against a fixture in this repo
+(`spec/fixtures/inspect/basic.eps`, an EPS with a DSC header):
+
+[source,sh]
+----
+$ claricle inspect spec/fixtures/inspect/basic.eps
+format: eps
+dimensions: 100.0x50.0
+meta.bounding_box: [0.0, 0.0, 100.0, 50.0]
+meta.creation_date: 2026-08-20
+meta.creator: claricle specs
+meta.language_level: 2
+meta.title: Baseline figure
+parse status: ok
+
+$ claricle inspect spec/fixtures/inspect/basic.eps --json
+{"format":"eps","width":100.0,"height":50.0,"meta":{"bounding_box":[0.0,0.0,100.0,50.0],"title":"Baseline figure","creator":"claricle specs","creation_date":"2026-08-20","language_level":2},"parse_status":"ok","issues":[]}
+----
+
+A file Claricle cannot recognise, or cannot find, exits with the code
+named below rather than a stack trace:
+
+[source,sh]
+----
+$ claricle inspect not-an-image.txt; echo "exit: $?"
+claricle: no known image signature
+exit: 3
+
+$ claricle inspect missing.png; echo "exit: $?"
+claricle: No such file or directory @ rb_sysopen - missing.png
+exit: 2
+----
+
+=== Listing formats
+
+[source,sh]
+----
+$ claricle formats
+emf	inspect
+eps	inspect
+pdf	inspect
+png	inspect
+ps	inspect
+svg	inspect
+
+$ claricle formats --json
+[{"format":"emf","inspect":true,"conform":false,"convert":false,"convert_to":[]},{"format":"eps","inspect":true,"conform":false,"convert":false,"convert_to":[]},{"format":"pdf","inspect":true,"conform":false,"convert":false,"convert_to":[]},{"format":"png","inspect":true,"conform":false,"convert":false,"convert_to":[]},{"format":"ps","inspect":true,"conform":false,"convert":false,"convert_to":[]},{"format":"svg","inspect":true,"conform":false,"convert":false,"convert_to":[]}]
+----
+
+Every row reads `false` for `conform` and `convert` today. That is a
+derived fact, not a hand-maintained value -- `formats` reads it off the
+handler classes actually loaded (see "Architecture" below), so it
+cannot advertise an operation that does not run.
 
 === Version
 

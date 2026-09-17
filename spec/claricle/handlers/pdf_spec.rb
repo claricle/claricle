@@ -110,6 +110,22 @@ RSpec.describe "Claricle PDF handler" do
     end
   end
 
+  # Every time this handler's OWN header read runs, one entry per call --
+  # not `Pdfrb::Model::Cos::Stream#decoded_stream`'s call count, which
+  # also includes pdfrb's own `ObjectReader#load_from_objstm` read and
+  # would make a count here depend on the delegate's internal caching
+  # rather than on this handler's.
+  def objstm_header_reads
+    reads = []
+    handler.singleton_class.prepend(Module.new do
+      define_method(:uncached_objstm_header_pairs) do |*args|
+        reads << args
+        super(*args)
+      end
+    end)
+    reads
+  end
+
   # stub_const restores a constant with const_set, which makes it public
   # again -- the same hazard registry_spec's own hook exists for.
   around do |example|
@@ -690,11 +706,68 @@ RSpec.describe "Claricle PDF handler" do
     end
 
     # pdfrb performs NO generation check on the compressed path --
-    # `add_compressed` never records one -- so this guard is the entire
-    # guarantee, and its precondition says so.
+    # `add_compressed` never records one -- so this guard is ONE of two
+    # guarantees on this path; the other is the oid check below, for what
+    # pdfrb's own generation check by definition cannot catch: the file's
+    # own object-stream header naming a different object at the index the
+    # xref points at.
     it "refuses a compressed reference asking for a non-zero generation" do
       path = objstm(root: "1 1 R")
       expect(bare_walk(path).value[:Type]).to eq(:Pages)
+
+      caught = recording_handler.last
+      expect(inspect_pdf(path).parse_status).to eq("failed")
+      expect(caught).to be_empty
+    end
+
+    # ISO 32000-1 7.5.7: the xref-declared object number and the object
+    # stream's OWN stored number at that index must agree. pdfrb's
+    # `ObjectReader#load_from_objstm` (measured against pdfrb-0.7.49
+    # lib/pdfrb/source/object_reader.rb:119-129) discards the stored number
+    # and relabels whatever it finds at the index with the oid the xref
+    # asked for -- so it cannot detect this itself, and the generation
+    # guard above does not help: `add_compressed` never records one.
+    #
+    # Two Pages bodies, one honest (`/Count 1`) and one not (`/Count
+    # 999`), placed so that pointing oid 2's compressed entry at index 1
+    # is the legitimate case -- already covered by "inspects a document
+    # whose catalog and page tree are compressed" above, which is why
+    # that variant is not repeated here -- and pointing it at index 2
+    # instead is this defect: the ObjStm's own header at index 2 declares
+    # oid 3, not 2, which is exactly the disagreement 7.5.7 forbids.
+    # Precondition: bare pdfrb resolves this anyway and hands back the
+    # WRONG object's value, which is the defect this guard exists for.
+    it "refuses a compressed reference whose index disagrees with the ObjStm's own header" do
+      pages_honest = "<< /Type /Pages /Kids [] /Count 1 >>"
+      pages_other = "<< /Type /Pages /Kids [] /Count 999 >>"
+      path = objstm(bodies: [PdfBuilder::CATALOG, pages_honest, pages_other],
+                    entries: { 2 => [2, PdfObjstmBuilder::OBJSTM_OID, 2] })
+
+      Pdfrb::Document.open(path) do |doc|
+        expect(doc.xref[2].type).to be(:compressed)
+        expect(doc.xref[2].index).to eq(2)
+        mislabeled = doc.object(Pdfrb::Model::Reference.new(2, 0))
+        expect(mislabeled.value[:Count]).to eq(999)
+      end
+
+      caught = recording_handler.last
+      expect(inspect_pdf(path).parse_status).to eq("failed")
+      expect(caught).to be_empty
+    end
+
+    # An object stream is never itself stored inside another object
+    # stream (7.5.7): resolving one requires the containing stream's own
+    # xref entry to be `:in_use`. Without checking that FIRST, a crafted
+    # xref naming a `:compressed` container would send the new check's own
+    # `document.object` call straight into pdfrb's compressed-resolution
+    # path a second time, with none of this file's guards applied to that
+    # inner hop.
+    it "refuses a compressed entry whose object stream is itself marked compressed" do
+      path = objstm(entries: { PdfObjstmBuilder::OBJSTM_OID => [2, PdfObjstmBuilder::OBJSTM_OID, 0] })
+
+      Pdfrb::Document.open(path) do |doc|
+        expect(doc.xref[PdfObjstmBuilder::OBJSTM_OID].type).to be(:compressed)
+      end
 
       caught = recording_handler.last
       expect(inspect_pdf(path).parse_status).to eq("failed")
@@ -719,10 +792,18 @@ RSpec.describe "Claricle PDF handler" do
         end
     end
 
+    # Measured individually against the fix (each case run alone, not
+    # inferred): `compressed_oid_matches?` reads `objstm.decoded_stream`
+    # and `/First` for every one of these malformed streams too, so
+    # `Pdfrb::MalformedPdfError` (the ObjStm object absent entirely),
+    # `Pdfrb::ParseError` (missing /N -- only raised once resolution
+    # reaches pdfrb's own `ObjectStreamReader.read`, since the new check
+    # never looks at /N) and `ArgumentError` (an invalid Predictor,
+    # raised decoding the very bytes the new check also needs) are all
+    # UNCHANGED: still raised, still caught here. `TypeError` moved out
+    # below -- it is the one case the new check now intercepts itself.
     it "reports failed for every other malformed object stream, naming its class" do
       { Pdfrb::MalformedPdfError => { omit_stream: true },
-        NoMethodError => { entries: { 4 => [0, 0, 65_535] } },
-        TypeError => { stream_dict: objstm_dict("/N 3 /First /Bad") },
         Pdfrb::ParseError => { stream_dict: objstm_dict("/First 12") },
         ArgumentError => { stream_dict: objstm_dict(
           "/N 3 /First 12 /DecodeParms << /Predictor 12 /Columns -1 >>"
@@ -734,6 +815,76 @@ RSpec.describe "Claricle PDF handler" do
         expect(inspect_pdf(path).parse_status).to eq("failed")
         expect(caught).to include(klass)
       end
+    end
+
+    # `/First` is checked by `compressed_oid_matches?` itself (it slices
+    # the header on it before any byte reaches pdfrb's own reader), so a
+    # non-Integer `/First` is now refused by that type check directly --
+    # bare pdfrb still raises `TypeError` reaching in without it.
+    it "refuses a compressed entry whose object stream declares a non-integer /First" do
+      path = objstm(stream_dict: objstm_dict("/N 3 /First /Bad"))
+      expect(raised_by(path)).to be(TypeError)
+
+      caught = recording_handler.last
+      expect(inspect_pdf(path).parse_status).to eq("failed")
+      expect(caught).to be_empty
+    end
+
+    # Precondition: this is the SAME malformed file the old test named
+    # under `NoMethodError` -- oid 4 (the ObjStm) marked `:free` instead of
+    # `:in_use` -- and bare pdfrb still raises `NoMethodError` reaching
+    # into it directly. `compressed_oid_matches?`'s container check now
+    # refuses it cleanly, so the handler no longer needs pdfrb to raise
+    # to reach "failed". This example does not by itself prove
+    # `document.object` is skipped for a free container (a free entry
+    # also resolves to `nil` through the delegate, which the next check
+    # would refuse too) -- that specific "before the delegate is ever
+    # asked" guarantee is what the sibling "itself marked compressed"
+    # example above proves, via the `SystemStackError` it stops.
+    it "refuses a compressed entry whose object stream itself is marked free" do
+      path = objstm(entries: { 4 => [0, 0, 65_535] })
+      expect(raised_by(path)).to be(NoMethodError)
+
+      caught = recording_handler.last
+      expect(inspect_pdf(path).parse_status).to eq("failed")
+      expect(caught).to be_empty
+    end
+
+    # `/First` past the end of the decoded stream is the one bound
+    # `objstm_header_tokens` checks that is NOT already exercised by a
+    # dedicated spec: dropping it does not raise anywhere near the check
+    # itself, it makes `byteslice` return a short (not nil, not out of
+    # range) String that `split` happily tokenizes -- a silent wrong
+    # answer shape, not a clean crash the way a negative or non-Integer
+    # `/First` is. Bare pdfrb still catches this particular fixture on
+    # its own (a `/First` this far past the payload also breaks pdfrb's
+    # own header/value split), which is why `caught` alone could not
+    # distinguish "our guard fired" from "pdfrb raised and was caught" --
+    # confirmed by hand that `caught` is empty, i.e. our bound refuses it
+    # BEFORE the delegate ever raises.
+    it "refuses a compressed entry whose object stream declares a /First past the end of its own decoded bytes" do
+      path = objstm(stream_dict: objstm_dict("/N 3 /First 999999"))
+      expect(raised_by(path)).to be(Pdfrb::ParseError)
+
+      caught = recording_handler.last
+      expect(inspect_pdf(path).parse_status).to eq("failed")
+      expect(caught).to be_empty
+    end
+
+    # Regression: `compressed_oid_matches?` re-reads the ObjStm's header
+    # for every compressed object it checks, unless the read is cached
+    # per `obj_stm_oid`. Measured on the default fixture below (Catalog
+    # and Pages both compressed into ONE object stream, so
+    # `structure_gate` resolves two distinct compressed oids from it):
+    # without the cache this read ran twice, once per resolve, on top of
+    # pdfrb's own separate decode of the same bytes -- a cost that grows
+    # with every compressed object touched rather than with the number of
+    # object streams in the file.
+    it "reads a shared object stream's header once, however many of its objects are resolved" do
+      path = objstm
+      reads = objstm_header_reads
+      expect(inspect_pdf(path).meta).to eq("version" => "1.5", "pages" => 1)
+      expect(reads.length).to eq(1)
     end
   end
 
@@ -810,8 +961,12 @@ RSpec.describe "Claricle PDF handler" do
       expect(asked.map(&:oid)).to eq([1, 2])
     end
 
-    # An out-of-range index RETURNS nil rather than raising, so a guard
-    # expecting a raise accepts it silently. A huge one raises instead.
+    # Precondition only: what BARE pdfrb does with these two shapes of a
+    # bad index -- an out-of-range one returns nil, a huge one raises.
+    # `compressed_oid_matches?`'s own bounds check (`slot < pairs.length`)
+    # now refuses BOTH before `document.object` is ever called, so neither
+    # reaches pdfrb through the handler and neither is caught by
+    # `guarded` -- there is nothing for it to catch.
     it "handles both shapes of a bad object-stream index" do
       { out_of_range: [[1, 4, 2], 9, nil],
         huge: [[1, 4, 8], (2**64) - 1, RangeError] }.each do |label, (widths, index, klass)|
@@ -822,7 +977,7 @@ RSpec.describe "Claricle PDF handler" do
 
         caught = recording_handler.last
         expect(inspect_pdf(path).meta).to eq("version" => "1.5"), label.to_s
-        expect(caught).to eq([klass].compact), label.to_s
+        expect(caught).to be_empty, label.to_s
       end
     end
 

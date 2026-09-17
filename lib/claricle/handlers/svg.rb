@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "rexml/parsers/baseparser"
+
 require_relative "base"
 require_relative "../detector"
 require_relative "../models/inspection"
@@ -70,6 +72,326 @@ module Claricle
       private_constant :PX_PER_INCH, :ABSOLUTE_UNITS, :NUMBER, :XML_SPACE, :DIMENSION,
                        :ISSUE_CODE, :ISSUE_MESSAGE
 
+      # Claricle's own structural verdict on a WHOLE SVG (D23), as
+      # against `inspection` below, which is scoped to the root prefix
+      # and stays that way. No delegate is consulted: svg_conform's
+      # `base` profile returns zero errors for raw binary, and UTF-32
+      # was measured passing every profile silently, so both have to be
+      # REFUSED here before any profile validation runs.
+      #
+      # "Refused", not "diagnosed as an encoding problem". Four routes
+      # reach `svg.encoding_unusable` and they do not divide along
+      # "REXML could not decode it":
+      #
+      #   * a bad encoding NAME, which decodes perfectly -- a bare
+      #     ArgumentError from REXML's encoding setter;
+      #   * undecodable bytes in the prolog -- a bare EncodingError;
+      #   * undecodable bytes after a start tag -- the same failure
+      #     WRAPPED in a ParseException;
+      #   * undecodable bytes REXML reports as a wrapped ArgumentError.
+      #
+      # Everything else is `svg.not_well_formed`, and which code a given
+      # file gets is REXML's decision rather than a promise made here --
+      # measured on UTF-32, only big-endian WITH a BOM reaches the
+      # encoding code while the other three describe stray null bytes,
+      # and across nine raw-binary shapes it is seven against two. Both
+      # codes are a refusal, which is what D23 needs.
+      #
+      # It reads the entire document and holds it. The overhead on top
+      # of that tracks the largest single construct the parser holds --
+      # one attribute value, or one element's attribute set -- and NOT
+      # the file size, so there is no meaningful multiplier to quote.
+      # Measured on 64.0 MiB inputs against a 64 MiB bare read:
+      # ordinary documents (deep nesting, 40 attributes an element,
+      # many small elements) cost 1.7x the file, while one valid
+      # document carrying millions of attributes on a single element
+      # cost 12.0x, and a single 64 MiB attribute value 4.6x. The
+      # blow-up needs an adversarial document, which is exactly what a
+      # conformance checker is handed. That is conformance's cost to
+      # pay: item 02 puts the bounded 8192-byte read in `inspect` and
+      # says whole-document well-formedness belongs here.
+      #
+      # What it never does, on any input, is build a document tree --
+      # measured at zero REXML::Element objects where REXML's DOM builds
+      # one per element and peaked at 1.0-1.4 GiB on the same files.
+      # That is a structural property, not a memory bound: the
+      # many-attribute run above also built zero.
+      module Structure
+        # DIVERGES from XML's full well-formedness in BOTH directions,
+        # in a way worth stating precisely because item 03 documents per
+        # format exactly what `conform` checks, and it will quote this.
+        # It stays silent on three families a validator rejects, and it
+        # reports an error on four names a validator accepts. Neither
+        # direction implies the other, so both are stated below.
+        #
+        # `REXML::Text.check` enforces TWO rules, and it runs only when
+        # the DOM builds Text nodes. This route builds none, so BOTH are
+        # skipped:
+        #
+        #   * the Char production -- `<svg>a\u0000b</svg>`, and the
+        #     references `&#xD800;`, `&#0;`, `&#1;`, `&#xFFFE;`;
+        #   * XML 1.0 2.4's markup delimiters -- a bare `&` or a raw `<`
+        #     where a reference was required, as in the commonest
+        #     malformed SVG there is, `<svg>Tom & Jerry</svg>`, and in
+        #     `id="a<b"`.
+        #
+        # The three families in this section are all false NEGATIVES:
+        # input this scan calls clean that a validator rejects. The
+        # opposite direction is real too and is stated at the end of
+        # this comment.
+        #
+        # A THIRD family is unrelated to `Text.check`: a CDATA section
+        # at top level AFTER the root element. `count_roots` sees a
+        # :cdata event, which it ignores, so `<svg/><![CDATA[x]]>` scans
+        # clean while xmllint calls it "Extra content at the end of the
+        # document". The boundary is narrow and was measured: a comment,
+        # a PI or whitespace after the root are LEGAL and correctly
+        # clean; text after the root, and a CDATA section BEFORE it, are
+        # both already caught as not-well-formed.
+        #
+        # The second family is NOT a Char-production case: `&` and `<`
+        # are perfectly legal XML Chars, which is why naming only the
+        # Char production described half the gap. Every shape measured
+        # when that sentence was written happened to be a Char
+        # violation, so the corpus could not tell "the Char production
+        # is unchecked" from "Text.check never runs" -- and the sentence
+        # asserted the narrower reading. The `&` examples above separate
+        # the two; the Char examples do not.
+        #
+        # Distinct from the undefined-entity limit below: REXML's DOM
+        # ACCEPTS `&nope;`, so that limit is a place the DOM agrees with
+        # us, not a case it catches and we miss.
+        #
+        # FIXED, not disclosed: four characters are legal in an XML name
+        # and REXML's OWN published NCNAME_STR accepts them, but REXML's
+        # live grammar refused them, which would have reported a VALID
+        # document as svg.not_well_formed (U+00B7 middle dot, U+0300
+        # combining grave, U+203F undertie, U+2040 character tie --
+        # measured against xmllint, which calls all four valid). Fixed by
+        # parsing through `Detector.canonical_source` (see `count_roots`
+        # below), the same grammar patch `Detector::RootSource` already
+        # applies for the bounded root read, rather than reimplementing
+        # it here.
+        NOT_WELL_FORMED_CODE = "svg.not_well_formed"
+        ENCODING_UNUSABLE_CODE = "svg.encoding_unusable"
+        MULTIPLE_ROOTS_CODE = "svg.multiple_root_elements"
+        UNDECODABLE_MESSAGE = "SVG source is not decodable text"
+        UNDECODABLE_CAUSES = [ArgumentError, EncodingError].freeze
+        # CHARACTERS, not bytes. REXML's first message line bounds lines
+        # and not bytes -- the spec's 50,000-character token yields a
+        # 50,027-byte first line -- and an issue has to stay printable
+        # as one line. So the real
+        # bound is 200 characters, hence at most 800 bytes; the byte
+        # count is script-dependent and there is no fixed multiplier.
+        # `byteslice` is deliberately not used: it split a CJK codepoint
+        # and Models::Issue then refused the value outright.
+        MESSAGE_CHARACTER_LIMIT = 200
+        # 64 MiB matches the size class this module's own header comment
+        # measures against (1.7x-12.0x overhead depending on shape); past
+        # this, refuse to scan rather than read further into an
+        # attacker-controlled document with no bound at all.
+        MAX_SCAN_BYTES = 64 * 1024 * 1024
+        TOO_LARGE_CODE = "svg.too_large_to_scan"
+        TOO_LARGE_MESSAGE = "SVG source exceeds the #{MAX_SCAN_BYTES}-byte scan limit".freeze
+
+        class << self
+          # `tagged(source)` (the caller's own reader) runs OUTSIDE
+          # `do_scan`'s rescue, so a reader's own `ArgumentError` is no
+          # longer reported as `svg.encoding_unusable` -- measured with a
+          # reader whose `#read` itself raises.
+          def scan(source)
+            do_scan(tagged(source))
+          end
+
+          private
+
+          # At most one issue, which is what is currently KNOWABLE
+          # rather than a law: the parser stops at its first fatal
+          # error, and the root count is only complete when none
+          # occurred. A document with two genuine problems reports the
+          # first. The Array return keeps room for a later non-fatal
+          # check, which would coexist with the root count.
+          def do_scan(text)
+            return [issue(TOO_LARGE_CODE, TOO_LARGE_MESSAGE)] if text == :too_large
+
+            roots = count_roots(text)
+            return [] unless roots > 1
+
+            [issue(MULTIPLE_ROOTS_CODE, "document has #{roots} root elements")]
+          rescue REXML::ParseException => e
+            [parse_failure(e)]
+          # Its own clause, sitting between the ParseException rescue
+          # above and the ArgumentError rescue below. All three classes
+          # are pairwise non-subtypes in both directions -- measured --
+          # so no clause can shadow another and the order is free.
+          # REXML transcodes lazily
+          # while parsing, so a source whose bytes are truncated
+          # mid-character raises from inside the pull loop rather than
+          # arriving as a ParseException -- measured on 13 bytes, a
+          # UTF-16LE BOM followed by an odd-length PI, which escaped
+          # this method entirely on both source arms. All four of the
+          # Encoding::* errors are genuine "not decodable text", the
+          # same verdict raw binary gets.
+          rescue EncodingError
+            [issue(ENCODING_UNUSABLE_CODE, UNDECODABLE_MESSAGE)]
+          rescue ArgumentError => e
+            [issue(ENCODING_UNUSABLE_CODE, e.message)]
+          end
+
+          # Tag, never transcode: REXML still finds a BOM or a
+          # declaration and switches encodings itself. Both arms arrive
+          # binary-tagged -- `Image.from_content` normalises to
+          # ASCII-8BIT and a path-born source is opened "rb" -- and
+          # measured, a multibyte ROOT NAME reads back as "no root
+          # element" from a binary-tagged source and parses from a
+          # UTF-8-tagged one.
+
+          # Capped at MAX_SCAN_BYTES + 1: past it returns `:too_large`
+          # instead of reading further (measured: RSS tracked an
+          # uncapped read 1:1 with input size).
+          #
+          # keep the `+ 1` argument on `source.read` even though no spec
+          # can catch its removal: an over-cap input returns the same
+          # `:too_large` verdict whether `read` stopped at the cap or
+          # read the whole source, so no output-observable spec
+          # distinguishes them -- only RSS does, which is what this
+          # class is measured against, not asserted in-suite. This
+          # becomes the only check once the cap is dropped.
+          def tagged(source)
+            bytes = if source.respond_to?(:read)
+                      source.read(MAX_SCAN_BYTES + 1)
+                    else
+                      source.byteslice(0, MAX_SCAN_BYTES + 1)
+                    end
+            bytes ||= ::String.new
+            return :too_large if bytes.bytesize > MAX_SCAN_BYTES
+
+            bytes.force_encoding(Encoding::UTF_8)
+          end
+
+          # Loops to :end_document rather than on `has_next?` because
+          # the final pull is what runs REXML's end-of-input check.
+          # Parsing `<svg>` both ways:
+          #
+          #   has_next?      -> no raise
+          #   :end_document  -> REXML::ParseException
+          #
+          # Root COUNTING is not what buys this. Collecting the events
+          # of `<svg/><g/>` under `has_next?` gives
+          # [:start_element, :end_element, :start_element], which the
+          # depth walk below counts as 2 roots -- the same answer. The
+          # EOF check is the whole difference.
+          #
+          # The root count is Claricle's own. REXML accepts four of the
+          # five second-root shapes measured -- only `<svg/><g></g>`
+          # raises -- so nothing here can be delegated to it.
+          #
+          # `Detector.canonical_source`, not a bare `BaseParser.new(text)`:
+          # REXML's own live grammar refuses four characters that are
+          # legal in an XML name (U+00B7, U+0300, U+203F, U+2040) and its
+          # OWN published NCNAME_STR accepts -- `Detector::RootSource`
+          # already patches that gap for the bounded root read, and
+          # reusing it here (over the whole document rather than just the
+          # root) avoids reimplementing the same grammar fix a second
+          # time and risking disagreement with it.
+          def count_roots(text)
+            parser = REXML::Parsers::BaseParser.new(Detector.canonical_source(text))
+            roots = 0
+            depth = 0
+            while (type = parser.pull[0]) != :end_document
+              roots += 1 if type == :start_element && depth.zero?
+              depth += 1 if type == :start_element
+              depth -= 1 if type == :end_element
+            end
+            roots
+          end
+
+          # Undecodable bytes reach us wrapped in a ParseException, and
+          # the wrapped class is either an ArgumentError or an
+          # Encoding::InvalidByteSequenceError -- both are ENCODING
+          # failures rather than well-formedness ones, and
+          # UNDECODABLE_CAUSES names ArgumentError and the wider
+          # EncodingError, which InvalidByteSequenceError subclasses, so
+          # a sibling EncodingError REXML has not been measured wrapping
+          # yet is still caught. Routing on the OUTER
+          # exception class alone would file them under
+          # svg.not_well_formed.
+          #
+          # Which binary files land here is REXML's decision, not ours:
+          # measured across nine shapes, seven carry the wrapped
+          # ArgumentError and two -- a run of NULs, and every byte value
+          # 0-255 in order -- decode cleanly enough to fail as markup
+          # instead. Both outcomes refuse the file.
+          def parse_failure(error)
+            return issue(ENCODING_UNUSABLE_CODE, UNDECODABLE_MESSAGE) if undecodable?(error)
+
+            issue(NOT_WELL_FORMED_CODE, prose(error))
+          end
+
+          # Both classes, because the SAME failure reaches us as either
+          # depending only on WHERE inside REXML it was raised. REXML's
+          # `pull_event` wraps one region and the prolog sits outside it,
+          # so a BOM plus a character truncated in the PROLOG arrives
+          # bare as Encoding::InvalidByteSequenceError, while the same
+          # truncation after a start tag arrives WRAPPED in a
+          # ParseException whose prose is the useless "Exception
+          # parsing" -- measured on 13 bytes and on 9. Same defect, same
+          # verdict.
+          def undecodable?(error)
+            UNDECODABLE_CAUSES.any? { |kind| error.continued_exception.is_a?(kind) }
+          end
+
+          # RuntimeError#to_s, not `error.message`, for three measured
+          # reasons. ParseException#to_s reaches `current_line`, which
+          # re-reads the whole document at its default newline separator
+          # -- +52 MiB against +0 MiB here on a 64 MiB newline-free
+          # document. It appends REXML's own backtrace, so `e.message`
+          # on a real PNG is 674 characters carrying absolute
+          # filesystem paths where this is 17. And an issue has to stay
+          # printable as one line.
+          def prose(error)
+            RuntimeError.instance_method(:to_s).bind_call(error)
+          end
+
+          # Every issue this module builds passes through here, so the
+          # length bound is applied ONCE, at the funnel, rather than at
+          # each call site. An unusable encoding NAME is document
+          # content and so is attacker-controlled -- measured, a
+          # 100,000-character name produced a 100,018-character message
+          # when only `prose` truncated.
+          def issue(code, message)
+            Models::Issue.new(severity: "error", code: code, message: printable(message))
+          end
+
+          # Length only. Control characters are deliberately NOT stripped
+          # here: `Cli::Presenter::CONTROL` already owns that rule for
+          # every rendered row, issue messages included (`cli.rb:126`),
+          # over a wider set than `[[:cntrl:]]` -- it covers U+2028 and
+          # U+2029, which `[[:cntrl:]]` does not match. A second copy
+          # here would be the weaker of two rules for one thing, and it
+          # would DESTROY the character where the render layer escapes
+          # it, breaking the stated contract that `--json` carries the
+          # true value while only the human rendering escapes. `meta` is
+          # free document text and is handled exactly this way.
+          #
+          # Slice BEFORE scrubbing: slicing is safe on an invalid
+          # encoding and bounds the work, where scanning the whole
+          # string RAISES on one -- measured, ArgumentError -- and
+          # scrubbing 8,000,000 characters to keep 200 costs 0.0118s
+          # against 0.0000s. The slice is by CHARACTER, not byte, so it
+          # cannot itself leave anything half-formed; scrub guards
+          # against a message that was already invalid before the cut,
+          # which `Models::Issue` refuses outright.
+          def printable(message)
+            message[0, MESSAGE_CHARACTER_LIMIT].scrub
+          end
+        end
+      end
+
+      # After the module body: `private_constant` on a name that does
+      # not exist yet raises NameError.
+      private_constant :Structure
+
       def inspection(image)
         # Detector.read_root, not a second reader: it owns the 8192-byte
         # bound, the ATTLIST precedence and the reference resolution, and
@@ -114,9 +436,17 @@ module Claricle
       end
 
       # nil rather than a wrong number, in every case it cannot answer:
-      # no attribute, an unparseable one, a relative unit, or a value
-      # that overflows. The viewBox is deliberately not consulted -- it
-      # defines an aspect ratio, not an intrinsic size (D15).
+      # no attribute, an unparseable one, a relative unit, a negative
+      # value, or one that overflows. The viewBox is deliberately not
+      # consulted -- it defines an aspect ratio, not an intrinsic size
+      # (D15).
+      #
+      # Negative is nulled, zero is not: SVG 1.1 5.1.2 on width/height,
+      # "A negative value is an error ... A value of zero disables
+      # rendering of the element." The spec draws the line at the sign,
+      # not at zero, so a declared zero is a real (if degenerate)
+      # measurement and only a negative one joins the unusable cases
+      # above.
       def dimension(declared)
         match = DIMENSION.match(declared.to_s)
         return nil unless match
@@ -125,7 +455,11 @@ module Claricle
         factor = unit.empty? ? 1.0 : ABSOLUTE_UNITS[unit]
         return nil unless factor
 
-        scale(match[:number], factor)
+        value = scale(match[:number], factor)
+        # -0.0.negative? is false (-0.0 == 0.0 under IEEE 754), so a
+        # declared "-0" falls through as a kept zero, not a nulled
+        # negative -- no separate case needed for it.
+        value&.negative? ? nil : value
       end
 
       # Finiteness is checked on the CONVERTED value, not the parsed one:

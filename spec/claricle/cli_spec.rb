@@ -602,16 +602,16 @@ RSpec.describe Claricle::Cli::Runner do
 
     # The command must not advertise an operation that is still a stub.
     # Asserting the whole line, because "prints no conform" would also
-    # pass if the command printed nothing at all. png is the first (and
-    # so far only) format that claims conform; nothing claims convert yet.
-    it "claims conform only for png, and convert for nothing yet" do
+    # pass if the command printed nothing at all. emf and png are the
+    # formats that claim conform; nothing claims convert yet.
+    it "claims conform only where a handler implements it" do
       expect { described_class.run(["formats"]) }
-        .to output("emf\tinspect\neps\tinspect\npdf\tinspect\n" \
+        .to output("emf\tinspect, conform\neps\tinspect\npdf\tinspect\n" \
                    "png\tinspect, conform\nps\tinspect\nsvg\tinspect\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
-      conform = { "emf" => false, "eps" => false, "pdf" => false, "png" => true, "ps" => false, "svg" => false }
+      conform = { "emf" => true, "eps" => false, "pdf" => false, "png" => true, "ps" => false, "svg" => false }
       rows = %w[emf eps pdf png ps svg].map do |format|
         %({"format":"#{format}","inspect":true,"conform":#{conform.fetch(format)},"convert":false,"convert_to":[]})
       end

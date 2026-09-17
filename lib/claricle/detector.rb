@@ -393,6 +393,10 @@ module Claricle
         [found.first, resolved(found.last)]
       end
 
+      # RootSource's grammar patch for a caller needing a full-document
+      # BaseParser, not just `read_root`'s bounded one.
+      def canonical_source(content) = RootSource.for(content)
+
       private
 
       # The rescue wraps the parser alone, for the same reason resolution
@@ -433,9 +437,7 @@ module Claricle
         attributes.transform_values { |value| resolve(normalized(value)) }
       end
 
-      def resolve(value)
-        usable(AttributeReferences.resolve(value)) || value
-      end
+      def resolve(value) = usable(AttributeReferences.resolve(value)) || value
 
       # XML 1.0 3.3.3, and the reason it has to happen BEFORE references
       # are expanded: in a CDATA attribute a literal tab, CR or newline

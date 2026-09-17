@@ -38,7 +38,7 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
 
   spec.add_dependency "emf", "~> 0.1.0"
-  spec.add_dependency "lutaml-model", "~> 0.8.19"
+  spec.add_dependency "lutaml-model", "~> 0.8.23"
   spec.add_dependency "pdfrb", "~> 0.7.23"
   spec.add_dependency "png_conform", "~> 0.1.4"
   spec.add_dependency "postscript", "~> 0.2.0"
