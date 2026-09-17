@@ -32,15 +32,17 @@ RSpec.describe "Claricle conformance API" do
     end
 
     # A predicate answers about conformance and raises about everything
-    # else. No handler conforms anything yet, so this is the branch's whole
-    # exit-3 story -- and it must not quietly become false.
+    # else. EPS never conforms (D22), so it stays the permanent exit-3
+    # story here -- and it must not quietly become false.
     it "raises rather than answering false when the format is unsupported" do
-      workspace(["a.png", png]) do
-        expect { Claricle.conform?("a.png") }
-          .to raise_error(Claricle::UnsupportedFormat, /:png is not supported for conform/)
+      workspace(["a.eps", eps]) do
+        expect { Claricle.conform?("a.eps") }
+          .to raise_error(Claricle::UnsupportedFormat, /:eps is not supported for conform/)
       end
     end
 
+    # Mixed with a real success on purpose: a.png now conforms, so this
+    # proves the raise survives even when it is not the only outcome.
     it "raises out of the batch shape too" do
       workspace(["a.png", png], ["b.eps", eps]) do
         expect { Claricle.conform?(pattern: "*") }
@@ -52,14 +54,14 @@ RSpec.describe "Claricle conformance API" do
     # made rather than fallen into. Asserted twice: the same input must fail
     # the same way every time.
     it "fails the same way every time when two files fail equally" do
-      workspace(["a.png", png], ["b.eps", eps]) do
+      workspace(["a.eps", eps], ["b.eps", eps]) do
         messages = Array.new(2) do
-          Claricle.conform?(pattern: "*")
+          Claricle.conform?(pattern: "*.eps")
         rescue Claricle::UnsupportedFormat => e
           e.message
         end
 
-        expect(messages).to eq(["format :png is not supported for conform"] * 2)
+        expect(messages).to eq(["format :eps is not supported for conform"] * 2)
       end
     end
 
@@ -117,8 +119,8 @@ RSpec.describe "Claricle conformance API" do
 
   describe ".conformance_report" do
     it "raises for a format no handler conforms" do
-      expect { Claricle.conformance_report(png) }
-        .to raise_error(Claricle::UnsupportedFormat, /:png is not supported for conform/)
+      expect { Claricle.conformance_report(eps) }
+        .to raise_error(Claricle::UnsupportedFormat, /:eps is not supported for conform/)
     end
 
     # The literal-path route, contrasted with the glob route above: this one
@@ -132,7 +134,9 @@ RSpec.describe "Claricle conformance API" do
   # A profile is refused on TWO different grounds, and they are separate
   # answers a caller fixes by different means: a name no format defines at
   # all is a typo, and a name some format defines but this file's format
-  # does not is the wrong pairing. The flag is never accepted and ignored.
+  # does not is the wrong pairing. EMF and PNG conform now but declare no
+  # profile (03-conform.md: only PDF and SVG will), so the flag is never
+  # accepted and ignored for them either.
   describe "profile:" do
     let(:svg) { File.join(__dir__, "..", "..", "fixtures", "conform", "valid.svg") }
 
@@ -204,27 +208,30 @@ RSpec.describe "Claricle conformance API" do
   end
 
   describe ".conformance_batch" do
+    # png now conforms (status "ok", exit 0) and eps still cannot (status
+    # "error", exit 3) -- the aggregate is unaffected, since 3 was already
+    # the max, but the per-item shape below is what actually changed.
     it "returns one ordered envelope per file, with the aggregate code" do
       workspace(["a.png", png], ["b.eps", eps]) do
         result = Claricle.conformance_batch(pattern: "*")
 
         expect(result.items.map(&:path)).to eq(%w[a.png b.eps])
-        expect(result.items.map(&:status)).to eq(%w[error error])
-        expect(result.items.map(&:exit_code)).to eq([3, 3])
+        expect(result.items.map(&:status)).to eq(%w[ok error])
+        expect(result.items.map(&:exit_code)).to eq([0, 3])
         expect(result.exit_code).to eq(3)
       end
     end
 
     # Collected, not short-circuited: the second file is reached even though
-    # the first one failed. Asserted on the paths, so dropping the failure
-    # and keeping the count would not pass.
-    it "collects every outcome rather than stopping at the first failure" do
+    # the first one succeeded. Asserted on the paths, so dropping either
+    # outcome would not pass.
+    it "collects every outcome rather than stopping at the first one" do
       workspace(["a.png", png], ["b.eps", eps]) do
         result = Claricle.conformance_batch("a.png", "b.eps")
 
         expect(result.items.map(&:path)).to eq(%w[a.png b.eps])
-        expect(result.items.map { |item| item.error.code })
-          .to eq(["Claricle::UnsupportedFormat"] * 2)
+        expect(result.items.map { |item| item.error&.code })
+          .to eq([nil, "Claricle::UnsupportedFormat"])
       end
     end
 

@@ -113,7 +113,11 @@ The name reflects what the library is for:
   claim an operation that is not there. EMF and SVG are the first
   formats with a conformance handler; every other format still answers
   exit 3 for `conform`, so the command remains plumbing waiting on the
-  rest of its handlers
+  rest of its handlers. `claricle convert` and `Claricle.convert_batch`
+  are real plumbing too -- batching, `--force`, `--output`, `--to`
+  inference and the exit-2 boundary checks all work -- but every format
+  still answers exit 3 until a handler implements that source-to-target
+  conversion
 * `--profile` for `conform`, on every format but SVG. SVG's handler
   already defines six -- `base` (the default), `lucid_fix`,
   `metanorma`, `no_external_css`, `svg_1_2_rfc` and
@@ -135,6 +139,7 @@ The name reflects what the library is for:
 
 | `claricle inspect FILE` | Report a file's format and metadata
 | `claricle conform FILE...` | Check files against their format's conformance rules
+| `claricle convert SOURCE...` | Convert files to another format
 | `claricle formats` | List the formats Claricle handles, and what it can do with each
 | `claricle version` | Print the version
 |===
@@ -247,6 +252,23 @@ no files at all is a bad invocation, not a silent pass. `--json` always
 emits an array, a single file included, so a consumer never gets one
 shape for one file and another for many.
 
+`claricle convert` takes the same positional/`--pattern` shape as
+`conform`. `--to FORMAT` names the target; when it is omitted,
+`--output FILE` must name a recognised format extension to infer it
+from -- `--output -` (stdout) cannot, since stdout has no extension, so
+that combination requires `--to`. `--to` and `--output`'s extension
+disagreeing is a bad invocation, not a silent preference for one over
+the other. `--output` names a single destination, so it is refused
+whenever more than one source resolves; a multi-source run derives each
+destination from its own source name and the target's extension
+instead. The whole destination set -- derived or given -- is
+preflighted for collisions and overwrites before anything is converted,
+and an existing destination needs `--force` to be replaced. `--output
+-` writes only the converted bytes to stdout, with no trailing newline;
+everything else -- the summary, warnings, error text -- goes to stderr.
+No handler implements convert yet, so every real invocation still
+answers exit 3.
+
 == Usage
 
 Detect a format from a path or from bytes:
@@ -327,6 +349,7 @@ lib/claricle/
   version.rb           # VERSION
   detector.rb          # magic-byte and XML-root format detection
   image.rb             # the object every operation takes
+  lossiness.rb         # what a conversion loses, read from the source document
   registry.rb          # frozen format -> handler map
   handlers/base.rb     # what a handler subclasses
   handlers/metafile.rb # EMF header metadata
@@ -334,7 +357,7 @@ lib/claricle/
   handlers/png.rb      # PNG metadata
   handlers/postscript.rb # EPS and PS DSC header metadata
   handlers/svg.rb      # SVG root metadata
-  models/              # Location, Issue, Report, Inspection, BatchItem
+  models/              # Location, Issue, Report, Inspection, Conversion, BatchItem
   batch.rb             # one file set, one envelope per file
   fault.rb             # an exception's exit code and renderable message
   errors.rb            # Error, UnknownFormat, UnsupportedFormat, ...
@@ -368,8 +391,8 @@ Not one file. A new format costs:
   per-handler sniffer, because the probes are heterogeneous and their
   order is load-bearing
 . for an inbound conversion, an entry in the source handler's target
-  list together with its feature-loss rules. Neither exists in `lib/`
-  yet; both arrive with `convert`
+  list together with its feature-loss rules. The loss rules live in
+  `lossiness.rb`; the target list arrives with `convert`
 
 == Installation
 
@@ -393,6 +416,24 @@ Or install it yourself as:
 ----
 $ gem install claricle
 ----
+
+== Conversion lossiness
+
+Whether a conversion loses anything is decided per conversion, from what the
+source document actually contains -- not from a table of format pairs. The same
+edge is clean for a rectangle and destructive for a gradient, so a per-edge
+label would call the second one lossless on the first one's evidence.
+
+A verdict is one of `lossless`, `lossy` or `unknown`, published as
+`Models::Conversion::LOSSINESS_LEVELS`. `unknown` is the default: a `lossless`
+verdict is a positive claim and is made only when every feature the document
+contains has been shown to survive that target. `lossy` and `unknown` both tell
+you to look; only `lossless` tells you not to, so only `lossless` can hide a
+loss.
+
+The model class `Models::Conversion` and its vocabulary
+`Conversion::LOSSINESS_LEVELS` are public. `Lossiness` and
+`Models::BinaryContent` are private constants.
 
 == Development
 
