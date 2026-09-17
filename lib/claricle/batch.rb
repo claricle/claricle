@@ -83,9 +83,48 @@ module Claricle
 
     class << self
       def run(arguments, classify:, pattern: nil, &operation)
-        BatchResult.new(
-          expand(arguments, pattern).map { |path| outcome(path, classify, &operation) }
-        )
+        run_files(expand(arguments, pattern), classify: classify, &operation)
+      end
+
+      # Runs over an ALREADY-expanded file list, skipping expansion
+      # entirely. `Claricle.convert_batch` calls `expand` itself first (to
+      # build its destination preflight) and hands the result straight
+      # here -- expanding it a second time would redo every `File.file?`/
+      # `File.realpath` call for nothing, and would silently drop a file
+      # that vanished between the two calls (TOCTOU) even though a
+      # destination had already been preflighted for it.
+      def run_files(files, classify:, &operation)
+        BatchResult.new(files.map { |path| outcome(path, classify, &operation) })
+      end
+
+      # A positional is a literal path when it names an existing file and a
+      # glob otherwise; a pattern is always a glob, which is how a filename
+      # that legitimately contains glob characters is reached the other way.
+      # `--pattern` adds to the positionals rather than replacing them.
+      #
+      # `File.file?` decides both times, and it also drops what a glob
+      # returns that no operation can open: a directory, or a symlink whose
+      # target is gone. Either would otherwise cost exit 4 -- the code for
+      # an internal defect -- for an ordinary mismatch.
+      #
+      # Sorted before deduplicating, so which spelling of two names for one
+      # file survives does not depend on the order they were given in.
+      #
+      # Public, unlike the rest of this class: `Claricle.convert_batch`
+      # needs the expanded file list before it can preflight the whole
+      # destination set up front. `glob`/`glob_combinations`/
+      # `nothing_matched` stay private -- only this method is called from
+      # outside `Batch`.
+      def expand(arguments, pattern)
+        found = arguments.flat_map do |argument|
+          File.file?(argument) ? [argument] : glob(argument)
+        end
+        found.concat(glob(pattern)) if pattern
+        files = found.select { |path| File.file?(path) }
+                     .sort.uniq { |path| File.realpath(path) }
+        raise InvocationError, nothing_matched(arguments, pattern) if files.empty?
+
+        files
       end
 
       private
@@ -116,30 +155,6 @@ module Claricle
           error: Models::BatchError.new(code: error.class.name || error.class.to_s,
                                         message: Fault.message(error))
         )
-      end
-
-      # A positional is a literal path when it names an existing file and a
-      # glob otherwise; a pattern is always a glob, which is how a filename
-      # that legitimately contains glob characters is reached the other way.
-      # `--pattern` adds to the positionals rather than replacing them.
-      #
-      # `File.file?` decides both times, and it also drops what a glob
-      # returns that no operation can open: a directory, or a symlink whose
-      # target is gone. Either would otherwise cost exit 4 -- the code for
-      # an internal defect -- for an ordinary mismatch.
-      #
-      # Sorted before deduplicating, so which spelling of two names for one
-      # file survives does not depend on the order they were given in.
-      def expand(arguments, pattern)
-        found = arguments.flat_map do |argument|
-          File.file?(argument) ? [argument] : glob(argument)
-        end
-        found.concat(glob(pattern)) if pattern
-        files = found.select { |path| File.file?(path) }
-                     .sort.uniq { |path| File.realpath(path) }
-        raise InvocationError, nothing_matched(arguments, pattern) if files.empty?
-
-        files
       end
 
       def glob(text)
