@@ -383,6 +383,20 @@ RSpec.describe Claricle::Cli::Runner do
         .to_stdout
     end
 
+    # And a PDF, for the same reason -- the handler specs pass :pdf
+    # explicitly, so nothing else drives the detector's bare `%PDF-`
+    # signature through to a rendered row. Generated into the builder's
+    # own temporary directory rather than committed -- the same reason
+    # the SVG cases below use a Tempfile: no PDF byte is checked into
+    # this repo.
+    it "inspects a PDF through the real detector" do
+      pdf = PdfBuilder.path(name: "cli")
+
+      expect { expect(described_class.run(["inspect", pdf])).to eq(0) }
+        .to output(/format: pdf.*meta\.pages: 1.*meta\.version: 1\.4.*parse status: ok/m)
+        .to_stdout
+    end
+
     # The fields a PNG inspection can fill, or dropping one from the
     # renderer leaves the assertions above green. The single-axis rows
     # are the presenter's other branch and no PNG reaches them, so both
@@ -587,22 +601,21 @@ RSpec.describe Claricle::Cli::Runner do
 
     # The command must not advertise an operation that is still a stub.
     # Asserting the whole line, because "prints no conform" would also
-    # pass if the command printed nothing at all. pdf is the first (and
-    # so far only) format that claims conform, and it claims it alone --
-    # this handler implements conform only, no inspect. Nothing claims
+    # pass if the command printed nothing at all. pdf now implements both
+    # inspect and conform -- emf and pdf are the two formats that claim
+    # conform, and each claims it alongside inspect. Nothing claims
     # convert yet.
-    it "claims conform only for pdf, and convert for nothing yet" do
+    it "claims conform only where a handler implements it" do
       expect { described_class.run(["formats"]) }
-        .to output("emf\tinspect\neps\tinspect\npdf\tconform\npng\tinspect\n" \
-                   "ps\tinspect\nsvg\tinspect\n").to_stdout
+        .to output("emf\tinspect, conform\neps\tinspect\npdf\tinspect, conform\n" \
+                   "png\tinspect\nps\tinspect\nsvg\tinspect\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
-      inspects = { "emf" => true, "eps" => true, "pdf" => false, "png" => true, "ps" => true, "svg" => true }
-      conforms = { "emf" => false, "eps" => false, "pdf" => true, "png" => false, "ps" => false, "svg" => false }
+      conform = { "emf" => true, "pdf" => true }
       rows = %w[emf eps pdf png ps svg].map do |format|
-        %({"format":"#{format}","inspect":#{inspects.fetch(format)},) +
-          %("conform":#{conforms.fetch(format)},"convert":false,"convert_to":[]})
+        claimed = conform.fetch(format, false)
+        %({"format":"#{format}","inspect":true,"conform":#{claimed},"convert":false,"convert_to":[]})
       end
       expected = "[#{rows.join(",")}]\n"
 

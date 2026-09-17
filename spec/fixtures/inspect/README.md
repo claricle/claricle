@@ -134,6 +134,7 @@ before it existed:
 | `bad_title.eps` | a `%%Title` whose bytes are not valid UTF-8, beside a `%%Creator` that is. Driven path-born as well as content-born, since `File.binread` gives ASCII-8BIT where `valid_encoding?` is true for any bytes |
 | `utf8_title.eps` | a `%%Title` that IS valid UTF-8 but arrives tagged ASCII-8BIT. It must be carried, and carried tagged UTF-8 — json 2.21 serializes a BINARY-tagged UTF-8 string while warning it will raise in json 3.0 |
 | `cr_only.ps` | CR-only line endings, whose DSC comments 0.2.0 does not read. Pinned as a known delegate gap rather than worked around: pre-normalising the bytes would make `inspect` report something the parser never saw |
+| `zeroed_wrapper.eps` | the four-byte DOS EPS wrapper signature (`C5 D0 D3 C6`) followed by zeros. `Detector` accepts it as `eps` on magic bytes alone, but its declared PostScript range is invalid (a zero offset, below the header's own minimum), so `EpsBinary.postscript_range` refuses it and the handler never reaches the PostScript delegate at all -- `never_calls_image_content_spec.rb` has a genuine `eps => failed` sample: eps is not exempt from the failure-path slurp check the way `ps`/`svg` are |
 
 ### PostScript, second round
 
@@ -201,3 +202,9 @@ ever reached.
 | `begin_future.ps`, `trailer_colon.ps`, `bare_page.ps`, `page_trailer_colon.ps` | the four spellings DSC does not define: `%%BeginFuture:`, a `%%Trailer:` that takes no operands, a bare `%%Page` that requires them, and the same colon on `%%PageTrailer`. A `Begin\|End\|Include` stem behind a "colon, whitespace or end of line" delimiter read each one as the keyword it resembles and ended the header there, discarding the box and title behind it -- so each carries `0 0 100 50` and `%%Title: Kept`, which must both survive. Each pairs with a fixture above that must still END the header -- `begin_data.ps`, `trailer_comment.ps`, `page_comment.ps` and `page_trailer.ps` -- so the pairs fail in opposite directions: loosening the punctuation reddens these, dropping a name reddens those |
 | `duplicate_creator.ps`, `duplicate_creation_date.ps` | a repeated `%%Creator` and `%%CreationDate`, mirroring `duplicate_title.ps` for the two other textual fields the first-occurrence rule covers |
 | `duplicate_language_level.ps` | two declarations, `2` then `3`, both well-formed DSC unsigned integers -- unlike `underscored_level.ps`, where the FIRST one is not. This is the fixture that reaches `Dsc.unsigned(declared) == value` and has to reject on the values actually differing, not on either one failing to parse |
+
+## SVG
+
+| Fixture | Purpose |
+|---|---|
+| `valid.svg` | a minimal root with both dimensions, so every registered format has a real file on disk. `never_calls_image_content_spec.rb` only reaches the unbounded read through a PATH-born image, and SVG's own specs build their sources in memory |
