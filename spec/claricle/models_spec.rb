@@ -1480,6 +1480,11 @@ RSpec.describe Claricle::Models do
       end.to raise_error(Lutaml::Model::ValidationError, /collection: true.*missing/)
     end
 
+    it "refuses two values for Issue#severity from a document" do
+      expect { described_class.const_get(:Issue).from_json(%({"severity":["info","error"],"message":"m"})) }
+        .to raise_error(Lutaml::Model::ValidationError, /collection: true.*missing/)
+    end
+
     it "refuses two values for Inspection#parse_status" do
       expect do
         described_class.const_get(:Inspection)
@@ -1506,7 +1511,8 @@ RSpec.describe Claricle::Models do
     # able from the value it wraps and nothing is lost by taking it.
     # lutaml-model 0.8.32 relaxed deserialization to match: a single-
     # element list from a document is no longer refused either, only a
-    # multi-element one (covered above).
+    # multi-element one (the ".from_json" example above this describe
+    # block's first two examples).
     it "accepts a one-element list from construction and from a document" do
       wrapped = described_class.const_get(:Issue).new(severity: ["error"], message: "m")
       from_doc = described_class.const_get(:Issue).from_json(%({"severity":["error"],"message":"m"}))
