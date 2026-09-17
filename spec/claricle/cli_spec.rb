@@ -620,7 +620,7 @@ RSpec.describe Claricle::Cli::Runner do
       png = %({"format":"png","inspect":true,"conform":true,"convert":false,"convert_to":[]})
       svg = %({"format":"svg","inspect":true,"conform":false,"convert":true,) +
             %("convert_to":["eps","ps"]})
-      expected = "[#{([emf, other[0], other[1], png, other[2], svg]).join(",")}]\n"
+      expected = "[#{[emf, other[0], other[1], png, other[2], svg].join(",")}]\n"
 
       expect { described_class.run(["formats", "--json"]) }.to output(expected).to_stdout
     end

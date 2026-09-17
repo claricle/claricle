@@ -705,8 +705,7 @@ module Claricle
       # refuses only the full stream.
       SCAN_LIMIT = 200 * 1024 * 1024
 
-      private_constant :SIZE_OFFSET, :MINIMUM_HEADER, :ALIGNMENT, :MILLIMETRES_PER_INCH,
-                       :PARSE_FAILURES, :SCAN_LIMIT
+      private_constant :SIZE_OFFSET, :MINIMUM_HEADER, :ALIGNMENT, :MILLIMETRES_PER_INCH, :PARSE_FAILURES, :SCAN_LIMIT
 
       def inspection(image)
         bytesize = image.bytesize

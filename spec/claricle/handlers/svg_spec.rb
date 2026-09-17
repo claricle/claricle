@@ -1401,7 +1401,7 @@ RSpec.describe "Claricle SVG handler" do
       malformed = %(<svg xmlns="#{svg_ns}" width="7"/><g/>)
 
       expect(scan(malformed.b)).not_to be_empty
-      expect(Claricle.const_get(:Handlers).const_get(:Svg).capabilities).to eq([:inspect])
+      expect(Claricle.const_get(:Handlers).const_get(:Svg).capabilities).to eq(%i[inspect convert])
       expect(inspect_svg(malformed)).to have_attributes(parse_status: "ok", width: 7.0)
     end
 
