@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
-require "English"
+require "open3"
+
+require_relative "../support/pdf_builder"
 
 RSpec.describe "Claricle::Registry" do
   registry = Claricle.const_get(:Registry)
@@ -21,12 +23,13 @@ RSpec.describe "Claricle::Registry" do
       handlers = Claricle.const_get(:Handlers)
 
       expect(registry.const_get(:HANDLER_CLASSES))
-        .to eq([handlers.const_get(:Metafile), handlers.const_get(:Png),
-                handlers.const_get(:Postscript), handlers.const_get(:Svg)])
+        .to eq([handlers.const_get(:Metafile), handlers.const_get(:Pdf),
+                handlers.const_get(:Png), handlers.const_get(:Postscript),
+                handlers.const_get(:Svg)])
     end
 
     it "exposes exactly the formats those handlers declare" do
-      expect(registry.formats).to eq(%i[emf eps png ps svg])
+      expect(registry.formats).to eq(%i[emf eps pdf png ps svg])
     end
 
     # Ownership, not membership: a format list alone would pass a handler
@@ -36,6 +39,7 @@ RSpec.describe "Claricle::Registry" do
 
       expect(registry.handler_for(:emf)).to be(handlers.const_get(:Metafile))
       expect(registry.handler_for(:eps)).to be(handlers.const_get(:Postscript))
+      expect(registry.handler_for(:pdf)).to be(handlers.const_get(:Pdf))
       expect(registry.handler_for(:png)).to be(handlers.const_get(:Png))
       expect(registry.handler_for(:ps)).to be(handlers.const_get(:Postscript))
       expect(registry.handler_for(:svg)).to be(handlers.const_get(:Svg))
@@ -43,9 +47,10 @@ RSpec.describe "Claricle::Registry" do
 
     # Derived, so it cannot advertise an operation still on Base.
     it "reports only the capabilities each handler has implemented" do
-      expect(registry.capabilities_for(:emf)).to eq([:inspect])
+      expect(registry.capabilities_for(:emf)).to eq(%i[inspect conform])
       expect(registry.capabilities_for(:eps)).to eq([:inspect])
-      expect(registry.capabilities_for(:png)).to eq([:inspect])
+      expect(registry.capabilities_for(:pdf)).to eq([:inspect])
+      expect(registry.capabilities_for(:png)).to eq(%i[inspect conform])
       expect(registry.capabilities_for(:ps)).to eq([:inspect])
       expect(registry.capabilities_for(:svg)).to eq([:inspect])
     end
@@ -160,20 +165,27 @@ RSpec.describe "Claricle::Registry" do
   describe "loading a file on its own" do
     lib = File.expand_path("../../lib", __dir__)
 
+    # Open3.capture3 keeps stdout and stderr as separate streams, so a
+    # stray stderr line -- rubygems or git chattering outside a clean
+    # checkout, a deprecation warning, anything unrelated to the script's
+    # own output -- can never land inside the string these examples
+    # compare with eq. Merging the streams (the previous `err: %i[child
+    # out]` form) made every exact-match assertion here fail on any such
+    # line, in whatever position it happened to arrive.
     run = lambda do |script|
-      output = IO.popen([RbConfig.ruby, "-I#{lib}", "-e", script], err: %i[child out], &:read)
-      [$CHILD_STATUS.success?, output]
+      stdout, stderr, status = Open3.capture3(RbConfig.ruby, "-I#{lib}", "-e", script)
+      [status.success?, stdout, stderr]
     end
 
     it "loads registry.rb without the entry point" do
-      ok, output = run.call('require "claricle/registry"; ' \
-                            "print Claricle.const_get(:Registry).formats.inspect")
-      expect(ok).to be(true), "subprocess failed: #{output}"
-      expect(output).to eq("[:emf, :eps, :png, :ps, :svg]")
+      ok, output, stderr = run.call('require "claricle/registry"; ' \
+                                    "print Claricle.const_get(:Registry).formats.inspect")
+      expect(ok).to be(true), "subprocess failed: #{output}\nSTDERR: #{stderr}"
+      expect(output).to eq("[:emf, :eps, :pdf, :png, :ps, :svg]")
     end
 
     it "loads the PostScript delegate only when an inspection needs it" do
-      ok, output = run.call(<<~RUBY)
+      ok, output, stderr = run.call(<<~RUBY)
         require "claricle"
         before = Object.const_defined?(:Postscript, false)
         source = ["%!PS-Adobe-3.0", "%%BoundingBox: 0 0 100 50",
@@ -185,12 +197,36 @@ RSpec.describe "Claricle::Registry" do
         print [before, after_image, after_inspection, width].inspect
       RUBY
 
-      expect(ok).to be(true), "subprocess failed: #{output}"
+      expect(ok).to be(true), "subprocess failed: #{output}\nSTDERR: #{stderr}"
       expect(output).to eq("[false, false, true, 100.0]")
     end
 
+    # The same shape for pdfrb. `require "pdfrb"` sits inside the
+    # inspection path rather than at the top of the handler file, because
+    # registry.rb requires every handler eagerly -- measured, best of 9
+    # on a monotonic clock, a top-level require costs ~43 ms on every
+    # `claricle version` and every `--help`, for a delegate most
+    # invocations never touch.
+    #
+    # A constant probe rather than $LOADED_FEATURES: a constant cannot be
+    # defined by a require that did not happen.
+    it "loads the pdfrb delegate only when an inspection needs it" do
+      pdf = PdfBuilder.path(name: "lazy")
+      ok, output, stderr = run.call(<<~RUBY)
+        require "claricle"
+        before = Object.const_defined?(:Pdfrb, false)
+        image = Claricle::Image.from_path(#{pdf.inspect})
+        after_image = Object.const_defined?(:Pdfrb, false)
+        pages = image.inspection.meta["pages"]
+        print [before, after_image, Object.const_defined?(:Pdfrb, false), pages].inspect
+      RUBY
+
+      expect(ok).to be(true), "subprocess failed: #{output}\nSTDERR: #{stderr}"
+      expect(output).to eq("[false, false, true, 1]")
+    end
+
     it "loads handlers/base.rb without the entry point" do
-      ok, output = run.call(<<~RUBY)
+      ok, output, stderr = run.call(<<~RUBY)
         require "claricle/handlers/base"
         base = Claricle.const_get(:Handlers).const_get(:Base)
         image = Struct.new(:format).new(:png)
@@ -200,7 +236,7 @@ RSpec.describe "Claricle::Registry" do
           print e.message
         end
       RUBY
-      expect(ok).to be(true), "subprocess failed: #{output}"
+      expect(ok).to be(true), "subprocess failed: #{output}\nSTDERR: #{stderr}"
       expect(output).to eq("format :png is not supported for inspect")
     end
 
@@ -208,7 +244,7 @@ RSpec.describe "Claricle::Registry" do
     # entry point: this require path is supported, and it used to leave
     # these internals public until claricle.rb happened to run.
     it "ships them private when loaded on their own too" do
-      ok, output = run.call(<<~RUBY)
+      ok, output, stderr = run.call(<<~RUBY)
         require "claricle/registry"
         require "claricle/handlers/base"
         probes = [
@@ -224,7 +260,7 @@ RSpec.describe "Claricle::Registry" do
           e.message.include?("private constant") ? "private" : "missing"
         end.join(","))
       RUBY
-      expect(ok).to be(true), "subprocess failed: #{output}"
+      expect(ok).to be(true), "subprocess failed: #{output}\nSTDERR: #{stderr}"
       expect(output).to eq((["private"] * 7).join(","))
     end
 
@@ -233,7 +269,7 @@ RSpec.describe "Claricle::Registry" do
     # example has run the suite has established what the code is supposed
     # to. A process that only requires the gem has no such help.
     it "ships every one of them private" do
-      ok, output = run.call(<<~RUBY)
+      ok, output, stderr = run.call(<<~RUBY)
         require "claricle"
         probes = [
           -> { Claricle::Registry }, -> { Claricle::Handlers },
@@ -248,7 +284,7 @@ RSpec.describe "Claricle::Registry" do
           e.message.include?("private constant") ? "private" : "missing"
         end.join(","))
       RUBY
-      expect(ok).to be(true), "subprocess failed: #{output}"
+      expect(ok).to be(true), "subprocess failed: #{output}\nSTDERR: #{stderr}"
       expect(output).to eq((["private"] * 5).join(","))
     end
   end

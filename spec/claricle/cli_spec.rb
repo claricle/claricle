@@ -1,7 +1,11 @@
 # frozen_string_literal: true
 
 require "English"
+require "fileutils"
 require "stringio"
+require "tmpdir"
+
+require_relative "../support/pdf_builder"
 
 RSpec.describe Claricle::Cli::Runner do
   status = described_class::Status
@@ -293,7 +297,7 @@ RSpec.describe Claricle::Cli::Runner do
     # inherited command cannot slip into the public inventory.
     it "exposes exactly the intended commands" do
       expect(Claricle::Cli.all_commands.keys)
-        .to contain_exactly("formats", "help", "inspect", "version")
+        .to contain_exactly("conform", "formats", "help", "inspect", "version")
     end
   end
 
@@ -377,6 +381,20 @@ RSpec.describe Claricle::Cli::Runner do
 
       expect { expect(described_class.run(["inspect", eps])).to eq(0) }
         .to output(/format: eps.*dimensions: 100\.0x50\.0.*parse status: ok/m)
+        .to_stdout
+    end
+
+    # And a PDF, for the same reason -- the handler specs pass :pdf
+    # explicitly, so nothing else drives the detector's bare `%PDF-`
+    # signature through to a rendered row. Generated into the builder's
+    # own temporary directory rather than committed -- the same reason
+    # the SVG cases below use a Tempfile: no PDF byte is checked into
+    # this repo.
+    it "inspects a PDF through the real detector" do
+      pdf = PdfBuilder.path(name: "cli")
+
+      expect { expect(described_class.run(["inspect", pdf])).to eq(0) }
+        .to output(/format: pdf.*meta\.pages: 1.*meta\.version: 1\.4.*parse status: ok/m)
         .to_stdout
     end
 
@@ -584,20 +602,314 @@ RSpec.describe Claricle::Cli::Runner do
 
     # The command must not advertise an operation that is still a stub.
     # Asserting the whole line, because "prints no conform" would also
-    # pass if the command printed nothing at all.
-    it "does not claim conform or convert yet" do
+    # pass if the command printed nothing at all. emf and png are the
+    # formats that claim conform; nothing claims convert yet.
+    it "claims conform only where a handler implements it" do
       expect { described_class.run(["formats"]) }
-        .to output("emf\tinspect\neps\tinspect\npng\tinspect\n" \
-                   "ps\tinspect\nsvg\tinspect\n").to_stdout
+        .to output("emf\tinspect, conform\neps\tinspect\npdf\tinspect\n" \
+                   "png\tinspect, conform\nps\tinspect\nsvg\tinspect\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
-      rows = %w[emf eps png ps svg].map do |format|
-        %({"format":"#{format}","inspect":true,"conform":false,"convert":false,"convert_to":[]})
+      conform = { "emf" => true, "eps" => false, "pdf" => false, "png" => true, "ps" => false, "svg" => false }
+      rows = %w[emf eps pdf png ps svg].map do |format|
+        %({"format":"#{format}","inspect":true,"conform":#{conform.fetch(format)},"convert":false,"convert_to":[]})
       end
       expected = "[#{rows.join(",")}]\n"
 
       expect { described_class.run(["formats", "--json"]) }.to output(expected).to_stdout
+    end
+  end
+
+  # png implements conformance_report now; eps and ps never will (D22), so
+  # they carry the exit-3 UnsupportedFormat story on. Exit 0 and 1 arrive
+  # end to end through png, the first handler.
+  describe "conform" do
+    fixtures = File.join(__dir__, "..", "fixtures", "inspect")
+
+    workspace = lambda do |*names, &block|
+      Dir.mktmpdir do |dir|
+        names.each { |name, source| FileUtils.cp(File.join(fixtures, source), File.join(dir, name)) }
+        Dir.chdir(dir, &block)
+      end
+    end
+
+    def capture_stdout
+      previous = $stdout
+      $stdout = StringIO.new
+      yield
+      $stdout.string
+    ensure
+      $stdout = previous
+    end
+
+    def closed_stdout
+      reader, writer = IO.pipe
+      reader.close
+      previous = $stdout
+      $stdout = writer
+      yield
+    ensure
+      $stdout = previous
+      writer&.close
+    end
+
+    # The failure is collected into an envelope rather than raised, so it
+    # reaches the user through the command's own stderr line, not the
+    # runner's exception reporting. Both halves: the code AND what it said.
+    it "exits 3 for a format nothing conforms, and says which" do
+      workspace.call(["a.eps", "basic.eps"]) do
+        expect(described_class.run(%w[conform a.eps], output: StringIO.new)).to eq(3)
+        expect { described_class.run(%w[conform a.eps], output: StringIO.new) }
+          .to output(/:eps is not supported for conform/).to_stderr
+      end
+    end
+
+    # The first real conformance verdicts to reach the CLI end to end:
+    # png implements conformance_report now, so 0 and 1 are reachable
+    # without a stub.
+    it "exits 0 for a conformant PNG, and prints its verdict" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect(described_class.run(%w[conform a.png], output: StringIO.new)).to eq(0)
+        expect { described_class.run(%w[conform a.png], output: StringIO.new) }
+          .to output("a.png: yes\n").to_stdout
+      end
+    end
+
+    # The specific mapped issue (severity, code, message, location) is
+    # pinned in png_spec.rb; this end-to-end check is only that a
+    # png.-coded error line reaches stdout for a real nonconformant file.
+    it "exits 1 for a nonconformant PNG, with an error line on stdout" do
+      workspace.call(["a.png", "short_ihdr.png"]) do
+        expect(described_class.run(%w[conform a.png], output: StringIO.new)).to eq(1)
+        expect { described_class.run(%w[conform a.png], output: StringIO.new) }
+          .to output(/\Aa\.png: no\n {2}error \[png\./).to_stdout
+      end
+    end
+
+    it "exits 2 for a pattern that matched nothing" do
+      workspace.call do
+        expect(described_class.run(["conform", "--pattern", "none-*.png"], output: StringIO.new))
+          .to eq(2)
+      end
+    end
+
+    # Thor accepts the command with no arguments at all, so the command has
+    # to refuse it rather than treating an empty batch as success -- and say
+    # what was wrong, rather than reporting an empty list of things that
+    # matched nothing.
+    it "exits 2 when given neither a file nor a pattern" do
+      workspace.call do
+        expect(described_class.run(["conform"], output: StringIO.new)).to eq(2)
+        expect { described_class.run(["conform"], output: $stderr) }
+          .to output("claricle: no files given\n").to_stderr
+      end
+    end
+
+    # No handler answers a verdict yet, so `--strict` has nowhere to change
+    # anything -- every real call raises UnsupportedFormat before a verdict
+    # exists to be strict about. This proves the wiring instead: the flag
+    # the user typed is the flag the module API receives, not a default that
+    # silently won.
+    it "forwards strict: only when --strict was given" do
+      result = instance_double(Claricle::BatchResult, exit_code: 0, items: [])
+
+      expect(Claricle).to receive(:conformance_batch)
+        .with("a.png", pattern: nil, strict: true, profile: nil).and_return(result)
+      described_class.run(%w[conform a.png --strict], output: StringIO.new)
+
+      expect(Claricle).to receive(:conformance_batch)
+        .with("a.png", pattern: nil, strict: false, profile: nil).and_return(result)
+      described_class.run(%w[conform a.png], output: StringIO.new)
+    end
+
+    # Real behavior, not a forwarding mock: no handler defines a profile
+    # yet, so any --profile is a bad invocation checked before the batch
+    # runs -- proven the same way the module API's own spec proves it,
+    # through the command's real exit code and message.
+    it "exits 2 for --profile, since no format defines one yet" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect(described_class.run(%w[conform a.png --profile base], output: StringIO.new))
+          .to eq(2)
+        expect { described_class.run(%w[conform a.png --profile base], output: $stderr) }
+          .to output(/no format defines a profile yet: "base"/).to_stderr
+      end
+    end
+
+    # A closed consumer must not turn a failure into a success. Every other
+    # command can only succeed, so the shared closed-output table asserts 0
+    # for them; here 0 would be the bug.
+    #
+    # `--json`, deliberately. Without it a batch whose every file failed
+    # writes nothing at all to stdout -- the verdict lines are empty and the
+    # failures go to stderr -- so nothing raises EPIPE and the example would
+    # pass whether the status were settled before the write or after it.
+    # Measured: the plain form leaves a mutant that returns
+    # `tolerate_closed_output`'s own 0 alive. `--json` always writes, so it
+    # reaches the arm where the ordering can actually break.
+    it "keeps its status when the output is closed" do
+      workspace.call(["a.eps", "basic.eps"]) do
+        json = closed_stdout do
+          described_class.run(%w[conform a.eps --json], output: StringIO.new)
+        end
+        plain = closed_stdout { described_class.run(%w[conform a.eps], output: StringIO.new) }
+
+        expect([json, plain]).to eq([3, 3])
+      end
+    end
+
+    describe "--json" do
+      # Shape cannot follow invocation syntax: a filename may legally
+      # contain glob characters and a shell expands an unquoted glob before
+      # Claricle sees it, so "which form did the user type" is not knowable.
+      # One file gets the same array a batch gets.
+      it "emits an array for a single file, not a bare object" do
+        workspace.call(["a.eps", "basic.eps"]) do
+          json = nil
+          expect { json = described_class.run(%w[conform a.eps --json], output: StringIO.new) }
+            .to output(/\A\[\{/).to_stdout
+          expect(json).to eq(3)
+        end
+      end
+
+      it "carries the whole envelope for a single failure" do
+        workspace.call(["a.eps", "basic.eps"]) do
+          rendered = capture_stdout { described_class.run(%w[conform a.eps --json]) }
+          rows = JSON.parse(rendered)
+
+          expect(rows.length).to eq(1)
+          expect(rows.first["path"]).to eq("a.eps")
+          expect(rows.first["status"]).to eq("error")
+          expect(rows.first["exit_code"]).to eq(3)
+          expect(rows.first["error"]["code"]).to eq("Claricle::UnsupportedFormat")
+        end
+      end
+
+      # A conformant file's real envelope, contrasted with the failure
+      # shape above: `result` carries the Report, `error` stays nil.
+      it "carries the whole envelope for a conformant file" do
+        workspace.call(["a.png", "valid.png"]) do
+          rendered = capture_stdout { described_class.run(%w[conform a.png --json]) }
+          rows = JSON.parse(rendered)
+
+          expect(rows.length).to eq(1)
+          expect(rows.first["status"]).to eq("ok")
+          expect(rows.first["exit_code"]).to eq(0)
+          expect(rows.first["error"]).to be_nil
+          expect(rows.first["result"]["valid"]).to eq("yes")
+        end
+      end
+
+      it "emits one element per file, in path order" do
+        workspace.call(["a.png", "valid.png"], ["b.eps", "basic.eps"]) do
+          rendered = capture_stdout { described_class.run(%w[conform --pattern * --json]) }
+
+          expect(JSON.parse(rendered).map { |row| row["path"] }).to eq(%w[a.png b.eps])
+        end
+      end
+    end
+
+    # One stderr line per failed file, and nothing on stdout for it: stdout
+    # carries verdicts, and a file with no verdict has nothing to say there.
+    it "reports a failed file on stderr and not on stdout" do
+      workspace.call(["a.eps", "basic.eps"], ["b.eps", "basic.eps"]) do
+        expect { described_class.run(%w[conform --pattern *.eps], output: StringIO.new) }
+          .to output("").to_stdout
+        expect { described_class.run(%w[conform --pattern *.eps], output: StringIO.new) }
+          .to output(/claricle: a\.eps: .*\nclaricle: b\.eps: /).to_stderr
+      end
+    end
+
+    it "stays silent on stderr under --json" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect { described_class.run(%w[conform a.png --json], output: StringIO.new) }
+          .not_to output.to_stderr
+      end
+    end
+  end
+
+  # Driven against envelopes built here rather than a real handler's
+  # output -- the same way the dimension rows above are -- so the
+  # presenter's own rendering rules stay pinned independently of what any
+  # one handler happens to report.
+  describe "the presenter's conformance rows" do
+    let(:presenter) { Claricle.const_get(:Cli).const_get(:Presenter) }
+
+    def item(path, valid_issues, exit_code: 0)
+      Claricle::Models::BatchItem.new(
+        path: path, exit_code: exit_code,
+        result: Claricle::Models::Report.new(source_path: path, issues: valid_issues)
+      )
+    end
+
+    it "prints the path and the verdict, and nothing else, for a clean file" do
+      expect(presenter.conformance([item("a.png", [])])).to eq("a.png: yes")
+    end
+
+    it "prints the tri-state verdict it was given" do
+      warned = item("a.png", [Claricle::Models::Issue.new(severity: "warning", message: "m")],
+                    exit_code: 0)
+
+      expect(presenter.conformance([warned])).to start_with("a.png: suspicious")
+    end
+
+    it "prints severity, code and message on an issue's line" do
+      issue = Claricle::Models::Issue.new(severity: "error", code: "png.crc",
+                                          message: "CRC error in IDAT chunk")
+
+      expect(presenter.conformance([item("a.png", [issue], exit_code: 1)]))
+        .to eq("a.png: no\n  error [png.crc] CRC error in IDAT chunk")
+    end
+
+    # Only the fields that are populated: printing all six would spell out
+    # four nils, and printing none would lose the two that were measured.
+    it "prints only the location fields that are populated" do
+      located = Claricle::Models::Issue.new(
+        severity: "error", code: "png.crc", message: "bad",
+        location: Claricle::Models::Location.new(chunk: "IDAT", byte_offset: 33)
+      )
+      rendered = presenter.conformance([item("a.png", [located], exit_code: 1)])
+
+      expect(rendered).to include("(chunk: IDAT, byte_offset: 33)")
+      expect(rendered).not_to include("line")
+      expect(rendered).not_to include("node_path")
+    end
+
+    it "prints no parentheses for an issue with no location at all" do
+      bare = Claricle::Models::Issue.new(severity: "info", code: "c", message: "m")
+
+      expect(presenter.conformance([item("a.png", [bare])])).to eq("a.png: yes\n  info [c] m")
+    end
+
+    # Issue#code is optional. Printing `[]` for an absent one would read
+    # as a code nobody chose rather than one the delegate never reported
+    # -- the same rule `location` already follows for its own six fields.
+    it "prints no brackets for an issue with no code at all" do
+      codeless = Claricle::Models::Issue.new(severity: "info", message: "m")
+
+      expect(presenter.conformance([item("a.png", [codeless])])).to eq("a.png: yes\n  info m")
+    end
+
+    # An issue's message reaches here from a file by way of a delegate, and
+    # a control character in it can forge a line of Claricle's own shape --
+    # the same hazard the metadata rows above escape.
+    it "escapes a control character out of an issue's message" do
+      forged = Claricle::Models::Issue.new(severity: "error", code: "c",
+                                           message: "a\nerror: forged")
+
+      expect(presenter.conformance([item("a.png", [forged], exit_code: 1)]))
+        .to eq("a.png: no\n  error [c] a\\x0Aerror: forged")
+    end
+
+    it "renders one stderr line per failed file and none for a clean one" do
+      failed = Claricle::Models::BatchItem.new(
+        path: "b.eps", exit_code: 3,
+        error: Claricle::Models::BatchError.new(code: "Claricle::UnsupportedFormat",
+                                                message: "format :eps is not supported")
+      )
+
+      expect(presenter.conformance_failures([item("a.png", []), failed]))
+        .to eq(["claricle: b.eps: format :eps is not supported"])
     end
   end
 
