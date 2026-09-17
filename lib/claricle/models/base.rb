@@ -65,7 +65,6 @@ module Claricle
       # it as-is and the failure surfaces much later as a NoMethodError.
       def validate_types
         self.class.attributes.each do |name, attribute|
-          validate_cardinality(name, attribute)
           validate_finite(name)
           validate_default_bookkeeping(name, attribute)
 
@@ -117,29 +116,6 @@ module Claricle
         return unless value.is_a?(Numeric) && !value.finite?
 
         refuse(name, "a finite number", value)
-      end
-
-      # lutaml-model 0.8.19 accepted a list for a non-collection enum,
-      # stored it whole, and its getter returned only the first element --
-      # so `Issue.new(severity: ["info", "error"])` validated, reported
-      # `"info"`, and dropped `"error"` on the way to JSON with nothing
-      # visible to a caller. lutaml-model 0.8.32 (lutaml/lutaml-model#185,
-      # PR #720) closed that itself: `validate!` now raises its own
-      # `CollectionTrueMissingError`, wrapped as `ValidationError`, before
-      # `validate_types` -- where this method lives -- ever runs. A
-      # multi-element array can no longer reach here to be refused; only
-      # the "was it genuinely an Array at all" guard below still can, for
-      # the single-element case lutaml normalises through without raising.
-      #
-      # The raw ivar, because the getter is the thing that hides it.
-      def validate_cardinality(name, attribute)
-        return if attribute.collection?
-        return unless attribute.enum?
-
-        raw = instance_variable_get(:"@#{name}")
-        return unless inherits_from?(raw, ::Array)
-
-        refuse(name, "a core Array", class_of(raw)) unless core_instance?(raw, ::Array)
       end
 
       # Lutaml's generated getter consults a scalar enum's backing Array
@@ -383,8 +359,8 @@ module Claricle
 
       # lutaml wraps a singular enum's value in an Array, so its sentinel
       # arrives as `[sentinel]` and identity against the singleton walks
-      # straight past it. The same wrapper `validate_cardinality` reads
-      # through, and the same two guards it uses to find it.
+      # straight past it. The same wrapper `own_enum_storage` reads
+      # through, and the same guard it uses to find it.
       #
       # Measured before this looked inside: `Inspection.new { |x|
       # x.parse_status = sentinel }` sealed and rendered `{"issues":[]}`

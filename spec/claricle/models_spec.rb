@@ -1466,9 +1466,10 @@ RSpec.describe Claricle::Models do
     end
   end
 
-  # lutaml accepts a list for a non-collection enum, stores it whole, and
-  # returns only the first element -- so the extra values vanish between
-  # construction and JSON with nothing to show for it.
+  # lutaml-model < 0.8.32 accepted a list for a non-collection enum,
+  # stored it whole, and returned only the first element -- so the extra
+  # values vanished between construction and JSON with nothing to show
+  # for it. 0.8.32+ (the gemspec floor) refuses it outright instead.
   describe "enum cardinality" do
     # lutaml-model 0.8.32 (lutaml/lutaml-model#185) enforces this itself
     # now, before our own validate_types ever runs -- as a ValidationError
