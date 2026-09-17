@@ -46,26 +46,30 @@ RSpec.describe "Claricle::Registry" do
     end
 
     # Derived, so it cannot advertise an operation still on Base. emf, pdf
-    # and png all implement inspect and conform, and emf and svg are the
-    # two formats with a real convert edge so far (item 04) -- these rows
-    # are what prove this is not just "always [:inspect]".
+    # and png all implement conform (item 03); emf, eps, ps and svg all now
+    # have a real convert edge (item 04); pdf and png have no vectory class
+    # to convert through, and eps/ps have no conformance_report override --
+    # these rows are what prove this is not just "always [:inspect]".
     it "reports only the capabilities each handler has implemented" do
       expect(registry.capabilities_for(:emf)).to eq(%i[inspect conform convert])
-      expect(registry.capabilities_for(:eps)).to eq([:inspect])
+      expect(registry.capabilities_for(:eps)).to eq(%i[inspect convert])
       expect(registry.capabilities_for(:pdf)).to eq(%i[inspect conform])
       expect(registry.capabilities_for(:png)).to eq(%i[inspect conform])
-      expect(registry.capabilities_for(:ps)).to eq([:inspect])
+      expect(registry.capabilities_for(:ps)).to eq(%i[inspect convert])
       expect(registry.capabilities_for(:svg)).to eq(%i[inspect conform convert])
     end
 
     # Derived from the handler, same as capabilities_for -- emf declares
-    # convert_to :svg, :eps, :ps; svg now declares convert_to :eps, :ps.
+    # convert_to :svg, :eps, :ps; svg now declares convert_to :eps, :ps, :emf;
+    # postscript.rb declares the union :svg, :emf, :eps, :ps for BOTH eps and
+    # ps (one class owns both formats), so convert_targets_for subtracts the
+    # image's own format (registry.rb) -- :eps sees :svg/:emf/:ps, never :eps.
     it "reports each handler's declared convert targets" do
       expect(registry.convert_targets_for(:emf)).to eq(%i[svg eps ps])
-      expect(registry.convert_targets_for(:eps)).to eq([])
+      expect(registry.convert_targets_for(:eps)).to eq(%i[svg emf ps])
       expect(registry.convert_targets_for(:png)).to eq([])
-      expect(registry.convert_targets_for(:ps)).to eq([])
-      expect(registry.convert_targets_for(:svg)).to eq(%i[eps ps])
+      expect(registry.convert_targets_for(:ps)).to eq(%i[svg emf eps])
+      expect(registry.convert_targets_for(:svg)).to eq(%i[eps ps emf])
     end
   end
 

@@ -1,10 +1,18 @@
 # Convert fixtures
 
-Hand-written, not sniffed. Each one differs from `rect_and_line.svg` — the
+Hand-written, not sniffed. Each SVG one differs from `rect_and_line.svg` — the
 clean control — by **exactly one thing**, so its verdict says what that one
 thing does. A fixture that also trips an *earlier* guard can never exercise the
 guard it is named for; three fixtures failed that way during design and were
-rebuilt.
+rebuilt. This one-feature-at-a-time rule, and the catalog below, cover the
+`.svg` fixtures only.
+
+`rect_and_line.eps` and `rect_and_line.ps` (feat/convert-eps-ps-source-edges)
+are a different kind: real conversion OUTPUT, generated from
+`rect_and_line.svg` by the already-working svg->eps/svg->ps path, not
+hand-written probes for the classifier. They exist so `postscript.rb`'s own
+convert path (eps/ps as SOURCE) has real delegate input to convert FROM — no
+catalog entry, because they discriminate nothing about `Lossiness.classify`.
 
 **These fixtures demonstrate that the classifier DETECTS a feature. They do not
 demonstrate the loss.** The losses are measurements taken with vectory 0.12.0

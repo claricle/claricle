@@ -58,10 +58,20 @@ module Claricle
     # in neither is unmeasured, so it yields `unknown`. A single "discards"
     # list would treat "not on the list" as "proven safe" -- measured, that
     # calls an <image> going to EMF lossless, which nobody has tested.
+    # `basic_shape`'s `kept:` claim for eps/ps was measured against vectory's
+    # postsvg-backed writer specifically. vectory's EMF writer is a different
+    # pipeline and does NOT honour the same SVG-default semantics: measured
+    # (Codex, feat/convert-eps-ps-source-edges, the PR that first made
+    # svg -> emf reachable), a `<rect>` with no `fill` attribute -- SVG's
+    # default fill is black -- writes `fill="none"` to EMF, and a `<line>`
+    # with no `stroke-linecap` -- SVG's default is `butt` -- writes `round`.
+    # Neither loss is on any list above, so both would otherwise read
+    # `lossless`. `kept: []` closes that gap the same way this module closes
+    # every other one: unmeasured stays `unknown`, never a guessed `lossless`.
     RULES = {
       eps: POSTSCRIPT_RULE,
       ps: POSTSCRIPT_RULE,
-      emf: { lost: %i[gradient clip_path], kept: %i[basic_shape] }
+      emf: { lost: %i[gradient clip_path], kept: [] }
     }.freeze
 
     # Derived, so a feature added to any `kept:` list is covered by the prefix

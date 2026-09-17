@@ -602,25 +602,28 @@ RSpec.describe Claricle::Cli::Runner do
     # The command must not advertise an operation a handler has not
     # implemented. Asserting the whole line, because "prints no conform"
     # would also pass if the command printed nothing at all. emf and svg
-    # claim both conform and convert; pdf and png claim conform only;
-    # eps and ps stay inspect-only.
+    # claim conform and convert; pdf and png claim conform only (no vectory
+    # class to convert through); eps and ps claim convert only (no
+    # conformance_report override, item 04 gave them a real convert edge).
     it "claims conform and convert only where a handler implements them" do
       expect { described_class.run(["formats"]) }
-        .to output("emf\tinspect, conform, convert\neps\tinspect\npdf\tinspect, conform\n" \
-                   "png\tinspect, conform\nps\tinspect\nsvg\tinspect, conform, convert\n").to_stdout
+        .to output("emf\tinspect, conform, convert\neps\tinspect, convert\n" \
+                   "pdf\tinspect, conform\npng\tinspect, conform\n" \
+                   "ps\tinspect, convert\nsvg\tinspect, conform, convert\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
-      other = %w[eps ps].map do |format|
-        %({"format":"#{format}","inspect":true,"conform":false,"convert":false,"convert_to":[]})
-      end
       emf = %({"format":"emf","inspect":true,"conform":true,"convert":true,) +
             %("convert_to":["svg","eps","ps"]})
+      eps = %({"format":"eps","inspect":true,"conform":false,"convert":true,) +
+            %("convert_to":["svg","emf","ps"]})
       pdf = %({"format":"pdf","inspect":true,"conform":true,"convert":false,"convert_to":[]})
       png = %({"format":"png","inspect":true,"conform":true,"convert":false,"convert_to":[]})
+      ps = %({"format":"ps","inspect":true,"conform":false,"convert":true,) +
+           %("convert_to":["svg","emf","eps"]})
       svg = %({"format":"svg","inspect":true,"conform":true,"convert":true,) +
-            %("convert_to":["eps","ps"]})
-      expected = "[#{[emf, other[0], pdf, png, other[1], svg].join(",")}]\n"
+            %("convert_to":["eps","ps","emf"]})
+      expected = "[#{[emf, eps, pdf, png, ps, svg].join(",")}]\n"
 
       expect { described_class.run(["formats", "--json"]) }.to output(expected).to_stdout
     end

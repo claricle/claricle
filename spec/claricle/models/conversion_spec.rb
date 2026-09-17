@@ -266,7 +266,15 @@ RSpec.describe "conversion lossiness" do
     it "calls a document lossless only when every feature present is proven kept" do
       expect(classify("rect_and_line")).to eq("lossless")
       expect(classify("rect_and_line", to: :ps)).to eq("lossless")
-      expect(classify("rect_and_line", to: :emf)).to eq("lossless")
+    end
+
+    # basic_shape's `kept:` claim is eps/ps-only (feat/convert-eps-ps-source-edges,
+    # a Codex finding): vectory's EMF writer does not honour the same
+    # SVG-default semantics postsvg does, so RULES[:emf][:kept] is empty and
+    # every basic_shape document -- explicit paint or not, the classifier
+    # cannot tell them apart -- answers `unknown` going to :emf.
+    it "never calls a basic-shape document lossless going to emf, unmeasured for that writer" do
+      expect(classify("rect_and_line", to: :emf)).to eq("unknown")
     end
 
     # ps mirrors eps exactly -- postsvg-0.3.0's `to_eps` is `to_ps(eps:
@@ -870,7 +878,7 @@ RSpec.describe "conversion lossiness" do
       expect(lossiness::RULES).to eq(
         eps: { lost: %i[gradient clip_path embedded_raster], kept: %i[basic_shape] },
         ps: { lost: %i[gradient clip_path embedded_raster], kept: %i[basic_shape] },
-        emf: { lost: %i[gradient clip_path], kept: %i[basic_shape] }
+        emf: { lost: %i[gradient clip_path], kept: [] }
       )
       expect(lossiness::ELEMENTS).to eq(
         "linearGradient" => :gradient, "radialGradient" => :gradient,
