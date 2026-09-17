@@ -20,8 +20,14 @@ module Claricle
       tolerate_closed_output { puts "Claricle version #{Claricle::VERSION}" }
     end
 
-    # Thor supplies this command. Keep a closed consumer of command output
-    # successful without hiding an EPIPE raised by the command's own work.
+    # Thor supplies this command. The rescue is WIDE on purpose: it covers
+    # text generation as well as the write, so an `Errno::EPIPE` raised
+    # while Thor is still building the help page reports success too.
+    # Narrowing it to the write half needs Thor's shell calls buffered and
+    # replayed, and a replayed call cannot be given back the shell state it
+    # was made in -- see the gate record for the measured failure shapes.
+    # `spec/claricle/cli_help_spec.rb` pins the wide behaviour, so a future
+    # narrowing attempt is deliberate rather than accidental.
     def help(command = nil, subcommand = false) # rubocop:disable Style/OptionalBooleanParameter
       tolerate_closed_output { super(command, subcommand) }
     end
@@ -89,7 +95,7 @@ module Claricle
     option :strict, type: :boolean, default: false,
                     desc: "Require a clean verdict, not merely the absence of errors"
     option :profile, type: :string,
-                     desc: "Require conformance to this profile; no format defines one yet"
+                     desc: "Require conformance to a named profile the format defines"
     def conform(*files)
       result = Claricle.conformance_batch(*files, pattern: options[:pattern],
                                                   strict: options[:strict],

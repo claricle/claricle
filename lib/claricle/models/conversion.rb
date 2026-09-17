@@ -3,7 +3,11 @@
 require "lutaml/model"
 
 require_relative "base"
-require_relative "../lossiness"
+# Only the vocabulary, not the classifier: `../lossiness` pulls in the whole
+# `Lossiness` scanner and, through `detector.rb`, REXML -- measured, a caller
+# that only wants this result model to round-trip JSON was paying for that.
+# `lossiness/levels` requires nothing else.
+require_relative "../lossiness/levels"
 
 # Nested `module Claricle` / `module Models`, never the compact
 # `module Claricle::Models`. Measured: the compact form leaves `Claricle` out of
@@ -68,9 +72,9 @@ module Claricle
       LOSSINESS_LEVELS = Lossiness::LEVELS
 
       attribute :source_path, :string
-      attribute :source_format, :string
-      attribute :target_format, :string
-      attribute :lossiness, :string, values: LOSSINESS_LEVELS
+      attribute :source_format, :string, required: true
+      attribute :target_format, :string, required: true
+      attribute :lossiness, :string, values: LOSSINESS_LEVELS, required: true
       attribute :output_path, :string
       attribute :content, BinaryContent
 
@@ -149,16 +153,13 @@ module Claricle
         refuse(:content, "a String", raw.class)
       end
 
-      # Required at the model rather than through `required: true`, so the
-      # message names the attribute and both doors agree.
-      def validate_types
-        super
-        %i[source_format target_format lossiness].each do |name|
-          next unless public_send(name).nil?
-
-          refuse(name, "a value", "nothing")
-        end
-      end
+      # `source_format`/`target_format`/`lossiness` are `required: true` on
+      # the attribute itself, so lutaml's own `validate!` (runs before this,
+      # per the comment on `normalize` above) already refuses a missing one,
+      # wrapped in `Lutaml::Model::ValidationError` and naming the attribute.
+      # Do not re-add a hand-rolled nil check here: see the gate record for
+      # why `required: true` replaced one (the introspectable schema used to
+      # disagree with the runtime refusal).
     end
 
     private_constant :BinaryContent

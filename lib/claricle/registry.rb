@@ -5,6 +5,7 @@
 require_relative "errors"
 require_relative "handlers/base"
 require_relative "handlers/metafile"
+require_relative "handlers/pdf"
 require_relative "handlers/png"
 require_relative "handlers/postscript"
 require_relative "handlers/svg"
@@ -12,7 +13,7 @@ require_relative "handlers/svg"
 module Claricle
   module Registry
     # One list. A new format adds its handler file above and its class here.
-    HANDLER_CLASSES = [Handlers::Metafile, Handlers::Png,
+    HANDLER_CLASSES = [Handlers::Metafile, Handlers::Pdf, Handlers::Png,
                        Handlers::Postscript, Handlers::Svg].freeze
 
     class << self
@@ -29,6 +30,20 @@ module Claricle
       # row cannot advertise an operation it has not implemented.
       def capabilities_for(format)
         handler_for(format).capabilities
+      end
+
+      # The profile names one format accepts. Sorted, so the order a
+      # handler happens to declare them in never leaks into a message.
+      def profiles_for(format)
+        handler_for(format).supported_profiles.sort
+      end
+
+      # Every profile name ANY registered format accepts. This is what
+      # lets a batch reject a typo before it opens a single file --
+      # whether the name fits the format in hand is a per-file question
+      # and is asked again there.
+      def profiles
+        HANDLERS.values.flat_map(&:supported_profiles).uniq.sort
       end
 
       # What one format's handler can convert to -- the `formats` command's
