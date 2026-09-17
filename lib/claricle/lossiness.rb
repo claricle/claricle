@@ -45,12 +45,20 @@ module Claricle
 
     SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 
+    # postsvg-0.3.0's `to_eps` is `to_ps(eps: true)`, one rendering pipeline
+    # where `eps:` affects only the DSC header line -- so :eps and :ps share
+    # this same rule object rather than a second hand-copied literal, which
+    # would drift silently if either target's loss list is ever revised
+    # without the other.
+    POSTSCRIPT_RULE = { lost: %i[gradient clip_path embedded_raster], kept: %i[basic_shape] }.freeze
+
     # Per target: features measured LOST, and features measured KEPT. A feature
     # in neither is unmeasured, so it yields `unknown`. A single "discards"
     # list would treat "not on the list" as "proven safe" -- measured, that
     # calls an <image> going to EMF lossless, which nobody has tested.
     RULES = {
-      eps: { lost: %i[gradient clip_path embedded_raster], kept: %i[basic_shape] },
+      eps: POSTSCRIPT_RULE,
+      ps: POSTSCRIPT_RULE,
       emf: { lost: %i[gradient clip_path], kept: %i[basic_shape] }
     }.freeze
 

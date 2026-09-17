@@ -1087,6 +1087,190 @@ RSpec.describe "Claricle SVG handler" do
     end
   end
 
+  # The two edges item 04 wires from this handler: svg -> eps and svg -> ps
+  # through vectory/postsvg. Mirrors metafile_spec.rb's own "#convert"
+  # block, adapted for :svg being a REAL source format here (metafile's is
+  # always "unknown"; svg's classification is real).
+  describe "#convert" do
+    def convert_fixture(name)
+      File.join(__dir__, "..", "..", "fixtures", "convert", "#{name}.svg")
+    end
+
+    def convert_image(name)
+      Claricle::Image.from_path(convert_fixture(name))
+    end
+
+    # Measured once against the real fixture, not guessed: without these,
+    # swapping CONVERT_TARGET_METHODS leaves every example in a bare loop
+    # green, because none of them looked at the bytes themselves (spec-
+    # auditor's High, feat/convert-emf-edges).
+    def content_marker_for(target)
+      {
+        eps: "%!PS-Adobe-3.0 EPSF-3.0\n%%Creator: Postsvg 0.3.0\n",
+        ps: "%!PS-Adobe-3.0\n%%Creator: Postsvg 0.3.0\n"
+      }.fetch(target)
+    end
+
+    %i[eps ps].each do |target|
+      it "converts rect_and_line to #{target} losslessly" do
+        conversion = handler.convert(convert_image("rect_and_line"), to: target)
+
+        expect(conversion).to be_a(Claricle::Models::Conversion)
+        expect(conversion.content).not_to be_empty
+        expect(conversion).to have_attributes(
+          source_format: "svg",
+          target_format: target.to_s,
+          lossiness: "lossless"
+        )
+        expect(conversion.content).to start_with(content_marker_for(target))
+      end
+    end
+
+    it "does not confuse ps output for eps, despite the shared PS-Adobe prefix" do
+      ps_content = handler.convert(convert_image("rect_and_line"), to: :ps).content
+
+      expect(ps_content).not_to start_with("%!PS-Adobe-3.0 EPSF")
+    end
+
+    %i[eps ps].each do |target|
+      %w[gradient_linear embedded_raster].each do |name|
+        it "classifies #{name} -> #{target} as lossy, a real classification (not metafile's always-unknown)" do
+          conversion = handler.convert(convert_image(name), to: target)
+
+          expect(conversion.lossiness).to eq("lossy")
+        end
+      end
+    end
+
+    it "converts a content-born image, with source_path nil" do
+      content = File.binread(convert_fixture("rect_and_line"))
+      image = Claricle::Image.from_content(content, format: :svg)
+
+      conversion = handler.convert(image, to: :eps)
+
+      expect(conversion.source_path).to be_nil
+    end
+
+    it "carries the source path through for a path-born image" do
+      conversion = handler.convert(convert_image("rect_and_line"), to: :eps)
+
+      expect(conversion.source_path).to eq(convert_fixture("rect_and_line"))
+    end
+
+    it "leaves output_path nil, for the caller to fill in once written" do
+      conversion = handler.convert(convert_image("rect_and_line"), to: :eps)
+
+      expect(conversion.output_path).to be_nil
+    end
+
+    # spec-auditor (this branch): my own earlier deletion here believing
+    # base_spec.rb:187-215 + registry_spec.rb's convert_targets_for pin
+    # already covered this was WRONG, proven by construction -- removing
+    # ONLY the `unless self.class.convert_targets.include?(to)` guard at
+    # svg.rb:107 left every other spec green, and the call raised a
+    # leaked `ConversionError: KeyError: key not found` instead of
+    # `UnsupportedFormat`. base_spec.rb only exercises Base's own stub via
+    # an anonymous subclass, never Svg#convert; the registry pin only
+    # reads the class-level declaration, not the runtime guard. Restored,
+    # mirroring metafile_spec.rb:1262-1264's own equivalent test.
+    %i[svg emf].each do |target|
+      it "refuses a target it does not declare (:#{target})" do
+        expect { handler.convert(convert_image("rect_and_line"), to: target) }
+          .to raise_error(Claricle::UnsupportedFormat, /:svg is not supported for convert to :#{target}/)
+      end
+    end
+
+    # utf16_gradient.svg is a real, permanent input-shape failure --
+    # Nokogiri (via vectory) rejects what Claricle's own detector/REXML
+    # accept as :svg -- with no equivalent fix, unlike the cold-process
+    # NameError below. Built content-born with an explicit format: the
+    # UTF-16 bytes are exactly what Claricle's OWN signature detector
+    # cannot identify (Claricle::UnknownFormat) -- a different failure
+    # from the one this example is pinning, which is vectory's own
+    # Nokogiri-based parse rejecting bytes Claricle's detector/REXML
+    # already accepted as :svg.
+    #
+    # One example per target, not because the rescue arm differs today --
+    # spec-auditor proved by construction that calling convert_content
+    # with a target outside CONVERT_TARGET_METHODS entirely still raises
+    # the identical error, because Vectory::Svg.from_content(content)
+    # fails and short-circuits before `to` is ever consulted, so both
+    # targets exercise one identical path right now -- but as a
+    # deliberate guard: keep both, they become the only check that
+    # catches a future postsvg/vectory version that makes per-target
+    # parsing diverge.
+    %i[eps ps].each do |target|
+      it "wraps a delegate parse failure as ConversionError, through the real chain (to: #{target})" do
+        content = File.binread(convert_fixture("utf16_gradient"))
+        image = Claricle::Image.from_content(content, format: :svg)
+
+        expect { handler.convert(image, to: target) }
+          .to raise_error(Claricle::ConversionError, /Vectory::ParsingError/)
+      end
+    end
+
+    # multi-agent-review's Medium on feat/convert-emf-edges, applied here
+    # too: reading the whole file into memory before any bound was
+    # checked. stub_const keeps the test fast -- crossing the real 200MiB
+    # limit needs no real 200MiB file, only a limit small enough for an
+    # ordinary string to exceed it.
+    it "refuses content over the convert byte limit before reaching the delegate" do
+      stub_const("Claricle::Handlers::Svg::MAX_CONVERT_BYTES", 10)
+      oversized = Claricle::Image.from_content("x" * 11, format: :svg)
+
+      expect { handler.convert(oversized, to: :eps) }
+        .to raise_error(Claricle::ConversionError, /exceeds the 10-byte convert limit/)
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Svg).send(:private_constant, :MAX_CONVERT_BYTES)
+    end
+
+    # Codex's Medium on feat/convert-emf-edges, applied here too: the cap
+    # has to bound the READ, not just the delegate call. A content-born
+    # image is already fully in memory before #convert ever runs, so only
+    # a path-backed image can prove the fix.
+    it "refuses a path-backed file over the convert byte limit without reading it whole" do
+      stub_const("Claricle::Handlers::Svg::MAX_CONVERT_BYTES", 10)
+      Tempfile.create(["oversized", ".svg"]) do |file|
+        file.binmode
+        file.write("x" * 11)
+        file.flush
+        image = Claricle::Image.new(format: :svg, path: file.path)
+
+        expect { handler.convert(image, to: :eps) }
+          .to raise_error(Claricle::ConversionError, /10-byte convert limit/)
+        expect(image.instance_variable_get(:@content)).to be_nil
+      end
+    ensure
+      Claricle.const_get(:Handlers).const_get(:Svg).send(:private_constant, :MAX_CONVERT_BYTES)
+    end
+
+    # Proves the load-order fix (Postsvg::Model::Operators.load_all! at
+    # svg.rb's file-load time) actually holds, in a genuinely fresh
+    # process -- not just that this handler's own rescue could have
+    # caught the NameError. Follows this file's own real, already-passing
+    # IO.popen idiom (see "requires the detector itself" above), not
+    # Open3, which is not used anywhere in this repo.
+    %i[eps ps].each do |target|
+      it "converts embedded_raster.svg to #{target} in a genuinely fresh process" do
+        script = <<~RUBY
+          require "claricle"
+          image = Claricle::Image.from_content(
+            File.binread(#{convert_fixture("embedded_raster").inspect}), format: :svg
+          )
+          handler = Claricle.const_get(:Handlers).const_get(:Svg).new
+          conversion = handler.convert(image, to: :#{target})
+          print conversion.lossiness
+        RUBY
+        lib = File.expand_path("../../../lib", __dir__)
+        output = IO.popen([RbConfig.ruby, "-I#{lib}", "-e", script], err: %i[child out], &:read)
+        status = $CHILD_STATUS
+
+        expect(status).to be_success, "fresh-process conversion failed: #{output}"
+        expect(output).to eq("lossy")
+      end
+    end
+  end
+
   # Claricle's own structural pre-pass (D23). Whole-document, unlike
   # `inspection` above, which is scoped to the root prefix.
   describe "the structural scan" do
@@ -1542,7 +1726,7 @@ RSpec.describe "Claricle SVG handler" do
       malformed = %(<svg xmlns="#{svg_ns}" width="7"/><g/>)
 
       expect(scan(malformed.b)).not_to be_empty
-      expect(Claricle.const_get(:Handlers).const_get(:Svg).capabilities).to eq(%i[inspect conform])
+      expect(Claricle.const_get(:Handlers).const_get(:Svg).capabilities).to eq(%i[inspect conform convert])
       expect(inspect_svg(malformed)).to have_attributes(parse_status: "ok", width: 7.0)
     end
 
