@@ -218,8 +218,19 @@ module Claricle
       handler.inspection(self)
     end
 
-    def conformance_report
-      handler.conformance_report(self)
+    # The keyword reaches the handler ONLY when a profile was asked for.
+    # A handler that declares no profiles keeps its one-argument
+    # `conformance_report`, and the guard above means it can never be
+    # called with a keyword it does not take -- so adding profiles to one
+    # format does not change the signature every other handler implements.
+    def conformance_report(profile: nil)
+      return handler.conformance_report(self) if profile.nil?
+
+      wanted = profile.to_sym
+      accepted = Registry.profiles_for(format)
+      raise UnsupportedProfile.new(format, profile, accepted) unless accepted.include?(wanted)
+
+      handler.conformance_report(self, profile: wanted)
     end
 
     def convert(to:)

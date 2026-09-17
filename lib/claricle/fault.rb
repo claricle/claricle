@@ -17,7 +17,7 @@ module Claricle
     def exit_code(error)
       case error
       when Errno::ENOENT, InvocationError then 2
-      when UnknownFormat, UnsupportedFormat then 3
+      when UnknownFormat, UnsupportedFormat, UnsupportedProfile then 3
       else 4
       end
     end

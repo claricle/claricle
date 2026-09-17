@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
 require "open3"
-# The DOM parser, required only by the specs: it is what "malformed"
-# means in the root-prefix examples, and the library never loads it.
+# The DOM parser. `inspection` never loads it -- it reads a bounded root
+# prefix -- but `conformance_report` does (svg.rb requires rexml/document
+# for its well-formedness gate), so "the library never loads it" stopped
+# being true when conform arrived.
 require "rexml/document"
 require "rexml/security"
 # FileUtils for the XXE example, which keeps its canary file alive across
@@ -146,8 +148,13 @@ RSpec.describe "Claricle SVG handler" do
     # Every other negative example here has magnitude >= 2, so on its own
     # this table cannot tell "any negative value is unusable" apart from
     # "a value negative enough is unusable" -- a magnitude-threshold guard
-    # would pass all of them. This one sits a hair below zero and rules
-    # that out.
+    # coarser than 0.0001 would pass all of them. This example only
+    # narrows that gap; no finite set of examples closes it to zero,
+    # since an arbitrarily smaller magnitude always evades a strict
+    # threshold. The shipped guard (`value&.negative?`) has no threshold
+    # -- it is an exact IEEE sign check -- so the code itself is not
+    # exposed to this gap, only a suite relying on this example alone
+    # would be.
     it "leaves a barely negative width nil" do
       expect(inspect_svg(svg(%(width="-0.0001")))).to have_attributes(width: nil)
     end
@@ -652,11 +659,12 @@ RSpec.describe "Claricle SVG handler" do
     # read_root hands back its own hash. Handing a reference to it out of
     # an inspection lets a caller mutate what the reader produced, and
     # the model's freeze does not reach inside a Hash.
-    # The handler passes the reader's hash straight through, relying on
-    # lutaml to copy a `:hash` attribute on assignment. That is measured
-    # behaviour of a dependency, not a guarantee, so it is pinned here --
-    # if lutaml ever starts aliasing, an inspection would hand callers a
-    # reference to the reader's own hash and this goes red.
+    # The handler passes the reader's hash straight through, and the copy
+    # is Claricle's OWN: `Models::FreeFormHash.cast` does it explicitly,
+    # which is why that type exists rather than lutaml's `:hash` -- see the
+    # comment on `readable` in svg.rb. Pinned here because a caller holding
+    # a reference to the reader's hash could mutate what an inspection
+    # reported, and the model's freeze does not reach inside a Hash.
     it "does not share the reader's hash" do
       readers_hash = { "xmlns" => svg_ns, "width" => "7" }
       allow(Claricle.const_get(:Detector)).to receive(:read_root)
@@ -758,6 +766,323 @@ RSpec.describe "Claricle SVG handler" do
         expect(Claricle.detect(tagged)).to eq(:svg)
         expect(inspect_svg(tagged))
           .to have_attributes(parse_status: "ok", width: 7.0)
+      end
+    end
+  end
+
+  # The conform operation. Every fact these pin was measured against
+  # svg_conform 0.2.2 rather than read off its README -- the gemspec pins
+  # `~> 0.2.2`, so a release that changes any of them fails here rather
+  # than quietly changing what a report says.
+  describe "conformance_report" do
+    let(:conform_fixtures) { File.join(__dir__, "..", "..", "fixtures", "conform") }
+
+    # A `def`, not a `let`: `let` has no arity, so `let(:x) { |name| ... }`
+    # is handed the RSpec Example rather than the argument.
+    def conform(name)
+      handler.conformance_report(Claricle::Image.from_path(File.join(conform_fixtures, "#{name}.svg")))
+    end
+
+    def issue_double(type, id, severity: nil, line: nil, column: nil)
+      instance_double(
+        SvgConform::Errors::ValidationIssue,
+        severity: severity, type: type, requirement_id: id,
+        message: "#{id} said so", line: line, column: column
+      )
+    end
+
+    # Stubs the class, not any instance: `Validator.new` is the only way
+    # the mapper reaches one, so replacing its return value is both
+    # narrower than `allow_any_instance_of` and a real verifying double.
+    def stub_validation(errors: [], warnings: [], validity_errors: [])
+      result = instance_double(
+        SvgConform::ValidationResult,
+        errors: errors, warnings: warnings, validity_errors: validity_errors
+      )
+      validator = instance_double(SvgConform::Validator)
+      allow(validator).to receive(:validate_file).and_return(result)
+      allow(SvgConform::Validator).to receive(:new).and_return(validator)
+    end
+
+    # svg_conform keeps XML parse failures in its SAX handler's own
+    # `@parse_errors`, which nothing ever reads -- measured, the only two
+    # mentions in the gem are the initialiser and one append -- so each of
+    # these three came back `valid: :yes`, no issues, CLI exit 0 before the
+    # well-formedness gate went in. A conformance report calling a
+    # broken file conformant is the one answer this operation must not
+    # give, so the shapes are pinned rather than the mechanism.
+    {
+      "a mismatched end tag" => %(<svg xmlns="http://www.w3.org/2000/svg"><g></svg>),
+      "a document truncated mid-attribute" => %(<svg xmlns="http://www.w3.org/2000/svg"><rect wid),
+      "a second root element" => %(<svg xmlns="http://www.w3.org/2000/svg"/><svg/>)
+    }.each do |shape, source|
+      it "refuses #{shape} instead of reporting it conformant" do
+        with_svg_file.call(source) do |path|
+          report = handler.conformance_report(Claricle::Image.from_path(path))
+
+          expect(report.valid).to eq(:no)
+          expect(report.issues.map(&:code)).to eq(["svg.not_well_formed"])
+        end
+      end
+    end
+
+    # `not_well_formed` rescues three classes, and only `ParseException`
+    # is reachable from a real fixture: measured against REXML 3.4.4,
+    # `REXML::Document.new(File.read(path))` never lets a raw
+    # `EncodingError` or `ArgumentError` escape -- `IOSource#read`'s own
+    # `rescue Exception, NameError` swallows an internal
+    # `Encoding::InvalidByteSequenceError` and the parse surfaces as
+    # `ParseException: Malformed XML: No root element` instead (probed
+    # with a UTF-16 BOM followed by a dangling byte, and with a bogus
+    # `encoding="..."` declaration -- both wrap). Deleting `EncodingError`
+    # and `ArgumentError` from the rescue clause left every other example
+    # in this file green, so the three shapes above cannot stand in for
+    # these two. Mocked for the same reason `errors it must not swallow`
+    # mocks `REXML::Text.unnormalize` above: the class the rescue answers
+    # to is what it promises, not a fixture that happens to reach it.
+    {
+      EncodingError => "a document Ruby cannot decode",
+      ArgumentError => "an argument REXML itself rejects"
+    }.each do |error_class, reason|
+      it "refuses a document whose parse raises #{error_class} (#{reason})" do
+        allow(REXML::Document).to receive(:new).and_raise(error_class, "boom")
+
+        with_svg_file.call(%(<svg xmlns="http://www.w3.org/2000/svg"/>)) do |path|
+          report = handler.conformance_report(Claricle::Image.from_path(path))
+
+          expect(report.valid).to eq(:no)
+          expect(report.issues.map(&:code)).to eq(["svg.not_well_formed"])
+          expect(report.issues.first.message).to include("boom")
+        end
+      end
+    end
+
+    # Bytes that are not markup at all are deliberately NOT in that table.
+    # `Image.from_path` refuses them with `UnknownFormat` before any
+    # handler is chosen -- measured, the example failed with "no known
+    # image signature" -- so a row here would be testing the detector
+    # under a name that promises it is testing the conformance gate.
+    #
+    # The gate must not swallow a document svg_conform would have judged.
+    # Paired with the three above, so a gate that refused everything fails
+    # here and a gate that refused nothing fails there.
+    it "still reaches the delegate for a well-formed document" do
+      expect(conform("no_viewbox").issues.map(&:code)).to eq(%w[viewbox_required viewbox_required])
+    end
+
+    # `Profiles` caches in a CLASS VARIABLE shared with every other user of
+    # the gem in this process. Clearing it repaired the profile count and
+    # destroyed a host's own customisation; warming from `Svg.profiles`
+    # repairs the count by ADDING, which is the only version a library
+    # inside someone else's process is entitled to.
+    # A PARTIALLY warm cache, which is the only arm where the warming
+    # SOURCE matters. From an empty cache `available_profiles` falls
+    # through to globbing the profile YAML and answers all six, so warming
+    # from it looks identical to warming from the declaration -- which is
+    # exactly why the whole suite stayed green against that mutant.
+    # Measured: with one entry cached, the declaration restores all six and
+    # `available_profiles` restores `["base"]`, reproducing the collapse
+    # being repaired.
+    it "still discovers every profile when the cache arrives partly warm" do
+      conform("valid")
+      SvgConform::Profiles.clear_cache!
+      SvgConform::Profiles.get(:base)
+
+      conform("valid")
+
+      expect(SvgConform::Profiles.available_profiles).to match_array(
+        Claricle.const_get(:Handlers).const_get(:Svg).supported_profiles
+      )
+    ensure
+      SvgConform::Profiles.clear_cache!
+    end
+
+    it "leaves a host's own profile customisation alone" do
+      SvgConform::Profiles.clear_cache!
+      SvgConform::Profiles.get(:base).remove_requirement("viewbox_required")
+      customised = SvgConform::Validator.new.validate_file(
+        File.join(conform_fixtures, "no_viewbox.svg"), profile: :base
+      ).errors
+
+      conform("valid")
+
+      after = SvgConform::Validator.new.validate_file(
+        File.join(conform_fixtures, "no_viewbox.svg"), profile: :base
+      ).errors
+      expect(customised.map(&:requirement_id)).to eq([])
+      expect(after.map(&:requirement_id)).to eq([])
+    ensure
+      SvgConform::Profiles.clear_cache!
+    end
+
+    it "reports a conformant document as valid with no issues" do
+      report = conform("valid")
+
+      expect(report).to have_attributes(format: "svg", issues: [], valid: :yes)
+    end
+
+    # A discriminating pair, not one fixture: the two differ by the single
+    # `viewBox` attribute, so a mapping that reported every document clean
+    # -- or every document broken -- fails one of them.
+    it "reports the requirement a nonconformant document breaks" do
+      report = conform("no_viewbox")
+
+      expect(report.valid).to eq(:no)
+      expect(report.issues.map(&:code).uniq).to eq(["viewbox_required"])
+      expect(report.issues.map(&:severity).uniq).to eq(["error"])
+    end
+
+    # The default comes from the DECLARATION, not from a constant naming
+    # `base` a second time. Today those are indistinguishable, because
+    # `base` is first in the only profile declaration in the codebase --
+    # measured, hardcoding `:base` in place of `.first` left all 1062
+    # examples green. A subclass declaring a different order is what
+    # forces the two apart.
+    it "runs the first profile it declares, not a second copy of the name" do
+      reordered = Class.new(Claricle.const_get(:Handlers).const_get(:Svg)) do
+        profiles :svg_1_2_rfc, :base
+      end
+
+      report = reordered.new.conformance_report(
+        Claricle::Image.from_path(File.join(conform_fixtures, "valid.svg"))
+      )
+
+      expect(report.profile).to eq("svg_1_2_rfc")
+      # And it really ran that profile rather than merely labelling it:
+      # svg_1_2_rfc refuses this fixture's colours where base passes it.
+      expect(report.issues.map(&:code)).to include("color_restrictions")
+    end
+
+    it "names the file it read and the profile it ran" do
+      report = conform("valid")
+
+      expect(report.source_path).to end_with("conform/valid.svg")
+      expect(report.profile).to eq("base")
+      expect(report.validator_version).to eq(SvgConform::VERSION)
+    end
+
+    # D21 says a generic conform runs `base`. What this catches is the
+    # profile going UNPASSED: svg_conform then runs its own default,
+    # `svg_1_2_rfc`, which reports a `color_restrictions` error against
+    # this very fixture. Passing it to `Validator.new` instead also works
+    # -- the comment on `Svg.profiles` records why -- so this does not
+    # pin the route, only that base is what ran.
+    it "runs the base profile rather than svg_conform's own default" do
+      expect(conform("valid").issues).to be_empty
+
+      under_default = SvgConform::Validator.new.validate_file(
+        File.join(conform_fixtures, "valid.svg")
+      )
+      SvgConform::Profiles.clear_cache!
+
+      expect(under_default.errors.map(&:requirement_id)).to include("color_restrictions")
+    end
+
+    # `Profiles.available_profiles` collapses to just the profile last
+    # validated with, so a process that conformed one file would answer a
+    # later `--profile` check against a list of one. Measured on 0.2.2:
+    # six before, `[:base]` after, six again once the cache is cleared.
+    it "leaves every profile still discoverable afterwards" do
+      SvgConform::Profiles.clear_cache!
+      before = SvgConform::Profiles.available_profiles
+
+      conform("valid")
+
+      expect(before.length).to be > 1
+      expect(SvgConform::Profiles.available_profiles).to match_array(before)
+    end
+
+    # A failure must not leave the profile list short. Nothing CLEARS the
+    # cache any more -- warming replaced that -- so what this pins is that
+    # the warm happens before the work that can fail, and therefore
+    # survives it.
+    #
+    # It raises AFTER the validation on purpose. svg_conform resolves the
+    # profile before it parses anything, so a stub raising from
+    # `Validator.new` never reaches the interesting step at all; raising
+    # from `Models::Report.new` puts the failure on the far side of a real
+    # validation. Measured at that point, the cache holds all six.
+    it "leaves every profile discoverable when the report cannot be built" do
+      SvgConform::Profiles.clear_cache!
+      before = SvgConform::Profiles.available_profiles
+      allow(Claricle::Models::Report).to receive(:new).and_raise(RuntimeError, "boom")
+
+      expect { conform("valid") }.to raise_error(RuntimeError, "boom")
+      expect(SvgConform::Profiles.available_profiles).to match_array(before)
+    end
+
+    # svg_conform leaves `severity` nil on most issues -- its own
+    # `ValidationIssue#initialize` defaults it, and neither `add_warning`
+    # nor `add_notice` passes one -- so `type` has to be the fallback.
+    # `:validity_error` is the odd one out: it is a SEVERITY that means
+    # error, filed under a third bucket while still stamped `type: :error`.
+    # The first three rows are the ones that DISCRIMINATE, and the table
+    # is worth nothing without them: every row where severity and type
+    # agree is satisfied by reading either field, so a table of only those
+    # would pass a mapping that ignored severity entirely. Measured -- with
+    # only the agreeing rows, dropping `raw.severity ||` left the suite
+    # green.
+    {
+      { severity: :warning, type: :error } => "warning",
+      { severity: :info, type: :error } => "info",
+      { severity: :validity_error, type: :error } => "error",
+      { severity: nil, type: :warning } => "warning",
+      { severity: nil, type: :info } => "info",
+      { severity: :error, type: :error } => "error"
+    }.each do |raw, expected|
+      it "maps severity #{raw[:severity].inspect} / type #{raw[:type].inspect} to #{expected}" do
+        stub_validation(
+          errors: [issue_double(raw[:type], "some_requirement", severity: raw[:severity])]
+        )
+
+        expect(conform("valid").issues.map(&:severity)).to eq([expected])
+      end
+    end
+
+    # A type svg_conform grows past the three it has today. Reporting it
+    # as an error is the choice that cannot understate a finding; dropping
+    # it is the one outcome a report must never have.
+    it "reports an unknown issue type rather than dropping it" do
+      stub_validation(validity_errors: [issue_double(:something_new, "future_requirement")])
+
+      expect(conform("valid").issues.map { |issue| [issue.severity, issue.code] })
+        .to eq([%w[error future_requirement]])
+    end
+
+    # All three buckets, in svg_conform's own order. Reading `errors`
+    # alone would silently drop a warning, and `ValidationResult` keeps
+    # the three apart rather than merging them.
+    it "collects errors, warnings and validity errors alike" do
+      stub_validation(
+        errors: [issue_double(:error, "an_error")],
+        warnings: [issue_double(:warning, "a_warning")],
+        validity_errors: [issue_double(:error, "a_validity_error")]
+      )
+
+      expect(conform("valid").issues.map(&:code))
+        .to eq(%w[an_error a_warning a_validity_error])
+    end
+
+    # nil rather than an all-nil Location. svg_conform reads line and
+    # column off the issue's node, and the SAX path leaves both nil on
+    # every issue measured, so a Location would be a position nobody
+    # reported.
+    it "carries no location when the issue reports no position" do
+      expect(conform("no_viewbox").issues.map(&:location)).to eq([nil, nil])
+    end
+
+    # BOTH absent is the only shape that means "no position". One present
+    # and one absent still locates the issue, and `&&` versus `||` is the
+    # whole difference -- measured, `||` survived every other example here.
+    [
+      { line: 4, column: 11 },
+      { line: 4, column: nil },
+      { line: nil, column: 11 }
+    ].each do |position|
+      it "carries a location when the issue reports #{position.compact.keys.join(" and ")}" do
+        stub_validation(errors: [issue_double(:error, "positioned", **position)])
+
+        expect(conform("valid").issues.first.location).to have_attributes(**position)
       end
     end
   end
@@ -1401,7 +1726,7 @@ RSpec.describe "Claricle SVG handler" do
       malformed = %(<svg xmlns="#{svg_ns}" width="7"/><g/>)
 
       expect(scan(malformed.b)).not_to be_empty
-      expect(Claricle.const_get(:Handlers).const_get(:Svg).capabilities).to eq(%i[inspect convert])
+      expect(Claricle.const_get(:Handlers).const_get(:Svg).capabilities).to eq(%i[inspect conform convert])
       expect(inspect_svg(malformed)).to have_attributes(parse_status: "ok", width: 7.0)
     end
 

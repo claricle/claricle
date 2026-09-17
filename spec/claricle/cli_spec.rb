@@ -601,13 +601,13 @@ RSpec.describe Claricle::Cli::Runner do
 
     # The command must not advertise an operation a handler has not
     # implemented. Asserting the whole line, because "prints no conform"
-    # would also pass if the command printed nothing at all. emf claims
-    # both conform and convert; pdf and png claim conform only; svg
-    # claims convert only; eps and ps stay inspect-only.
+    # would also pass if the command printed nothing at all. emf and svg
+    # claim both conform and convert; pdf and png claim conform only;
+    # eps and ps stay inspect-only.
     it "claims conform and convert only where a handler implements them" do
       expect { described_class.run(["formats"]) }
         .to output("emf\tinspect, conform, convert\neps\tinspect\npdf\tinspect, conform\n" \
-                   "png\tinspect, conform\nps\tinspect\nsvg\tinspect, convert\n").to_stdout
+                   "png\tinspect, conform\nps\tinspect\nsvg\tinspect, conform, convert\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
@@ -618,7 +618,7 @@ RSpec.describe Claricle::Cli::Runner do
             %("convert_to":["svg","eps","ps"]})
       pdf = %({"format":"pdf","inspect":true,"conform":true,"convert":false,"convert_to":[]})
       png = %({"format":"png","inspect":true,"conform":true,"convert":false,"convert_to":[]})
-      svg = %({"format":"svg","inspect":true,"conform":false,"convert":true,) +
+      svg = %({"format":"svg","inspect":true,"conform":true,"convert":true,) +
             %("convert_to":["eps","ps"]})
       expected = "[#{[emf, other[0], pdf, png, other[1], svg].join(",")}]\n"
 
@@ -673,9 +673,48 @@ RSpec.describe Claricle::Cli::Runner do
     writer&.close
   end
 
-  # emf, pdf and png implement conformance_report; eps, ps and svg never
-  # will (D22), so they carry the exit-3 UnsupportedFormat story on.
+  # emf, pdf, png and svg implement conformance_report now; eps and ps
+  # never will (D22), so they carry the exit-3 UnsupportedFormat story on.
+  # Exit 0 and 1 arrive end to end through png, the first handler to
+  # implement it.
   describe "conform" do
+    conform_fixtures = File.join(__dir__, "..", "fixtures", "conform")
+
+    conform_workspace = lambda do |*names, &block|
+      Dir.mktmpdir do |dir|
+        names.each { |name, source| FileUtils.cp(File.join(conform_fixtures, source), File.join(dir, name)) }
+        Dir.chdir(dir, &block)
+      end
+    end
+
+    # The two ends of the scale, on a PAIR of SVG files that differ by one
+    # attribute. A run that reported everything conformant, or everything
+    # broken, passes one of these and fails the other.
+    it "exits 0 for a conformant SVG file" do
+      conform_workspace.call(["a.svg", "valid.svg"]) do
+        expect(described_class.run(%w[conform a.svg], output: StringIO.new)).to eq(0)
+      end
+    end
+
+    it "exits 1 for a nonconformant SVG file, and names the requirement" do
+      conform_workspace.call(["a.svg", "no_viewbox.svg"]) do
+        printed = capture_stdout do
+          expect(described_class.run(%w[conform a.svg], output: StringIO.new)).to eq(1)
+        end
+
+        expect(printed).to include("viewbox_required")
+      end
+    end
+
+    # A batch of both, so the exit code is the WORST of the two rather
+    # than the first or the last. Reversed order would pass a runner that
+    # simply returned the final file's code.
+    it "exits with the worst code across a mixed SVG batch" do
+      conform_workspace.call(["a.svg", "valid.svg"], ["b.svg", "no_viewbox.svg"]) do
+        expect(described_class.run(["conform", "--pattern", "*.svg"], output: StringIO.new)).to eq(1)
+      end
+    end
+
     # The failure is collected into an envelope rather than raised, so it
     # reaches the user through the command's own stderr line, not the
     # runner's exception reporting. Both halves: the code AND what it said.
@@ -774,16 +813,33 @@ RSpec.describe Claricle::Cli::Runner do
       described_class.run(%w[conform a.png], output: StringIO.new)
     end
 
-    # Real behavior, not a forwarding mock: no handler defines a profile
-    # yet, so any --profile is a bad invocation checked before the batch
-    # runs -- proven the same way the module API's own spec proves it,
-    # through the command's real exit code and message.
-    it "exits 2 for --profile, since no format defines one yet" do
+    # Three profile outcomes, and they are three DIFFERENT exit codes,
+    # which is the whole reason the two error classes are separate:
+    #
+    #   a name no format defines        2   a typo in the invocation
+    #   a name THIS format lacks        3   the format is fine, the pair is not
+    #   a name the format defines       0   or 1, on the file's own merits
+    #
+    # Every one goes through the real Runner, not a stub, because the exit
+    # code is the only part of this a user ever sees.
+    it "exits 3 for a profile another format defines but this one does not" do
       workspace.call(["a.png", "valid.png"]) do
         expect(described_class.run(%w[conform a.png --profile base], output: StringIO.new))
-          .to eq(2)
+          .to eq(3)
         expect { described_class.run(%w[conform a.png --profile base], output: $stderr) }
-          .to output(/no format defines a profile yet: "base"/).to_stderr
+          .to output(/:png does not define profile "base"; it defines none/).to_stderr
+      end
+    end
+
+    # Real behavior, not a forwarding mock: a profile name no format
+    # defines is a bad invocation checked before the batch runs, and it
+    # reaches the user through the command's real exit code and message.
+    it "exits 2 for a --profile no format defines" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect(described_class.run(%w[conform a.png --profile nope], output: StringIO.new))
+          .to eq(2)
+        expect { described_class.run(%w[conform a.png --profile nope], output: $stderr) }
+          .to output(/no format defines a profile named "nope"/).to_stderr
       end
     end
 
