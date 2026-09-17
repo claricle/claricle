@@ -462,6 +462,64 @@ RSpec.describe "conversion lossiness" do
       end
     end
 
+    # `refuse_unreadable` used to check only `respond_to?(:read)`, but
+    # REXML::SourceFactory.create_from's own IO branch
+    # (rexml-3.4.4/lib/rexml/source.rb:42-56) requires FOUR methods together
+    # -- `read`, `readline`, `nil?` and `eof?` -- and falls through to its
+    # own bare `RuntimeError: ... is not a valid input stream.` the moment
+    # even one is missing. An object answering only `read` passed this
+    # module's guard and then hit that bare RuntimeError from inside
+    # `PullParser.new`, which sits outside every rescue in `Scanner#run` --
+    # so it escaped unwrapped instead of becoming `InvocationError` like
+    # every other unusable source pinned above. Measured before the fix:
+    # `RuntimeError: Claricle::Lossiness::TaggedSource is not a valid input
+    # stream.`
+    it "refuses a source that answers read but not REXML's other required IO methods" do
+      read_only = Class.new do
+        def read(*) = ""
+        def closed? = false
+      end.new
+
+      # `nil?` is inherited from `Kernel` and always present on this plain
+      # Object subclass -- `readline` and `eof?` are the two REXML_IO_METHODS
+      # actually absent here, and this is what the originally measured bug
+      # looked like: a caller handing over an object that answers `read`
+      # and nothing else REXML needs.
+      expect { classify_source(read_only) }
+        .to raise_error(Claricle::InvocationError, /String or a readable IO/),
+            "a source missing readline and eof? must be refused, not handed to REXML"
+    end
+
+    # The example above removes THREE of the four REXML_IO_METHODS at once
+    # (`readline`, `eof?`, and effectively excludes `to_str`/`String`), so it
+    # cannot tell the real fix -- `REXML_IO_METHODS.all?` -- apart from a
+    # weaker check that only tests some of the four. Measured: a mutant
+    # checking `respond_to?(:read) && respond_to?(:readline)` (still missing
+    # `nil?`/`eof?`, still wrong) ALSO refuses the `read_only` double above,
+    # because that double happens to be missing every method such a weaker
+    # check would test too. This removes exactly ONE required method at a
+    # time, so a fix mirroring fewer than all four gets caught on whichever
+    # one it stopped checking.
+    it "refuses a source missing any single one of REXML's four required methods" do
+      required = %i[read readline nil? eof?]
+
+      required.each do |missing|
+        present = required - [missing]
+        # BasicObject, not Object -- an Object subclass answers `nil?` (and
+        # 51 other methods) regardless of what this test wants absent, the
+        # same reason the "never repositions the IO" example above uses it.
+        # `respond_to?` is overridden so it governs exactly what this guard
+        # is permitted to see, per the comment on `refuse_unreadable`.
+        source = Class.new(BasicObject) do
+          define_method(:respond_to?) { |name, *| present.include?(name) }
+        end.new
+
+        expect { classify_source(source) }
+          .to raise_error(Claricle::InvocationError, /String or a readable IO/),
+              "expected a source missing only :#{missing} to be refused"
+      end
+    end
+
     # REXML's PullParser does not enforce the XML 1.0 `Char` production, so
     # characters no conformant parser will read reached `lossless` -- the one
     # verdict that tells a caller not to look -- about a file a real converter

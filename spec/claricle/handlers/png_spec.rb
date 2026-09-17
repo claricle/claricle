@@ -166,6 +166,36 @@ RSpec.describe "Claricle PNG handler" do
     with_fed_pipe(bytes) { |reader| yield("/dev/fd/#{reader.fileno}") }
   end
 
+  # A real named FIFO on disk -- `mkfifo(1)`, there being no `File.mkfifo`
+  # in Ruby's stdlib -- so `structural_issues`'s guard is measured against
+  # the exact node type a caller would hand it, not a stand-in.
+  #
+  # Fed from a thread, the same shape as `with_fed_pipe`, and for the same
+  # reason a mutation check needs: the FIXED guard never opens the FIFO at
+  # all, so the writer sits blocked waiting for a reader that never comes.
+  # Without a writer this helper would instead hang the REVERTED guard's
+  # real open forever -- measured running this example with the guard
+  # reverted and no writer thread: `File.open(path, "rb")` on the FIFO
+  # never returned.
+  #
+  # `kill` alone is not enough: it only REQUESTS termination and returns
+  # immediately -- measured, `alive?` was still true right after `kill`
+  # returned. `Dir.mktmpdir`'s own block-exit cleanup would then race a
+  # feeder that has not actually unwound, so `join` waits for the real
+  # exit before the directory comes down.
+  def with_named_fifo_path(bytes)
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "pipe.png")
+      system("mkfifo", path, exception: true)
+      feeder = Thread.new { File.binwrite(path, bytes) }
+
+      yield(path)
+    ensure
+      feeder&.kill
+      feeder&.join
+    end
+  end
+
   # `validate` returns the FileAnalysis itself, not a result wrapping one.
   #
   # Closed in an ensure: given a String the full reader opens the file
@@ -690,6 +720,94 @@ RSpec.describe "Claricle PNG handler" do
         expect(io.read).to eq("#{[Zlib.crc32("IEND")].pack("N")}TAIL")
       end
     end
+
+    # Structural pre-pass, not ChunkReader: `structural_issues` opens
+    # `image.path` again (independently of whatever already read it for
+    # detection or `read_chunks`) and hands it straight to
+    # `StructureScanner`, which needs `io.size` and absolute seeks that
+    # neither of these two node types can give truthfully.
+    #
+    # Measured before the guard existed: a real 69-byte well-formed PNG
+    # through a named FIFO reported `png.chunk_truncated: file is shorter
+    # than the PNG signature` (fstat gives a FIFO `size` 0, so the scan
+    # never even got to a seek), and the same PNG through `/dev/fd/<n>`
+    # of a pipe raised `Errno::ESPIPE` straight out of `header_at`'s
+    # `io.seek` (there `size` happens to read the buffered byte count, so
+    # the walk proceeds and the first seek is what fails). Both are wrong
+    # in different ways and neither is a structural finding about the
+    # PNG, so both now refuse before `StructureScanner` ever runs.
+    describe "a non-regular structural input" do
+      it "refuses a named FIFO rather than reporting it too short" do
+        with_named_fifo_path(png_with_fat_text_before_phys) do |path|
+          image = Claricle::Image.new(format: :png, path: path)
+
+          expect { handler.send(:structural_issues, image) }.to raise_error(
+            Claricle::InvocationError, "not a regular file: #{path}"
+          )
+        end
+      end
+
+      it "refuses a /dev/fd/<n> pipe rather than raising Errno::ESPIPE" do
+        with_piped_path(png_with_fat_text_before_phys) do |path|
+          image = Claricle::Image.new(format: :png, path: path)
+
+          expect { handler.send(:structural_issues, image) }.to raise_error(
+            Claricle::InvocationError, "not a regular file: #{path}"
+          )
+        end
+      end
+
+      # `File.file?` is false for a path that never existed too, and the
+      # guard's whole point is telling those two apart -- `File.stat`
+      # raises `Errno::ENOENT` itself for this one, before `ftype` is ever
+      # reached. Found by review, not by the author: an earlier version of
+      # this guard used to raise InvocationError here instead, silently
+      # dropping the real ENOENT `read_chunks` (this class's other reader
+      # of the same path) deliberately leaves unrescued -- see its own
+      # comment a few lines above -- so a caller rescuing ENOENT around
+      # `conformance_report` would not catch it.
+      it "propagates ENOENT for a path that never existed, not InvocationError" do
+        Dir.mktmpdir do |dir|
+          path = File.join(dir, "gone.png")
+
+          expect { handler.send(:structural_issues, Claricle::Image.new(format: :png, path: path)) }
+            .to raise_error(Errno::ENOENT)
+        end
+      end
+
+      # The other half of the same distinction, and not redundant with the
+      # row above: `Image.from_path` succeeds here (the file was really
+      # there for detection), so this is also the only example that would
+      # catch a regression where existence or type got decided once at
+      # construction and never re-checked per call. A path that vanishes
+      # AFTER detection (a file deleted out from under a caller mid-use)
+      # hits `File.stat`'s identical `Errno::ENOENT` as one that was never
+      # there at all.
+      it "propagates ENOENT for a path that vanished after detection" do
+        Dir.mktmpdir do |dir|
+          path = File.join(dir, "vanished.png")
+          File.binwrite(path, png_with_fat_text_before_phys)
+          image = Claricle::Image.from_path(path)
+          File.delete(path)
+
+          expect { image.conformance_report }.to raise_error(Errno::ENOENT)
+        end
+      end
+
+      # The guard's own comment claims `File.stat`, not `File.lstat`, is
+      # what makes a symlink to a regular file pass -- unpinned until now.
+      # `File.lstat` reports a symlink's OWN type ("link"), never following
+      # it, so that mutant refuses this file; `File.stat` follows the link
+      # and reports what it points AT ("file"), so this stays clean.
+      it "leaves a symlink to a regular file unrefused" do
+        Dir.mktmpdir do |dir|
+          link = File.join(dir, "link.png")
+          File.symlink(fixture("valid.png"), link)
+
+          expect(handler.send(:structural_issues, Claricle::Image.new(format: :png, path: link))).to eq([])
+        end
+      end
+    end
   end
 
   describe "conformance_report" do
@@ -882,6 +1000,22 @@ RSpec.describe "Claricle PNG handler" do
       image = Claricle::Image.from_path(conform_fixture("valid.png"))
 
       expect { image.conformance_report }.to raise_error(Errno::EACCES)
+    end
+
+    # End to end through the public entry point, not `structural_issues`
+    # directly (see "a non-regular structural input" above for that): a
+    # caller who never goes near the handler still gets a clean refusal
+    # for a non-seekable path instead of the pre-fix `png.chunk_truncated`
+    # false verdict or a bare `Errno::ESPIPE`. `structural_issues` runs
+    # BEFORE the delegate in `conformance_report`, so this never reaches
+    # `ConformanceMapper` at all -- proven by the delegate never being
+    # stubbed here, unlike every other row in this describe.
+    it "refuses a piped path rather than returning a wrong or crashing conformance_report" do
+      with_piped_path(png_with_fat_text_before_phys) do |path|
+        image = Claricle::Image.new(format: :png, path: path)
+
+        expect { image.conformance_report }.to raise_error(Claricle::InvocationError, /not a regular file/)
+      end
     end
 
     # Proves: (a) the scanner's own finding is present at all, (b) the
@@ -1262,13 +1396,19 @@ RSpec.describe "Claricle PNG structural scanner" do
   # the worst way for a gate to be wrong. `svg_spec.rb:49` is a different
   # list again ([read, close, closed?, path, to_path, to_io, fileno]), and
   # `permitted_class_calls` below is a CLASS-method list sharing only `path`.
-  # The scanner is measured to reach the filesystem through exactly ONE
-  # class method: File.open. So this is an ALLOWLIST -- refused by names
-  # derived from the class, not by a list someone has to remember to extend.
-  # NOT total, and the gap is named rather than implied: `:open` is
-  # subtracted BY NAME from a set built from BOTH receivers, so `IO.open`
-  # is permitted too, and neither `Kernel.open` nor a subprocess is on
-  # either receiver at all. Those routes are known-open follow-ups.
+  # The scanner is measured to reach the filesystem through exactly TWO
+  # class methods: `File.stat`, now doing double duty for the temp-file
+  # plumbing below AND the non-regular/ENOENT guard beside
+  # `structural_issues` (`File.stat(path).ftype` answers "does it exist"
+  # and "what kind" in one syscall, rather than `File.exist?` plus
+  # `File.file?`), then `File.open`. `stat` is not a read -- it costs
+  # nothing against the bounded-read guarantee these examples pin, which is
+  # about payload bytes, not syscall count. So this is an ALLOWLIST --
+  # refused by names derived from the class, not by a list someone has to
+  # remember to extend. NOT total, and the gap is named rather than implied:
+  # `:open` is subtracted BY NAME from a set built from BOTH receivers, so
+  # `IO.open` is permitted too, and neither `Kernel.open` nor a subprocess
+  # is on either receiver at all. Those routes are known-open follow-ups.
   #
   # A denylist was tried and leaked three times: first `each_byte` past a
   # read-only recorder, then `IO.binread` and the non-block `File.open`
@@ -1276,8 +1416,8 @@ RSpec.describe "Claricle PNG structural scanner" do
   # `File.readlines` past a six-name one. Each leak read the whole file
   # while the example stayed green.
   # MEASURED, not guessed: these are every File class method the example
-  # actually uses -- `open` for the scanner, the rest for the temporary file
-  # and its cleanup. None of the others returns file CONTENT.
+  # actually uses -- `stat` and `open` for the scanner, the rest for the
+  # temporary file and its cleanup. None of the others returns file CONTENT.
   # NOT all of them are load-bearing, and that is stated rather than implied:
   # removing `binwrite`, `expand_path` or `writable?` one at a time leaves
   # all five bounded examples GREEN, because those fire BEFORE the guards are
