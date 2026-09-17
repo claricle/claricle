@@ -4,6 +4,7 @@
 # rest of spec/support is loaded -- pdf_spec.rb reaches its two builders the
 # same way. A glob would also pull those builders into every spec run for no
 # reason.
+require_relative "../support/generation_observer"
 require_relative "../support/shell_helpers"
 
 # What `Cli#help` promises a caller's SHELL, kept apart from cli_spec.rb
@@ -38,6 +39,7 @@ RSpec.describe Claricle::Cli::Runner do
 
   describe "help's shell contract" do
     include ShellHelpers
+    include GenerationObserver
 
     # `help`'s rescue deliberately covers generation as well as the write.
     # Every other command narrows its own rescue to the write half -- see
@@ -96,24 +98,7 @@ RSpec.describe Claricle::Cli::Runner do
     # WHEN a write reached the shell, not merely that it did -- Thor calls
     # `class_options_help` AFTER its three shell writes, so an output
     # assertion alone can't tell the examples below what drove them.
-    #
-    # `and_wrap_original`, not `prepend`: RSpec tears its own stub down at
-    # the end of THIS example, so a leaked hook can't outlive it (same
-    # pattern at `spec/claricle/handlers/postscript_spec.rb:965`).
-    #
-    # Refuses a second `help` call inside one block instead of silently
-    # answering about the first.
-    def observing_generation(probe)
-      seen = []
-      allow(Claricle::Cli).to receive(:class_options_help).and_wrap_original do |original, *args|
-        seen << probe.call
-        original.call(*args)
-      end
-      yield
-      raise "observing_generation saw #{seen.length} generations, expected 1" unless seen.one?
-
-      seen.first
-    end
+    # `observing_generation` lives in `spec/support/generation_observer.rb`.
 
     # Runner asks the settable `Thor::Base.shell` factory for each
     # invocation's shell. Returning this exact instance exercises the real

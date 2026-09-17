@@ -2,7 +2,12 @@
 
 require "tmpdir"
 
+require_relative "../support/batch_runner"
+
 RSpec.describe "Claricle::Batch" do
+  # `run` lives in `spec/support/batch_runner.rb`.
+  include BatchRunner
+
   batch = Claricle.const_get(:Batch)
 
   # A real tree, never a stubbed Dir: the whole helper is a set of claims
@@ -18,10 +23,6 @@ RSpec.describe "Claricle::Batch" do
   # the cheapest thing that produces a result: a Report naming the path.
   report = ->(path) { Claricle::Models::Report.new(source_path: path) }
   clean = ->(_result) { 0 }
-
-  def run(batch, arguments, pattern: nil, classify: nil, &operation)
-    batch.run(arguments, pattern: pattern, classify: classify, &operation)
-  end
 
   describe "which files an argument names" do
     # D19: a positional is a literal path when it names an existing file.
