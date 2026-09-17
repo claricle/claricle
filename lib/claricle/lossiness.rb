@@ -27,7 +27,9 @@ module Claricle
   # never reaches it, even though the gemspec now depends on it for the EMF
   # convert path (metafile.rb).
   module Lossiness
-    LEVELS = %w[lossless lossy unknown].freeze
+    # `LEVELS` lives in lossiness/levels.rb, not here -- nothing in this file
+    # reads it; only `Models::Conversion` does, and requires that file
+    # directly rather than this whole classifier. See levels.rb for why.
 
     # A source may be a bare BasicObject exposing only reader methods, so a
     # type test must not dispatch a method to it. Same idiom, and the same
@@ -183,6 +185,50 @@ module Claricle
 
     class << self
       # `source` is a String of bytes or an open IO positioned at byte 0.
+      #
+      # CALLER CONTRACT, not a checked precondition: a String `source` must be
+      # the caller's WHOLE document. This cannot be verified here and is never
+      # attempted, because it cannot be -- measured (`spec/claricle/models/
+      # conversion_spec.rb`, "cannot distinguish a truncated String..."): a
+      # two-root document sliced at `doc[0...cut_point]`, where `cut_point`
+      # lands exactly where the first root's closing tag ends, is BYTE-FOR-BYTE
+      # IDENTICAL to a genuinely complete, well-formed single-root document
+      # ending at that same byte. `classify` sees only the bytes it is handed;
+      # there is no third signal available to tell "truncated prefix" from
+      # "the whole thing", because in this one shape they are the same String.
+      # Forcing `unknown` on that shape would have to fire on every complete
+      # single-root SVG too -- the identical bytes cannot classify two ways --
+      # which trades a rare, caller-caused false `lossless` for a false
+      # `unknown` on the overwhelming majority of real, correct documents.
+      # That is a worse contract, not a safer one, so it is refused rather than
+      # attempted.
+      #
+      # Every claim below about "a String" means an exact, core String, the
+      # same scope `image.rb`'s "fresh core String" comments use -- not a
+      # subclass overriding its own `pos`/`to_str`/etc, and not an object
+      # mutated by something else while `classify` is mid-parse. Both are
+      # separate, pre-existing hazards (a lying subclass, or a source another
+      # thread rewrites underneath a read) that apply to any Ruby API taking
+      # an object by reference, not something specific to this gap.
+      #
+      # This is why `refuse_unpositioned` below can refuse an IO but never a
+      # core String, even though it runs unconditionally on both (measured
+      # with `TracePoint`: a String source does receive its
+      # `respond_to?(:closed?)` and `respond_to?(:pos)` probes, at the exact
+      # call sites below): an IO's position, closedness and (via
+      # `TaggedSource`) read/readline faults are all independently OBSERVABLE,
+      # so those probes return true and `classify` can and does refuse an IO
+      # it cannot trust. A core String answers every one of those same probes
+      # false, so the check always no-ops for it -- not because the probe is
+      # skipped, but because a core String never has an answer worth
+      # refusing. What none of those probes ever does is dispatch a call that
+      # reads the string's bytes -- `respond_to?`/`is_a?`/`to_str` are the
+      # only methods ever called on it (measured, see the TaggedSource
+      # comment below), so there is no additional call left to hang a length
+      # or position check on. The `readline`-fault route below (`scan`,
+      # `TaggedSource`) closes the IO-shaped version of this same defect,
+      # where the fault itself is the missing signal; nothing dispatched on a
+      # core String ever faults.
       def classify(source_format:, target_format:, source:)
         return "unknown" unless source_format == :svg
 
@@ -219,9 +265,12 @@ module Claricle
         # first root ALONE and calls it `lossless`, while the real, untruncated
         # document is `unknown`. This is not specific to a hostile caller: the
         # identical result comes from literally truncating a plain String at
-        # the same byte, with no IO or fault involved at all -- a pre-existing
-        # gap this fix must not make newly reachable through the one route it
-        # deliberately stops escalating. So ANY absorbed `readline` fault
+        # the same byte, with no IO or fault involved at all -- this fix must
+        # not make that route newly reachable. The String case itself is a
+        # separate, unclosable gap: see the CALLER CONTRACT note on `classify`
+        # for why -- the truncated String and a genuinely complete one are the
+        # same bytes, so no fix here can tell them apart without also breaking
+        # every complete document. So ANY absorbed `readline` fault
         # forces the same `[root_ok, present]` shape `verdict` already reads
         # as `unknown` for a bad root (`false`, empty), never whatever
         # `Scanner` computed from the partial content it saw before the fault
@@ -461,9 +510,26 @@ module Claricle
     # behaviour ever changes. Every source is wrapped, including a String: a
     # String cannot raise while being read, so the special case that skipped
     # it was a branch nothing could distinguish -- measured, always wrapping
-    # passes the whole suite. REXML reaches a String through `to_str` and
-    # then reads a StringIO, so the wrapper sees two or three delegated
-    # calls and nothing after.
+    # passes the whole suite. REXML calls exactly ONE `to_str` on a String,
+    # then reads its OWN internal StringIO -- measured with `TracePoint`,
+    # which records every method Ruby DISPATCHES on the object rather than
+    # only the ones a spy remembered to name: `classify`'s own boundary
+    # checks (`refuse_unreadable`, `refuse_unpositioned`) call
+    # `respond_to?`/`is_a?` on the raw source before it is ever wrapped here,
+    # and REXML's own `SourceFactory` asks this wrapper a few more
+    # `respond_to?` questions (forwarded to the raw source via
+    # `respond_to_missing?` below) before it settles on the one `to_str`
+    # call. `respond_to?`/`is_a?`/`to_str` are the only three methods ever
+    # DISPATCHED on a core String source, in any call to `classify` --
+    # nothing else is ever called on it. This is a claim about method
+    # dispatch, not about the bytes: REXML's internal `StringIO` may hold a
+    # live reference to the same object rather than an independent copy, so
+    # a caller who mutates the very String they handed to `classify` while
+    # it is still running is a separate, out-of-scope hazard -- the same one
+    # that exists for any Ruby API given a mutable object by reference, and
+    # no different from an IO whose underlying file changes mid-read. See
+    # the CALLER CONTRACT comment on `classify` for what the dispatch limit
+    # implies for the truncated-String gap specifically.
     class TaggedSource
       def initialize(source) = @source = source
 
@@ -553,15 +619,14 @@ module Claricle
         @phase = :prolog
       end
 
-      # This rescue no longer covers the parser -- `next_event` does, and
-      # `Unreadable` is how it reports one. What is left for this one is
-      # `consume` and AttributeRules, which genuinely raise ArgumentError:
-      # measured, every value rule raises `ArgumentError: invalid byte sequence
-      # in UTF-8` on invalid-UTF-8 input. That stays unreachable while REXML
-      # transcodes or raises first, and the direction is safe.
-      #
-      # REXML::ParseException is gone from here because it can no longer arrive
-      # here: nothing outside the parser raises it.
+      # `next_event` reports "REXML refused this document" as `Unreadable`.
+      # What is left for `ArgumentError` is `consume` and AttributeRules,
+      # which genuinely raise it on invalid-UTF-8 input -- measured, always
+      # with this exact message. `consume` is OUR code too, though, and a
+      # real bug there (wrong arity, a typo) raises the same class: measured,
+      # injecting one was silently reported as `"unknown"` before `run`
+      # started matching by MESSAGE, not class alone, so a bug in our own
+      # code is never mistaken for a bad document.
       def run
         parser = REXML::Parsers::PullParser.new(@source)
         while (event = next_event(parser))
@@ -569,7 +634,9 @@ module Claricle
         end
         note_truncation
         [@root_ok, @found.uniq]
-      rescue Unreadable, ArgumentError
+      rescue Unreadable, ArgumentError => e
+        raise if e.is_a?(ArgumentError) && e.message != "invalid byte sequence in UTF-8"
+
         [false, [:unclassified]]
       end
 
@@ -619,8 +686,16 @@ module Claricle
         note(:unclassified) unless @depth.zero?
       end
 
+      # Deduplicated at INSERTION, not just once at the end of `run`. `note`
+      # fires once per matched event, and a document can repeat the same
+      # feature (e.g. a `gradient` on every one of a thousand shapes) --
+      # measured, that grew `@found` by one entry per match instead of staying
+      # bounded by the fixed vocabulary of features this module knows about
+      # (`RULES`/`ATTR_FEATURES`/`KEPT_FEATURES`). `include?` here is checked
+      # against that same small, fixed set, so this stays cheap regardless of
+      # document size.
       def note(feature)
-        @found << feature
+        @found << feature unless @found.include?(feature)
       end
 
       # EVERY field of every event, not the character-data ones alone. The

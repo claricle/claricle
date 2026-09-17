@@ -162,6 +162,36 @@ RSpec.describe "conversion lossiness" do
       expect(model::LOSSINESS_LEVELS).to eq(%w[lossless lossy unknown])
       expect(model::LOSSINESS_LEVELS).to be_frozen
     end
+
+    # G1-claricle.md #4: the schema used to say these three were optional
+    # (no `required: true`) while runtime refused a nil one anyway -- a caller
+    # reading the schema (docs generator, JSON Schema export) would have been
+    # told they were optional. Pinned at the introspection layer, not just the
+    # behavioural layer already covered by "refuses to omit...".
+    it "declares the three traceability fields required in the introspectable schema, not only at runtime" do
+      %i[source_format target_format lossiness].each do |name|
+        expect(model.attributes[name].options[:required]).to be(true),
+                                                             "expected #{name}'s schema to say required: true"
+      end
+    end
+
+    # G1-claricle.md #3: requiring only this small result model used to load
+    # the whole `Lossiness` classifier -- and through it REXML and the `emf`
+    # gem -- for one 3-string constant. Run in a fresh subprocess: the parent
+    # process has already loaded everything via `spec_helper`, so only an
+    # isolated `ruby -Ilib` load can tell the two cases apart.
+    it "does not load the Lossiness classifier (REXML, the detector) merely to read LOSSINESS_LEVELS" do
+      probe = <<~RUBY
+        require "claricle/models/conversion"
+        print(defined?(REXML) ? "REXML:loaded" : "REXML:absent")
+      RUBY
+      lib = File.join(root, "lib")
+      output = IO.popen([RbConfig.ruby, "-I#{lib}", "-e", probe], err: %i[child out], &:read)
+
+      expect($CHILD_STATUS.success?).to be(true), "subprocess failed: #{output}"
+      expect(output.lines.last).to eq("REXML:absent"),
+                                   "expected Models::Conversion alone not to load REXML; got: #{output.inspect}"
+    end
   end
 
   describe "the classifier" do
@@ -460,6 +490,82 @@ RSpec.describe "conversion lossiness" do
         expect(verdict).not_to eq("lossless"),
                                "fail_after=#{fail_after} produced lossless from a truncated read"
       end
+    end
+
+    # Follow-up #11 (claricle-open-followups.md). Pinned as an ACCEPTED,
+    # documented gap -- not a bug this example is waiting to see fixed -- see
+    # the CALLER CONTRACT comment on `Lossiness.classify`. `classify` sees
+    # only the bytes it is handed, so nothing here can answer "lossless" for
+    # one and "unknown" for the other -- they are not two inputs, they are
+    # one. The `eq(control_document)` line below is illustrative, not
+    # evidence: `full[0...control_document.length]` equals `control_document`
+    # by construction, whatever `classify` does, so it can never fail on its
+    # own. It is kept so the two `classify_source` calls that follow are
+    # visibly comparing the same bytes. The actual proof that no signal
+    # exists is the next example, which counts what `classify` touches on a
+    # String source rather than reasoning about it.
+    #
+    # If this example ever needs to change, it is because `classify` gained a
+    # way to observe more than the bytes of a String (a length the caller
+    # asserts, a checksum, anything external to the String itself) -- not
+    # because a cleverer scan was found. No scan can find a difference that
+    # is not in the bytes.
+    it "cannot distinguish a truncated String from a complete one at a root boundary -- accepted, not a bug" do
+      second_root = %(<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><linearGradient/></svg>)
+      full = "#{control_document}\n#{second_root}"
+      cut_point = control_document.length
+      truncated = full[0...cut_point]
+
+      expect(truncated).to eq(control_document),
+                           "illustrative, true by construction: a prefix of this length is the prefix"
+      expect(classify_source(full)).to eq("unknown"), "control: the untruncated document"
+      expect(classify_source(truncated)).to eq("lossless"),
+                                            "known limitation: identical bytes to a real complete document"
+      expect(classify_source(control_document)).to eq("lossless"),
+                                                   "the truncated slice classifies exactly as the real thing does"
+    end
+
+    # The actual proof behind the example above. A spy that only overrides
+    # `to_str` cannot tell you anything reached NOTHING else -- it is blind to
+    # every other method by construction, and `classify`'s own boundary
+    # checks (`refuse_unreadable`, `refuse_unpositioned`) do call `respond_to?`
+    # and `is_a?` on the raw source before REXML ever sees it, and REXML's own
+    # `SourceFactory` asks a few more `respond_to?` questions through
+    # `TaggedSource#respond_to_missing?` before it settles on `to_str`
+    # (measured with `TracePoint`, which records every method Ruby DISPATCHES
+    # on the object, not just the ones a spy remembered to name). None of
+    # those probes reads the string's CONTENT: `to_str` is called exactly
+    # once and no other method is ever dispatched on this object. That is why
+    # the truncated-prefix example above can never be closed without breaking
+    # every complete single-root document: `respond_to?`/`is_a?` answer
+    # questions about the object's SHAPE, not its bytes, and the one `to_str`
+    # call is the only DISPATCHED call that ever reads them.
+    #
+    # Scope of this proof, stated plainly: `TracePoint` sees Ruby-level method
+    # dispatch on THIS object. It cannot see a C-level buffer read performed
+    # by something built FROM the returned bytes without dispatching back to
+    # this object -- e.g. `StringIO.new(source).size` reads the copied
+    # buffer's length without the call landing on `source` itself, so this
+    # spy would not catch that route. Closing that residual would need
+    # instrumentation below the Ruby method-dispatch layer, which is out of
+    # scope for a spec; the claim here is "no method call reads more", not
+    # "no byte is ever inspected by any means downstream of `to_str`".
+    it "touches a String source through its own boundary probes and exactly one to_str call, and no other dispatch" do
+      target = control_document.dup
+      calls = []
+      tracer = TracePoint.new(:call, :c_call) do |event|
+        calls << event.method_id if event.self.equal?(target)
+      end
+
+      tracer.enable
+      result = classify_source(target)
+      tracer.disable
+
+      expect(result).to eq("lossless")
+      expect(calls.uniq - %i[respond_to? is_a?]).to eq([:to_str]),
+                                                    "classify must dispatch nothing on a String source beyond its " \
+                                                    "own respond_to?/is_a? probes and to_str -- got #{calls.inspect}"
+      expect(calls.count(:to_str)).to eq(1), "to_str must be called exactly once, not on every read"
     end
 
     it "refuses a source of the wrong type instead of answering about it" do
@@ -1174,6 +1280,61 @@ RSpec.describe "conversion lossiness" do
         expect(wrapper.largest_read).to eq(small.largest_read)
         expect(wrapper.largest_read).to be < File.size(path_for("rect_and_line"))
       end
+    end
+
+    # G1-claricle.md #1: `Scanner#run`'s rescue used to catch every
+    # `ArgumentError`, including one raised by OUR OWN `consume`/AttributeRules
+    # code (a real bug: wrong arity, a typo'd method) -- silently reporting it
+    # as `"unknown"` instead of letting it escape. Only the exact message
+    # REXML's value rules raise on invalid-UTF-8 input may be absorbed.
+    it "does not hide a bug in its own consume path behind an unrelated ArgumentError rescue" do
+      scanner_class = lossiness.const_get(:Scanner)
+      original_consume = scanner_class.instance_method(:consume)
+      scanner_class.send(:define_method, :consume) do |*|
+        raise ArgumentError, "wrong number of arguments (given 1, expected 0)"
+      end
+
+      expect do
+        lossiness.classify(source_format: :svg, target_format: :eps, source: "<svg></svg>")
+      end.to raise_error(ArgumentError, /wrong number of arguments/)
+    ensure
+      scanner_class.send(:define_method, :consume, original_consume)
+      scanner_class.send(:private, :consume)
+    end
+
+    # Deliberately NOT a mutation-check proof for this diff: reverting this
+    # file to before the fix leaves this exact message still caught (the old
+    # blanket rescue also absorbed it), so this example stays green either
+    # way -- see the gate record's probe. What it DOES prove, independent of
+    # the diff's history, is that `rescue Unreadable, ArgumentError` itself
+    # stays in place: line-deletion-check.sh flags `lib/claricle/lossiness.rb`'s
+    # `rescue` line as safely deletable without this example.
+    it "still answers unknown, not a raise, for the genuine invalid-UTF-8 ArgumentError it exists to catch" do
+      scanner_class = lossiness.const_get(:Scanner)
+      original_consume = scanner_class.instance_method(:consume)
+      scanner_class.send(:define_method, :consume) do |*|
+        raise ArgumentError, "invalid byte sequence in UTF-8"
+      end
+
+      verdict = lossiness.classify(source_format: :svg, target_format: :eps, source: "<svg></svg>")
+      expect(verdict).to eq("unknown")
+    ensure
+      scanner_class.send(:define_method, :consume, original_consume)
+      scanner_class.send(:private, :consume)
+    end
+
+    # G1-claricle.md #2: `@found` used to grow one entry per matched event
+    # instead of staying bounded by the fixed, small feature vocabulary --
+    # deduplication only happened once, at the very end, via `.uniq`.
+    it "keeps its found-feature set bounded by the feature vocabulary, not by how many times a feature is matched" do
+      scanner = lossiness.const_get(:Scanner).new("<svg></svg>")
+
+      2000.times { scanner.send(:note, :gradient) }
+      scanner.send(:note, :clip_path)
+
+      found = scanner.instance_variable_get(:@found)
+      expect(found).to eq(%i[gradient clip_path])
+      expect(found.size).to eq(2)
     end
   end
 
