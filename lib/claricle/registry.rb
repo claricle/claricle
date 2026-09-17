@@ -46,6 +46,13 @@ module Claricle
         HANDLERS.values.flat_map(&:supported_profiles).uniq.sort
       end
 
+      # What one format's handler can convert to -- the `formats` command's
+      # `convert_to` column builds from this, the same way `capabilities_for`
+      # builds the operations column.
+      def convert_targets_for(format)
+        handler_for(format).convert_targets
+      end
+
       private
 
       # Two classes claiming a format is a configuration defect, not a

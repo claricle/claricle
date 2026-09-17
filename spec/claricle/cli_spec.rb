@@ -600,22 +600,25 @@ RSpec.describe Claricle::Cli::Runner do
         .to output(/png\tinspect/).to_stdout
     end
 
-    # The command must not advertise an operation that is still a stub.
-    # Asserting the whole line, because "prints no conform" would also
-    # pass if the command printed nothing at all. emf, png and svg are the
-    # formats that claim conform; nothing claims convert yet.
-    it "claims conform only where a handler implements it" do
+    # The command must not advertise an operation a handler has not
+    # implemented. Asserting the whole line, because "prints no conform"
+    # would also pass if the command printed nothing at all. emf claims
+    # both conform and convert; png and svg claim conform only; every
+    # other format stays inspect-only.
+    it "claims conform and convert only where a handler implements them" do
       expect { described_class.run(["formats"]) }
-        .to output("emf\tinspect, conform\neps\tinspect\npdf\tinspect\n" \
+        .to output("emf\tinspect, conform, convert\neps\tinspect\npdf\tinspect\n" \
                    "png\tinspect, conform\nps\tinspect\nsvg\tinspect, conform\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
       conform = { "emf" => true, "eps" => false, "pdf" => false, "png" => true, "ps" => false, "svg" => true }
-      rows = %w[emf eps pdf png ps svg].map do |format|
+      other = %w[eps pdf png ps svg].map do |format|
         %({"format":"#{format}","inspect":true,"conform":#{conform.fetch(format)},"convert":false,"convert_to":[]})
       end
-      expected = "[#{rows.join(",")}]\n"
+      emf = %({"format":"emf","inspect":true,"conform":true,"convert":true,) +
+            %("convert_to":["svg","eps","ps"]})
+      expected = "[#{([emf] + other).join(",")}]\n"
 
       expect { described_class.run(["formats", "--json"]) }.to output(expected).to_stdout
     end
@@ -657,8 +660,10 @@ RSpec.describe Claricle::Cli::Runner do
     writer&.close
   end
 
-  # emf, png and svg implement conformance_report now; eps and ps never
-  # will (D22), so they carry the exit-3 UnsupportedFormat story on.
+  # emf, png and svg implement conformance_report now; eps, pdf and ps
+  # never will (D22), so they carry the exit-3 UnsupportedFormat story on.
+  # Exit 0 and 1 arrive end to end through png, the first handler to
+  # implement it.
   describe "conform" do
     conform_fixtures = File.join(__dir__, "..", "fixtures", "conform")
 
@@ -888,14 +893,19 @@ RSpec.describe Claricle::Cli::Runner do
     end
   end
 
-  # No handler implements convert yet either (item 04), so every real
-  # conversion answers UnsupportedFormat -- exit 3, same state `conform` is
-  # in. These specs are the command's own boundary/plumbing: argument
-  # validation, --to inference, the whole-batch destination preflight, and
-  # --force reaching Writer. The one thing no real fixture can prove --
-  # that a successful conversion's bytes reach stdout untouched -- is
-  # driven against a narrow instance_double standing in for the one
-  # delegate call (Image#convert) this milestone cannot exercise for real.
+  # These specs drive png fixtures, and no handler with a png SOURCE
+  # implements convert yet (only emf does, item 04's first edge) -- so a
+  # real conversion here still answers UnsupportedFormat, exit 3. That
+  # keeps this describe block the command's own boundary/plumbing:
+  # argument validation, --to inference, the whole-batch destination
+  # preflight, and --force reaching Writer. The two examples that need a
+  # successful conversion (stdout carries the bytes untouched, and a
+  # closed pipe on that stream still exits 0) stand `Image#convert` in
+  # with a narrow `instance_double` returning a real `Models::Conversion`,
+  # rather than switching this block's fixtures to emf. The real emf
+  # handler is exercised directly in
+  # `spec/claricle/handlers/metafile_spec.rb`, and end to end through this
+  # CLI in "convert end to end against a real emf fixture" below.
   describe "convert" do
     it "exits 2 when given neither a file nor a pattern" do
       workspace.call do
@@ -1114,21 +1124,31 @@ RSpec.describe Claricle::Cli::Runner do
 
     # 04-convert.md's own explicit ask for this step: "`--output -` spec
     # asserts stdout carries bytes only, with no trailing newline." No
-    # handler completes a real conversion in this milestone, so this
-    # stands in for the one call (Image#convert) nothing else can drive --
-    # `instance_double` is verified against Image's real public interface,
-    # so a renamed or dropped method here fails this spec, not silently.
-    # One example, not two: "stdout carries bytes only" is a claim about
+    # handler with a png SOURCE completes a real conversion yet (only emf
+    # does, per item 04's first edge), so `Image#convert` is stood in for
+    # here with a real `Models::Conversion` -- `instance_double` is
+    # verified against Image's real public interface, so a renamed or
+    # dropped method here fails this spec, not silently. The returned
+    # Conversion is a real instance, not a further double: it is a plain
+    # data model, so building one exercises `convert_one`'s own field
+    # copy and `writer.write` path exactly as a real handler's return
+    # value would.
+    #
+    # stderr is NOT expected to stay empty: the plan card also says
+    # "everything else -- the human summary, lossiness warnings, error
+    # text -- goes to stderr in that mode", and `write_convert` now
+    # renders that summary for real, so this asserts the exact line
+    # rather than silence. One example, not two: this is a claim about
     # BOTH streams' division of labor, so a stray write on either one
-    # should fail it. A standalone `not_to output.to_stderr` proved
-    # nothing on its own here -- an unknown `convert` command (reverting
-    # this whole feature) also writes nothing to real stderr, since Thor's
-    # own error report goes through the `output:` argument instead. This
-    # combined form catches that: reverted, `stdout.string` is empty, not
+    # should fail it. Reverted, `stdout.string` goes empty rather than
     # `"RAWBYTES"`.
-    it "writes exactly the converted bytes to stdout, with no trailing newline, and nothing to stderr" do
+    it "writes exactly the converted bytes to stdout, with no trailing newline, and the summary line to stderr" do
       workspace.call(["a.png", "valid.png"]) do
-        fake = instance_double(Claricle::Image, format: :png, convert: "RAWBYTES")
+        converted = Claricle::Models::Conversion.new(
+          source_path: "a.png", source_format: "png", target_format: "svg",
+          lossiness: "unknown", content: "RAWBYTES"
+        )
+        fake = instance_double(Claricle::Image, format: :png, convert: converted)
         allow(Claricle::Image).to receive(:from_path).with("a.png").and_return(fake)
 
         stdout = StringIO.new
@@ -1145,7 +1165,7 @@ RSpec.describe Claricle::Cli::Runner do
         end
 
         expect(stdout.string).to eq("RAWBYTES")
-        expect(stderr.string).to eq("")
+        expect(stderr.string).to eq("a.png -> svg: - (unknown)\n")
       end
     end
 
@@ -1159,7 +1179,11 @@ RSpec.describe Claricle::Cli::Runner do
     # already failed by the time that line runs.
     it "returns 0 when a converted file's stdout is closed, the same as every other command" do
       workspace.call(["a.png", "valid.png"]) do
-        fake = instance_double(Claricle::Image, format: :png, convert: "RAWBYTES")
+        converted = Claricle::Models::Conversion.new(
+          source_path: "a.png", source_format: "png", target_format: "svg",
+          lossiness: "unknown", content: "RAWBYTES"
+        )
+        fake = instance_double(Claricle::Image, format: :png, convert: converted)
         allow(Claricle::Image).to receive(:from_path).with("a.png").and_return(fake)
 
         result = closed_stdout do
@@ -1167,6 +1191,47 @@ RSpec.describe Claricle::Cli::Runner do
         end
 
         expect(result).to eq(0)
+      end
+    end
+  end
+
+  # Item 04's first real edge, driven through the actual CLI rather than a
+  # double -- `Handlers::Metafile#convert` is the only implementation that
+  # can produce a genuine converted file and a real `Conversion` end to
+  # end. Copies the emf fixture in by absolute path rather than through
+  # `workspace`, since that lambda is hardcoded to `spec/fixtures/inspect`.
+  describe "convert end to end against a real emf fixture" do
+    emf_fixture = File.join(__dir__, "..", "fixtures", "convert", "rect_and_line.emf")
+
+    it "writes the converted file and prints source, target, path and lossiness" do
+      workspace.call do
+        FileUtils.cp(emf_fixture, "rect_and_line.emf")
+
+        result = nil
+        stdout = capture_stdout do
+          result = described_class.run(%w[convert rect_and_line.emf --to svg --output out.svg])
+        end
+
+        expect(result).to eq(0)
+        expect(File.size("out.svg")).to be > 0
+        expect(stdout).to eq("rect_and_line.emf -> svg: out.svg (unknown)\n")
+      end
+    end
+
+    it "emits a Conversion-shaped BatchItem under --json, with no bare nil fields" do
+      workspace.call do
+        FileUtils.cp(emf_fixture, "rect_and_line.emf")
+
+        rendered = capture_stdout do
+          described_class.run(%w[convert rect_and_line.emf --to eps --output out.eps --json])
+        end
+        items = JSON.parse(rendered)
+
+        expect(items.length).to eq(1)
+        expect(items.first["result"]).to eq(
+          "source_path" => "rect_and_line.emf", "source_format" => "emf",
+          "target_format" => "eps", "lossiness" => "unknown", "output_path" => "out.eps"
+        )
       end
     end
   end

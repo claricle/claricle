@@ -169,13 +169,11 @@ module Claricle
     destinations = files.to_h { |file| [file, convert_destination(file, target: target, output: output)] }
     writer = Writer.new(destinations.values, sources: files, force: force)
 
-    # `classify` always answers 0: the block below either returns normally
-    # -- always `nil`, since `Models::BatchItem#result` is still typed to
-    # `Report` and stays that way until a handler produces a real
-    # conversion result to widen it for -- or raises, which Batch's own
-    # per-file rescue already turns into a failed item with its own exit
-    # code. There is no success/failure distinction left for `classify` to
-    # make.
+    # `classify` always answers 0: the block below either returns a
+    # `Models::Conversion` normally, or raises, which Batch's own per-file
+    # rescue already turns into a failed item with its own exit code. There
+    # is no success/failure distinction left for `classify` to make --
+    # unlike `Report#valid`, a completed conversion has no verdict to grade.
     #
     # `run_files`, not `run`: `files` is already the expanded list built
     # above for the destination preflight. `run` would expand it a SECOND
@@ -192,12 +190,10 @@ module Claricle
     image = Image.from_path(file)
     raise InvocationError, "#{file} is already #{target}; nothing to convert to" if image.format == target
 
-    # No handler implements `convert` yet, so this always raises
-    # `UnsupportedFormat` today -- exit 3, the same state `conform` is in
-    # until its own first handler lands.
-    bytes = image.convert(to: target)
-    writer.write(bytes, to: destination)
-    nil
+    # See `Models::Conversion#with_output_path` for why a second instance
+    # is built here rather than the handler's own carrying the real path.
+    conversion = image.convert(to: target)
+    conversion.with_output_path(writer.write(conversion.content, to: destination))
   end
 
   # `--to` wins outright when given, once it does not conflict with a

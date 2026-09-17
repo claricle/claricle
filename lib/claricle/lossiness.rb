@@ -23,8 +23,9 @@ module Claricle
   # out the answer is `unknown`.
   #
   # No conversion is performed here and no delegate is loaded. The losses this
-  # classifies were measured on vectory 0.12.0 during design; vectory is not a
-  # dependency of this gem and is never reached.
+  # classifies were measured on vectory 0.12.0 during design; this module
+  # never reaches it, even though the gemspec now depends on it for the EMF
+  # convert path (metafile.rb).
   module Lossiness
     LEVELS = %w[lossless lossy unknown].freeze
 

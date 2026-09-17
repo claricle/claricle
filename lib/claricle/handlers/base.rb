@@ -81,6 +81,26 @@ module Claricle
           @profiles || [].freeze
         end
 
+        # A handler's convert target list, declared the same way `formats`
+        # is and for the same reason: two calls would let a handler change
+        # its mind about what it converts to, and the registry would have
+        # no way to notice. Kept as its own declaration rather than derived
+        # from overriding `convert` -- a handler can convert to several
+        # targets through one method, and `capabilities` already answers
+        # the yes/no question from whether `convert` is overridden at all.
+        def convert_to(*symbols)
+          raise Error, "#{self} already declared convert targets #{@convert_targets.inspect}" if @convert_targets
+
+          bad = symbols.grep_v(Symbol)
+          raise Error, "#{self} declared non-Symbol convert targets #{bad.inspect}" if bad.any?
+
+          @convert_targets = symbols.freeze
+        end
+
+        def convert_targets
+          @convert_targets || [].freeze
+        end
+
         # Derived, never declared. A declaration is a second place to say
         # what the code already says, and it can advertise an operation
         # that is still Base's raising stub -- exactly the lie `formats`
