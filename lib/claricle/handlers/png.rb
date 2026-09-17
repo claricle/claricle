@@ -721,7 +721,44 @@ module Claricle
       # The structural pre-pass (D23), called from `conformance_report`.
       # Opens and closes the scanner's file independently of the
       # delegate.
+      #
+      # Refuses a non-regular path rather than handing it to
+      # `StructureScanner`, which needs a truthful `io.size` and absolute
+      # seeks -- neither exists for a pipe. Measured, each wrong a
+      # different way: a named FIFO gives `io.size` 0 (fstat reports no
+      # size for one), so a well-formed PNG came back
+      # `shorter_than_signature`; a `/dev/fd/<n>` pipe gives `io.size` the
+      # buffered byte count, so the walk proceeds and its first `io.seek`
+      # raises `Errno::ESPIPE` uncaught. `InvocationError` names this a
+      # caller problem, same as `claricle.rb`'s own path/pattern check --
+      # unlike `ChunkReader` below, which only skips forward and drains
+      # past `Errno::ESPIPE`, this scanner cannot read a whole unseekable
+      # stream just to learn its size without losing the bounded-read
+      # guarantee the class documents.
+      #
+      # Checked on `image.path` directly, before `with_path` ever opens
+      # anything: nil for a content-born image, which always gets a
+      # Tempfile from `with_path` and so never needs the check, and for a
+      # path-born image the same string `with_path` would yield. Checking
+      # first also means never re-opening a FIFO an earlier read in this
+      # call (detection, `read_chunks`) already drained -- that has no
+      # writer left, so a second open would hang rather than raise.
+      #
+      # `File.stat`, not `File.file?`: `file?` alone is also false for a
+      # path that never existed, and raising InvocationError for THAT would
+      # swallow `Errno::ENOENT` -- the exact fault `read_chunks` below
+      # deliberately leaves unrescued so it propagates. `File.stat` raises
+      # that same ENOENT itself for a missing path, before `ftype` is ever
+      # reached, so a vanished path still gets the genuine error rather than
+      # a misleading "not a regular file". `ftype`, not `file?`, because
+      # `file?` was already the right call for THIS check (it follows a
+      # symlink to its target, `ftype` on the path alone does not -- a
+      # symlink to a regular file must still pass); `File.stat(p).ftype`
+      # gets both properties from the one syscall `file?` and `exist?`
+      # needed two of.
       def structural_issues(image)
+        image.path&.then { |p| raise InvocationError, "not a regular file: #{p}" unless File.stat(p).ftype == "file" }
+
         image.with_path { |path| File.open(path, "rb") { |io| StructureScanner.new(io).issues } }
       end
 
