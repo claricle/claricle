@@ -351,7 +351,7 @@ lib/claricle/
   handlers/png.rb      # PNG metadata
   handlers/postscript.rb # EPS and PS DSC header metadata
   handlers/svg.rb      # SVG root metadata
-  models/              # Location, Issue, Report, Inspection, BatchItem, Conversion
+  models/              # Location, Issue, Report, Inspection, Conversion, BatchItem
   batch.rb             # one file set, one envelope per file
   fault.rb             # an exception's exit code and renderable message
   errors.rb            # Error, UnknownFormat, UnsupportedFormat, ...

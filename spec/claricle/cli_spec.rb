@@ -662,9 +662,10 @@ RSpec.describe Claricle::Cli::Runner do
     writer&.close
   end
 
-  # png and emf implement conformance_report now; eps, pdf and ps never
-  # will (D22), so they carry the exit-3 UnsupportedFormat story on. Exit
-  # 0 and 1 arrive end to end through png, the first handler.
+  # png and emf implement conformance_report; eps, pdf, ps and svg never
+  # will (D22), so they carry the exit-3 UnsupportedFormat story on.
+  # Exit 0 and 1 arrive end to end through png, the first handler to
+  # implement it.
   describe "conform" do
     # The failure is collected into an envelope rather than raised, so it
     # reaches the user through the command's own stderr line, not the
