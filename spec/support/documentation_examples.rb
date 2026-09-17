@@ -5,9 +5,11 @@
 # leaving replica examples green. Instance methods, not module functions:
 # both read `readme`, the `let` documentation_spec.rb defines alongside
 # `include DocumentationExamples`, and `expect` is only available inside a
-# running example. In `spec/support` rather than a `def` in the describe
-# body because both take an argument -- a `let` has no arity, and a
-# top-level `def` would leak onto Object.
+# running example. `readme` is the `let` defined in documentation_spec.rb,
+# alongside that file's `include DocumentationExamples`. This module is in
+# `spec/support` rather than a `def` in the describe body because both
+# helpers take an argument -- a `let` has no arity, and a top-level `def`
+# would leak onto Object.
 module DocumentationExamples
   # Whole lines, not substrings: asserting "image.format" would still pass
   # if the doc said "image.formatt".
