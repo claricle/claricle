@@ -112,6 +112,18 @@ module Claricle
         @content&.value
       end
 
+      # A handler's own `Conversion` never knows its `output_path` -- it is
+      # built before the write happens, and `Models::Base` seals (freezes)
+      # every instance at construction, so the field cannot be set on this
+      # object afterward. The caller (`Claricle.convert_one`) uses this once
+      # the real destination is known, rather than re-listing every other
+      # field by hand.
+      def with_output_path(path)
+        self.class.new(source_path: source_path, source_format: source_format,
+                       target_format: target_format, lossiness: lossiness,
+                       output_path: path, content: content)
+      end
+
       private
 
       # Runs BEFORE lutaml's own `validate!`, which is the whole point:

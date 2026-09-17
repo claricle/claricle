@@ -173,6 +173,21 @@ module Claricle
         batch_failures(items)
       end
 
+      # Per file: the path, the target format, where the bytes landed
+      # ("-" for stdout, since `Writer#write` returns nil there), and the
+      # lossiness classification -- the line shape the plan card names.
+      # An errored item has no `Conversion` to describe and is reported
+      # on stderr instead, via `batch_failures`.
+      def conversions(items)
+        items.reject { |item| item.status == "error" }
+             .map { |item| conversion_line(item.path, item.result) }
+      end
+
+      def conversion_line(path, conversion)
+        written = conversion.output_path || "-"
+        "#{visible(path)} -> #{conversion.target_format}: #{visible(written)} (#{conversion.lossiness})"
+      end
+
       def issues(item)
         item.result.issues.map do |issue|
           ["  #{visible(issue.severity)}", code(issue.code),
@@ -203,8 +218,7 @@ module Claricle
       end
 
       # Capabilities are derived from the handler, so this cannot
-      # advertise an operation that is still a raising stub. `convert_to`
-      # stays empty until item 04 gives handlers a target list.
+      # advertise an operation that is still a raising stub.
       def format_row(format)
         capabilities = Registry.capabilities_for(format)
 
@@ -213,9 +227,7 @@ module Claricle
           "inspect" => capabilities.include?(:inspect),
           "conform" => capabilities.include?(:conform),
           "convert" => capabilities.include?(:convert),
-          # The list of targets is item 04's; the boolean above already
-          # tells the truth about whether convert works at all.
-          "convert_to" => []
+          "convert_to" => Registry.convert_targets_for(format).map(&:to_s)
         }
       end
 
@@ -478,21 +490,29 @@ module Claricle
       Presenter.conformance_failures(result.items).each { |line| warn line }
     end
 
-    # No handler completes a conversion yet (same state `conform` is in),
-    # so there is never a successful item to render a human summary line
-    # for in this milestone -- only the failure branch is reachable end to
-    # end. A real conversion result will carry a per-conversion lossiness
-    # classification the success line needs ("source, target format,
-    # written path, and the lossiness classification"); until a handler
-    # produces one there is nothing honest to print for a success, so this
-    # reports failures only, the same shape `write_conformance` uses for
-    # its own failure half. `--json` is unreachable together with stdout
-    # mode -- `convert` above already refuses that combination before this
-    # ever runs -- so reading `options[:json]` here is safe in both modes.
+    # One line per successfully converted file: source, target format,
+    # written path (or "-"), and the lossiness classification -- the
+    # plan card's required shape. `--output -` already put the converted
+    # bytes on stdout as a side effect inside `Claricle.convert_batch`, so
+    # the summary goes to stderr instead in that mode, keeping the stdout
+    # stream pipe-safe; every other mode prints it to stdout, the same
+    # split `write_conformance` uses for its own verdict/failure halves.
+    # `--json` is unreachable together with stdout mode -- `convert` above
+    # already refuses that combination before this ever runs -- so reading
+    # `options[:json]` here is safe in both modes.
     def write_convert(result)
       return puts(Models::BatchItem.to_json(result.items)) if options[:json]
 
+      print_conversion_summary(Presenter.conversions(result.items))
       Presenter.batch_failures(result.items).each { |line| warn line }
+    end
+
+    # The stdout/stderr split `write_convert`'s own comment describes,
+    # pulled out so `write_convert` stays one guard clause plus two calls.
+    def print_conversion_summary(lines)
+      return lines.each { |line| warn line } if options[:output] == Writer::STDOUT_DESTINATION
+
+      puts lines.join("\n") unless lines.empty?
     end
   end
 end

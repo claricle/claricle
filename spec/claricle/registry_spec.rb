@@ -46,15 +46,26 @@ RSpec.describe "Claricle::Registry" do
     end
 
     # Derived, so it cannot advertise an operation still on Base. emf, pdf
-    # and png all implement inspect and conform -- their rows are the
-    # ones that prove this is not just "always [:inspect]".
+    # and png all implement inspect and conform, and emf and svg are the
+    # two formats with a real convert edge so far (item 04) -- these rows
+    # are what prove this is not just "always [:inspect]".
     it "reports only the capabilities each handler has implemented" do
-      expect(registry.capabilities_for(:emf)).to eq(%i[inspect conform])
+      expect(registry.capabilities_for(:emf)).to eq(%i[inspect conform convert])
       expect(registry.capabilities_for(:eps)).to eq([:inspect])
       expect(registry.capabilities_for(:pdf)).to eq(%i[inspect conform])
       expect(registry.capabilities_for(:png)).to eq(%i[inspect conform])
       expect(registry.capabilities_for(:ps)).to eq([:inspect])
-      expect(registry.capabilities_for(:svg)).to eq([:inspect])
+      expect(registry.capabilities_for(:svg)).to eq(%i[inspect convert])
+    end
+
+    # Derived from the handler, same as capabilities_for -- emf declares
+    # convert_to :svg, :eps, :ps; svg now declares convert_to :eps, :ps.
+    it "reports each handler's declared convert targets" do
+      expect(registry.convert_targets_for(:emf)).to eq(%i[svg eps ps])
+      expect(registry.convert_targets_for(:eps)).to eq([])
+      expect(registry.convert_targets_for(:png)).to eq([])
+      expect(registry.convert_targets_for(:ps)).to eq([])
+      expect(registry.convert_targets_for(:svg)).to eq(%i[eps ps])
     end
   end
 
