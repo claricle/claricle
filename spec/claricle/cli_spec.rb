@@ -4,7 +4,6 @@ require "English"
 require "fileutils"
 require "stringio"
 require "tmpdir"
-
 require_relative "../support/pdf_builder"
 
 RSpec.describe Claricle::Cli::Runner do
@@ -603,24 +602,25 @@ RSpec.describe Claricle::Cli::Runner do
     # The command must not advertise an operation a handler has not
     # implemented. Asserting the whole line, because "prints no conform"
     # would also pass if the command printed nothing at all. emf claims
-    # both conform and convert; png claims conform only; svg claims
-    # convert only; eps, pdf and ps stay inspect-only.
+    # both conform and convert; pdf and png claim conform only; svg
+    # claims convert only; eps and ps stay inspect-only.
     it "claims conform and convert only where a handler implements them" do
       expect { described_class.run(["formats"]) }
-        .to output("emf\tinspect, conform, convert\neps\tinspect\npdf\tinspect\n" \
+        .to output("emf\tinspect, conform, convert\neps\tinspect\npdf\tinspect, conform\n" \
                    "png\tinspect, conform\nps\tinspect\nsvg\tinspect, convert\n").to_stdout
     end
 
     it "emits a fixed row shape under --json" do
-      other = %w[eps pdf ps].map do |format|
+      other = %w[eps ps].map do |format|
         %({"format":"#{format}","inspect":true,"conform":false,"convert":false,"convert_to":[]})
       end
       emf = %({"format":"emf","inspect":true,"conform":true,"convert":true,) +
             %("convert_to":["svg","eps","ps"]})
+      pdf = %({"format":"pdf","inspect":true,"conform":true,"convert":false,"convert_to":[]})
       png = %({"format":"png","inspect":true,"conform":true,"convert":false,"convert_to":[]})
       svg = %({"format":"svg","inspect":true,"conform":false,"convert":true,) +
             %("convert_to":["eps","ps"]})
-      expected = "[#{[emf, other[0], other[1], png, other[2], svg].join(",")}]\n"
+      expected = "[#{[emf, other[0], pdf, png, other[1], svg].join(",")}]\n"
 
       expect { described_class.run(["formats", "--json"]) }.to output(expected).to_stdout
     end
@@ -638,6 +638,17 @@ RSpec.describe Claricle::Cli::Runner do
   workspace = lambda do |*names, &block|
     Dir.mktmpdir do |dir|
       names.each { |name, source| FileUtils.cp(File.join(fixtures, source), File.join(dir, name)) }
+      Dir.chdir(dir, &block)
+    end
+  end
+
+  # A parallel workspace for pdf: its fixtures are built on demand by
+  # `PdfBuilder`, not sourced from `spec/fixtures/inspect`, so `source`
+  # here is already the absolute path `PdfBuilder.path` returns rather
+  # than a filename to join against `fixtures`.
+  pdf_workspace = lambda do |*names, &block|
+    Dir.mktmpdir do |dir|
+      names.each { |name, source| FileUtils.cp(source, File.join(dir, name)) }
       Dir.chdir(dir, &block)
     end
   end
@@ -662,10 +673,8 @@ RSpec.describe Claricle::Cli::Runner do
     writer&.close
   end
 
-  # png and emf implement conformance_report; eps, pdf, ps and svg never
+  # emf, pdf and png implement conformance_report; eps, ps and svg never
   # will (D22), so they carry the exit-3 UnsupportedFormat story on.
-  # Exit 0 and 1 arrive end to end through png, the first handler to
-  # implement it.
   describe "conform" do
     # The failure is collected into an envelope rather than raised, so it
     # reaches the user through the command's own stderr line, not the
@@ -697,6 +706,35 @@ RSpec.describe Claricle::Cli::Runner do
         expect(described_class.run(%w[conform a.png], output: StringIO.new)).to eq(1)
         expect { described_class.run(%w[conform a.png], output: StringIO.new) }
           .to output(/\Aa\.png: no\n {2}error \[png\./).to_stdout
+      end
+    end
+
+    # The first real conformance verdicts to reach the CLI end to end: pdf
+    # implements conformance_report now, so 0 and 1 are reachable without a
+    # stub.
+    it "exits 0 for a conformant PDF, and prints its verdict" do
+      pdf_workspace.call(["a.pdf", PdfBuilder.path(name: "cli-valid")]) do
+        expect(described_class.run(%w[conform a.pdf], output: StringIO.new)).to eq(0)
+        expect { described_class.run(%w[conform a.pdf], output: StringIO.new) }
+          .to output("a.pdf: yes\n").to_stdout
+      end
+    end
+
+    # The specific mapped issue (severity, code, message, location) is
+    # pinned in pdf_spec.rb; this end-to-end check is only that the
+    # error line for a real nonconformant file reaches stdout with the
+    # RIGHT code. Anchored to the full code, not a `PDF_STRUCTURE`
+    # prefix match: the handler defines two codes, `PDF_STRUCTURE` (a
+    # string `Validator.validate` returned) and
+    # `PDF_STRUCTURE_UNREADABLE` (a raise it caught) -- a catalog-less
+    # fixture hits the second, and an unanchored prefix match cannot
+    # tell the two apart.
+    it "exits 1 for a nonconformant PDF, with an error line on stdout" do
+      catalog_less = PdfBuilder.path(name: "cli-catalog-less", trailer: "<< /Size 4 >>")
+      pdf_workspace.call(["a.pdf", catalog_less]) do
+        expect(described_class.run(%w[conform a.pdf], output: StringIO.new)).to eq(1)
+        expect { described_class.run(%w[conform a.pdf], output: StringIO.new) }
+          .to output(/\Aa\.pdf: no\n {2}error \[PDF_STRUCTURE_UNREADABLE\]/).to_stdout
       end
     end
 
@@ -803,6 +841,21 @@ RSpec.describe Claricle::Cli::Runner do
       it "carries the whole envelope for a conformant file" do
         workspace.call(["a.png", "valid.png"]) do
           rendered = capture_stdout { described_class.run(%w[conform a.png --json]) }
+          rows = JSON.parse(rendered)
+
+          expect(rows.length).to eq(1)
+          expect(rows.first["status"]).to eq("ok")
+          expect(rows.first["exit_code"]).to eq(0)
+          expect(rows.first["error"]).to be_nil
+          expect(rows.first["result"]["valid"]).to eq("yes")
+        end
+      end
+
+      # A conformant file's real envelope, contrasted with the failure
+      # shape above: `result` carries the Report, `error` stays nil.
+      it "carries the whole envelope for a conformant file" do
+        pdf_workspace.call(["a.pdf", PdfBuilder.path(name: "cli-json-valid")]) do
+          rendered = capture_stdout { described_class.run(%w[conform a.pdf --json]) }
           rows = JSON.parse(rendered)
 
           expect(rows.length).to eq(1)

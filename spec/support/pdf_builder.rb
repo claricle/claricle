@@ -23,10 +23,17 @@ require "tmpdir"
 # working document in every other respect, which is what lets the
 # version-gate fixtures prove the gate refused them rather than the
 # structure gate.
+#
+# `PAGE` carries a MediaBox: the conform handler's `Validator.validate`
+# has an opinion about a page missing one, and the "reports a conformant
+# PDF" example needs a baseline document `Validator.validate` finds
+# nothing wrong with. The inspect handler never reads it (dimensions are
+# deliberately absent from its output -- see handlers/pdf.rb), so the
+# extra key changes nothing for those examples.
 module PdfBuilder
   CATALOG = "<< /Type /Catalog /Pages 2 0 R >>"
   PAGES = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
-  PAGE = "<< /Type /Page /Parent 2 0 R >>"
+  PAGE = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"
 
   # oid, generation, body. Generation travels with the object because the
   # xref row and the `N G obj` line have to agree, and the generation
@@ -42,9 +49,14 @@ module PdfBuilder
   # extent turns on where the first terminator sits, and both version
   # components are unbounded in length, so a fixture has to be able to
   # push that terminator anywhere.
+  #
+  # `phantom_oids` marks additional oids "in use" at offset 0 (inside the
+  # header, not a real object) with no matching "oid gen obj" anywhere in
+  # the file -- for a reference pdfrb's own xref says exists but cannot
+  # actually find, anywhere.
   DEFAULTS = {
     first_line: "%PDF-1.4", eol: "\n", objects: OBJECTS,
-    trailer: TRAILER, entries: {}, startxref: nil, suffix: ""
+    trailer: TRAILER, entries: {}, phantom_oids: [], startxref: nil, suffix: ""
   }.freeze
 
   module_function
@@ -67,7 +79,7 @@ module PdfBuilder
   end
 
   def tail(part, offsets, xref_at)
-    "#{xref(part[:objects], offsets, part[:entries])}" \
+    "#{xref(part[:objects], offsets, part[:entries], part[:phantom_oids])}" \
       "trailer\n#{part[:trailer]}\nstartxref\n" \
       "#{part[:startxref] || xref_at}\n%%EOF\n#{part[:suffix]}"
   end
@@ -82,17 +94,33 @@ module PdfBuilder
     [body, offsets]
   end
 
-  # One row per object plus the mandatory free head. `entries` overrides a
-  # row's offset, generation or type without touching the object it
-  # points at, which is what the dangling and free-entry fixtures need.
-  def xref(objects, offsets, entries)
-    rows = objects.map do |oid, gen, _|
+  # One row per oid from 1 up to the highest named -- by a real object,
+  # an `entries` override, or a phantom -- so a phantom oid can sit past
+  # the real objects without leaving a gap the xref subsection header
+  # disagrees with. `entries` overrides a row's offset, generation or
+  # type without touching the object it points at, which is what the
+  # dangling and free-entry fixtures need. A phantom row reads "in use at
+  # offset 0" (offset 0 sits inside the header, never a valid object
+  # start, and no such object is ever written -- so pdfrb's own recovery
+  # scan cannot find it either).
+  def xref(objects, offsets, entries, phantom_oids)
+    real = objects.to_h { |oid, gen, _| [oid, gen] }
+    highest = (real.keys + phantom_oids + [0]).max
+    rows = (1..highest).map { |oid| xref_row(oid, real, offsets, entries, phantom_oids) }
+    "xref\n0 #{highest + 1}\n0000000000 65535 f \n#{rows.join}"
+  end
+
+  def xref_row(oid, real, offsets, entries, phantom_oids)
+    if real.key?(oid)
       over = entries[oid] || {}
       format("%<offset>010d %<gen>05d %<type>s \n",
              offset: over.fetch(:offset, offsets[oid]),
-             gen: over.fetch(:gen, gen), type: over.fetch(:type, "n"))
+             gen: over.fetch(:gen, real[oid]), type: over.fetch(:type, "n"))
+    elsif phantom_oids.include?(oid)
+      "0000000000 00000 n \n"
+    else
+      "0000000000 65535 f \n"
     end
-    "xref\n0 #{objects.size + 1}\n0000000000 65535 f \n#{rows.join}"
   end
 
   # A fresh path per call, so one example can never see another's file.
@@ -108,6 +136,16 @@ module PdfBuilder
     path = File.join(directory, "#{name}-#{@seq = @seq.to_i + 1}.pdf")
     File.binwrite(path, bytes)
     path
+  end
+
+  # For a fixture `document`'s own part-based construction cannot reach
+  # -- corruption in the raw trailer text itself, for instance -- so a
+  # caller can hand over bytes it built by hand and still get the same
+  # fresh-path-per-call, removed-at-exit guarantees `path` gives. An
+  # alias rather than a second implementation: it is exactly `write`,
+  # named for the conform handler's own callers.
+  class << self
+    alias path_for write
   end
 
   # One directory for the whole run, removed when the process ends --
