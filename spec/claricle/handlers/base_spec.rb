@@ -113,6 +113,70 @@ RSpec.describe "Claricle::Handlers::Base" do
     end
   end
 
+  # The same declare-once contract as `formats`, and for the same reason:
+  # the registry-facing `convert_targets_for` reads whatever a handler
+  # declared once at load, so a second declaration would let a handler
+  # change its mind with nothing to notice.
+  describe "the convert_to declaration" do
+    it "reads back what a subclass declared" do
+      subclass = Class.new(base) { convert_to :svg, :eps }
+      expect(subclass.convert_targets).to eq(%i[svg eps])
+    end
+
+    it "is empty when a handler declares nothing" do
+      subclass = Class.new(base)
+      expect(subclass.convert_targets).to be_empty
+    end
+
+    it "refuses a second declaration" do
+      subclass = Class.new(base) { convert_to :svg }
+
+      expect { subclass.convert_to(:eps) }
+        .to raise_error(Claricle::Error, /already declared convert targets \[:svg\]/)
+    end
+
+    it "keeps the original declaration after a refused one" do
+      subclass = Class.new(base) { convert_to :svg }
+      begin
+        subclass.convert_to(:eps)
+      rescue Claricle::Error
+        nil
+      end
+
+      expect(subclass.convert_targets).to eq([:svg])
+    end
+
+    it "does not leak to a sibling or to Base" do
+      Class.new(base) { convert_to :svg }
+      sibling = Class.new(base)
+      expect(sibling.convert_targets).to be_empty
+      expect(base.convert_targets).to be_empty
+    end
+
+    it "freezes the declaration" do
+      subclass = Class.new(base) { convert_to :svg }
+      expect(subclass.convert_targets).to be_frozen
+    end
+
+    it "refuses a non-Symbol declaration, naming the offender" do
+      expect { Class.new(base) { convert_to "svg", :eps } }
+        .to raise_error(Claricle::Error, /non-Symbol convert targets \["svg"\]/)
+    end
+
+    it "declares nothing when the declaration is refused" do
+      subclass = Class.new(base)
+      begin
+        subclass.convert_to("svg")
+      rescue Claricle::Error
+        nil
+      end
+
+      expect(subclass.convert_targets).to be_empty
+      expect { subclass.convert_to(:svg) }.not_to raise_error
+      expect(subclass.convert_targets).to eq([:svg])
+    end
+  end
+
   # A handler that has not implemented an operation says which one, rather
   # than returning nil and failing somewhere else.
   describe "unimplemented operations" do

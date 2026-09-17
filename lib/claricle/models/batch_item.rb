@@ -2,6 +2,7 @@
 
 require_relative "base"
 require_relative "report"
+require_relative "conversion"
 require_relative "uncoerced_integer"
 
 module Claricle
@@ -44,9 +45,28 @@ module Claricle
       # ("`:with` argument for mapping 'status' requires :to and :from").
       attribute :status, :string, values: %w[ok failed error]
       attribute :exit_code, UncoercedInteger, required: true
-      # Typed to Report because that is the only result a batch produces
-      # today. Item 04 adds conversion and has to widen this.
-      attribute :result, Report
+      # A union rather than a plain `Report`, now that a batch can also hold
+      # a conversion. Lutaml resolves which member a Hash/JSON value is by
+      # key coverage (`Union.conform_model`, lutaml-model union.rb:163-180):
+      # every input key must belong to the member's mapped fields. Report and
+      # Conversion both map "source_path", but are disjoint on every OTHER
+      # field -- Report also maps "format"/"issues"/"valid", Conversion also
+      # maps "source_format"/"target_format"/"lossiness"/"output_path" -- so
+      # a real document built by either one always carries at least one of
+      # those and resolves unambiguously. Only a Hash bearing "source_path"
+      # and nothing else would be genuinely ambiguous, and nothing in this
+      # codebase builds one. Declared order does not matter for any real
+      # input; Report is listed first as it is the existing, more common
+      # case.
+      #
+      # Known gap, not closed by this change: `Attribute#cast_union` is
+      # `match&.last` (lutaml-model attribute.rb:875-879) -- a value that
+      # matches NEITHER member silently casts to nil rather than raising, the
+      # same silent-nil shape as any other failed cast. Nothing in this
+      # codebase can currently produce such a value here (every writer of
+      # `result` is Report or Conversion), so it is unreached, not verified
+      # unreachable by a guard.
+      attribute :result, [Report, Conversion]
       attribute :error, BatchError
 
       private
