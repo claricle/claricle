@@ -1,12 +1,13 @@
 # frozen_string_literal: true
 
-# Two floors are pinned here, not one: below 0.8.23, lutaml-model's JSON
-# adapter raises `ArgumentError: unknown keyword: register` against json
-# 3.x. Below 0.8.32, Claricle::Models::Validation's own cardinality/shape
-# guards were removed (lib/claricle/models/base.rb) in favor of lutaml-
-# model doing that itself -- so below 0.8.32 nothing does it at all.
-# Don't lower this without re-adding whichever guard the floor was
-# covering for.
+# One requirement, two reasons stacked into it: below 0.8.23, lutaml-
+# model's JSON adapter raises `ArgumentError: unknown keyword: register`
+# against json 3.x; below 0.8.32, nothing enforces enum cardinality or
+# collection shape any more, because Claricle::Models::Validation's own
+# guards for both were removed (lib/claricle/models/base.rb) in favor of
+# lutaml-model doing it itself. The higher floor subsumes the lower one,
+# so only 0.8.32 is worth asserting directly below -- don't lower it
+# without re-adding whichever guard the floor was covering for.
 RSpec.describe "the lutaml-model floor claricle's models depend on" do
   root = File.expand_path("../..", __dir__)
 
