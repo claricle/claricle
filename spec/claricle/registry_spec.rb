@@ -45,14 +45,14 @@ RSpec.describe "Claricle::Registry" do
       expect(registry.handler_for(:svg)).to be(handlers.const_get(:Svg))
     end
 
-    # Derived, so it cannot advertise an operation still on Base. emf and
-    # pdf both implement inspect and conform -- their rows are the ones
-    # that prove this is not just "always [:inspect]".
+    # Derived, so it cannot advertise an operation still on Base. emf, pdf
+    # and png all implement inspect and conform -- their rows are the
+    # ones that prove this is not just "always [:inspect]".
     it "reports only the capabilities each handler has implemented" do
       expect(registry.capabilities_for(:emf)).to eq(%i[inspect conform])
       expect(registry.capabilities_for(:eps)).to eq([:inspect])
       expect(registry.capabilities_for(:pdf)).to eq(%i[inspect conform])
-      expect(registry.capabilities_for(:png)).to eq([:inspect])
+      expect(registry.capabilities_for(:png)).to eq(%i[inspect conform])
       expect(registry.capabilities_for(:ps)).to eq([:inspect])
       expect(registry.capabilities_for(:svg)).to eq([:inspect])
     end

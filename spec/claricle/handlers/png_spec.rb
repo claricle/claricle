@@ -166,6 +166,36 @@ RSpec.describe "Claricle PNG handler" do
     with_fed_pipe(bytes) { |reader| yield("/dev/fd/#{reader.fileno}") }
   end
 
+  # A real named FIFO on disk -- `mkfifo(1)`, there being no `File.mkfifo`
+  # in Ruby's stdlib -- so `structural_issues`'s guard is measured against
+  # the exact node type a caller would hand it, not a stand-in.
+  #
+  # Fed from a thread, the same shape as `with_fed_pipe`, and for the same
+  # reason a mutation check needs: the FIXED guard never opens the FIFO at
+  # all, so the writer sits blocked waiting for a reader that never comes.
+  # Without a writer this helper would instead hang the REVERTED guard's
+  # real open forever -- measured running this example with the guard
+  # reverted and no writer thread: `File.open(path, "rb")` on the FIFO
+  # never returned.
+  #
+  # `kill` alone is not enough: it only REQUESTS termination and returns
+  # immediately -- measured, `alive?` was still true right after `kill`
+  # returned. `Dir.mktmpdir`'s own block-exit cleanup would then race a
+  # feeder that has not actually unwound, so `join` waits for the real
+  # exit before the directory comes down.
+  def with_named_fifo_path(bytes)
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "pipe.png")
+      system("mkfifo", path, exception: true)
+      feeder = Thread.new { File.binwrite(path, bytes) }
+
+      yield(path)
+    ensure
+      feeder&.kill
+      feeder&.join
+    end
+  end
+
   # `validate` returns the FileAnalysis itself, not a result wrapping one.
   #
   # Closed in an ensure: given a String the full reader opens the file
@@ -690,6 +720,349 @@ RSpec.describe "Claricle PNG handler" do
         expect(io.read).to eq("#{[Zlib.crc32("IEND")].pack("N")}TAIL")
       end
     end
+
+    # Structural pre-pass, not ChunkReader: `structural_issues` opens
+    # `image.path` again (independently of whatever already read it for
+    # detection or `read_chunks`) and hands it straight to
+    # `StructureScanner`, which needs `io.size` and absolute seeks that
+    # neither of these two node types can give truthfully.
+    #
+    # Measured before the guard existed: a real 69-byte well-formed PNG
+    # through a named FIFO reported `png.chunk_truncated: file is shorter
+    # than the PNG signature` (fstat gives a FIFO `size` 0, so the scan
+    # never even got to a seek), and the same PNG through `/dev/fd/<n>`
+    # of a pipe raised `Errno::ESPIPE` straight out of `header_at`'s
+    # `io.seek` (there `size` happens to read the buffered byte count, so
+    # the walk proceeds and the first seek is what fails). Both are wrong
+    # in different ways and neither is a structural finding about the
+    # PNG, so both now refuse before `StructureScanner` ever runs.
+    describe "a non-regular structural input" do
+      it "refuses a named FIFO rather than reporting it too short" do
+        with_named_fifo_path(png_with_fat_text_before_phys) do |path|
+          image = Claricle::Image.new(format: :png, path: path)
+
+          expect { handler.send(:structural_issues, image) }.to raise_error(
+            Claricle::InvocationError, "not a regular file: #{path}"
+          )
+        end
+      end
+
+      it "refuses a /dev/fd/<n> pipe rather than raising Errno::ESPIPE" do
+        with_piped_path(png_with_fat_text_before_phys) do |path|
+          image = Claricle::Image.new(format: :png, path: path)
+
+          expect { handler.send(:structural_issues, image) }.to raise_error(
+            Claricle::InvocationError, "not a regular file: #{path}"
+          )
+        end
+      end
+
+      # `File.file?` is false for a path that never existed too, and the
+      # guard's whole point is telling those two apart -- `File.stat`
+      # raises `Errno::ENOENT` itself for this one, before `ftype` is ever
+      # reached. Found by review, not by the author: an earlier version of
+      # this guard used to raise InvocationError here instead, silently
+      # dropping the real ENOENT `read_chunks` (this class's other reader
+      # of the same path) deliberately leaves unrescued -- see its own
+      # comment a few lines above -- so a caller rescuing ENOENT around
+      # `conformance_report` would not catch it.
+      it "propagates ENOENT for a path that never existed, not InvocationError" do
+        Dir.mktmpdir do |dir|
+          path = File.join(dir, "gone.png")
+
+          expect { handler.send(:structural_issues, Claricle::Image.new(format: :png, path: path)) }
+            .to raise_error(Errno::ENOENT)
+        end
+      end
+
+      # The other half of the same distinction, and not redundant with the
+      # row above: `Image.from_path` succeeds here (the file was really
+      # there for detection), so this is also the only example that would
+      # catch a regression where existence or type got decided once at
+      # construction and never re-checked per call. A path that vanishes
+      # AFTER detection (a file deleted out from under a caller mid-use)
+      # hits `File.stat`'s identical `Errno::ENOENT` as one that was never
+      # there at all.
+      it "propagates ENOENT for a path that vanished after detection" do
+        Dir.mktmpdir do |dir|
+          path = File.join(dir, "vanished.png")
+          File.binwrite(path, png_with_fat_text_before_phys)
+          image = Claricle::Image.from_path(path)
+          File.delete(path)
+
+          expect { image.conformance_report }.to raise_error(Errno::ENOENT)
+        end
+      end
+
+      # The guard's own comment claims `File.stat`, not `File.lstat`, is
+      # what makes a symlink to a regular file pass -- unpinned until now.
+      # `File.lstat` reports a symlink's OWN type ("link"), never following
+      # it, so that mutant refuses this file; `File.stat` follows the link
+      # and reports what it points AT ("file"), so this stays clean.
+      it "leaves a symlink to a regular file unrefused" do
+        Dir.mktmpdir do |dir|
+          link = File.join(dir, "link.png")
+          File.symlink(fixture("valid.png"), link)
+
+          expect(handler.send(:structural_issues, Claricle::Image.new(format: :png, path: link))).to eq([])
+        end
+      end
+    end
+  end
+
+  describe "conformance_report" do
+    def conform_fixture(name)
+      File.join(__dir__, "..", "..", "fixtures", "conform", name)
+    end
+
+    # basn2c08.png, from PngSuite (schaik.com/pngsuite): a real,
+    # conformant truecolor 8-bit PNG. png_conform still reports one INFO
+    # entry for it -- a gAMA note -- which is what proves the info bucket
+    # is actually read: a Report built from `all_errors` alone would
+    # report zero issues here and this example would not catch it.
+    it "reports a conformant PNG, info bucket included" do
+      image = Claricle::Image.from_path(conform_fixture("valid.png"))
+      report = image.conformance_report
+
+      expect(report.valid).to eq(:yes)
+      expect(report.issues).to contain_exactly(
+        have_attributes(
+          severity: "info", code: "png.gama", message: "gAMA: 1.0 (linear)",
+          location: have_attributes(chunk: "gAMA", byte_offset: 33)
+        )
+      )
+    end
+
+    # FullLoadReader.new(path) opens its own File handle (@owns_io = true)
+    # and exposes #close for exactly that reason -- leaving it open leaks a
+    # file descriptor per conformance check until GC finalizes it.
+    it "closes the reader's file handle rather than leaking it" do
+      opened_reader = nil
+      allow(PngConform::Readers::FullLoadReader).to receive(:new).and_wrap_original do |method, *args|
+        opened_reader = method.call(*args)
+      end
+
+      Claricle::Image.from_path(conform_fixture("valid.png")).conformance_report
+
+      expect(opened_reader.io).to be_closed
+    end
+
+    # missing_idat.png is PngSuite's xdtn0g01.png: a PNG missing its IDAT
+    # chunk entirely. One fixture, two rows, deliberately -- one issue
+    # carries a real chunk offset and the other carries none, so both
+    # sides of "location is nullable" are proven without a second file.
+    describe "a corrupt-but-recognised PNG" do
+      let(:report) { Claricle::Image.from_path(conform_fixture("missing_idat.png")).conformance_report }
+
+      it "is not conformant" do
+        expect(report.valid).to eq(:no)
+      end
+
+      it "maps a real png_conform error with its chunk and offset" do
+        expect(report.issues).to include(
+          have_attributes(
+            severity: "error", code: "png.iend_chunk_before_idat",
+            message: "IEND chunk before IDAT",
+            location: have_attributes(chunk: "IEND", byte_offset: 49)
+          )
+        )
+      end
+
+      # Never invented: png_conform's own sequence check runs before any
+      # IDAT chunk is located, so it has no offset to report.
+      it "leaves the offset nil rather than inventing one" do
+        expect(report.issues).to include(
+          have_attributes(
+            severity: "error", code: "png.missing_idat_chunk",
+            message: "Missing IDAT chunk (at least one required)",
+            location: have_attributes(chunk: "IDAT", byte_offset: nil)
+          )
+        )
+      end
+    end
+
+    it "carries the image's own path and format" do
+      path = conform_fixture("valid.png")
+      report = Claricle::Image.from_path(path).conformance_report
+
+      expect(report.source_path).to eq(path)
+      expect(report.format).to eq("png")
+    end
+
+    # The mapping from a malformed-input errno to a nonconformant report,
+    # pinned WITHOUT depending on an input that produces that errno here.
+    # Only one of the two platforms we run on can reach this arm through
+    # a real file (see the row below), so a file-driven example asserts
+    # this where it cannot fail on the other one. Raising at the delegate
+    # boundary runs identically everywhere, and this is the example that
+    # goes red if the errno stops being rescued, or if any field of
+    # `malformed_issue` changes. All three fields are named: with the code
+    # alone, `MALFORMED_MESSAGE` could be replaced wholesale and the whole
+    # branch stayed green -- measured. Narrowness of the allowlist is a
+    # SEPARATE property and is asserted by the two rows at the end of this
+    # describe, not here.
+    it "maps a malformed-input errno from the delegate to a nonconformant report" do
+      allow(PngConform::Services::ValidationService).to receive(:new).and_raise(Errno::EINVAL)
+
+      report = Claricle::Image.from_path(conform_fixture("valid.png")).conformance_report
+
+      expect(report.valid).to eq(:no)
+      expect(report.issues).to contain_exactly(
+        have_attributes(
+          severity: "error", code: "png.chunk_length_unreadable", location: nil,
+          message: "a chunk declared a length the file could not supply"
+        )
+      )
+    end
+
+    # A chunk declaring a length near the 32-bit ceiling asks the OS for
+    # more than a single read can carry. What happens next is the
+    # PLATFORM's call, not png_conform's: macOS `read(2)` refuses a
+    # length above INT_MAX and the delegate dies with `Errno::EINVAL`
+    # before any ValidationContext exists; Linux caps the transfer at
+    # 0x7ffff000, hands back the 16 bytes that are there, and the
+    # delegate completes and reports ordinary nonconformance. Measured
+    # both ways on this exact input -- `arm64-darwin25` raised,
+    # `x86_64-linux` (ruby 3.3.12, CI's platform) returned 16 bytes and
+    # the three "missing chunk" errors asserted below.
+    #
+    # So this row probes which arm it is on and asserts THAT arm's exact
+    # issues. It does not weaken to "some issue": a single hard-coded
+    # code here was a claim about the machine the suite happened to run
+    # on -- green on a Mac, red on CI. The invariant both arms share, and
+    # the reason this row exists at all, is that neither turns into an
+    # exception the caller has to know to rescue.
+    it "reports nonconformance rather than raising when a chunk's declared length breaks the read" do
+      signature = [137, 80, 78, 71, 13, 10, 26, 10].pack("C*")
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "huge.png")
+        File.binwrite(path, signature + [0xFFFFFFFF].pack("N") + "IHDR".b)
+
+        read_refuses_the_length =
+          begin
+            File.open(path, "rb") { |file| file.read(0xFFFFFFFF) }
+            false
+          rescue Errno::EINVAL
+            true
+          end
+
+        report = Claricle::Image.from_path(path).conformance_report
+
+        expect(report.valid).to eq(:no)
+        # The structural scanner's own read of this file, independent of
+        # which platform arm the delegate takes below.
+        structural = have_attributes(
+          severity: "error", code: "png.chunk_truncated",
+          location: have_attributes(chunk: "IHDR", byte_offset: 8, byte_length: 8)
+        )
+        if read_refuses_the_length
+          expect(report.issues).to contain_exactly(
+            structural,
+            have_attributes(severity: "error", code: "png.chunk_length_unreadable", location: nil)
+          )
+        else
+          expect(report.issues).to contain_exactly(
+            structural,
+            have_attributes(severity: "error", code: "png.missing_ihdr_chunk",
+                            location: have_attributes(chunk: "IHDR", byte_offset: nil)),
+            have_attributes(severity: "error", code: "png.missing_iend_chunk",
+                            location: have_attributes(chunk: "IEND", byte_offset: nil)),
+            have_attributes(severity: "error", code: "png.missing_idat_chunk",
+                            location: have_attributes(chunk: "IDAT", byte_offset: nil))
+          )
+        end
+      end
+    end
+
+    # The allowlist has to be narrow, or a real defect in this handler
+    # would silently read as an ordinary nonconformant file (exit 1)
+    # instead of the internal-error code (exit 4) that says something
+    # needs fixing. Stubbing the delegate itself, since nothing else in
+    # 300 randomised inputs and every truncation of two real PNGs raised
+    # anything off `Errno::EINVAL`.
+    it "does not rescue an exception off its malformed-input allowlist" do
+      allow(PngConform::Services::ValidationService).to receive(:new).and_raise(RuntimeError, "boom")
+      image = Claricle::Image.from_path(conform_fixture("valid.png"))
+
+      expect { image.conformance_report }.to raise_error(RuntimeError, "boom")
+    end
+
+    # A `RuntimeError` is far outside the allowlist, so the row above holds
+    # however wide the allowlist gets. Measured: widening `MALFORMED_INPUT`
+    # from `[Errno::EINVAL]` to `[SystemCallError]` left all 72 examples in
+    # this file green while a real unreadable file -- `chmod 000`, an
+    # `Errno::EACCES` -- stopped propagating and came back as an ordinary
+    # nonconformant report instead. That is exit 1 for something that must
+    # be exit 4, which is exactly what the row above says must not happen.
+    # A NEIGHBOUR of the allowlisted errno is what closes it.
+    it "still propagates a system call error that is not on the allowlist" do
+      allow(PngConform::Services::ValidationService).to receive(:new).and_raise(Errno::EACCES)
+      image = Claricle::Image.from_path(conform_fixture("valid.png"))
+
+      expect { image.conformance_report }.to raise_error(Errno::EACCES)
+    end
+
+    # End to end through the public entry point, not `structural_issues`
+    # directly (see "a non-regular structural input" above for that): a
+    # caller who never goes near the handler still gets a clean refusal
+    # for a non-seekable path instead of the pre-fix `png.chunk_truncated`
+    # false verdict or a bare `Errno::ESPIPE`. `structural_issues` runs
+    # BEFORE the delegate in `conformance_report`, so this never reaches
+    # `ConformanceMapper` at all -- proven by the delegate never being
+    # stubbed here, unlike every other row in this describe.
+    it "refuses a piped path rather than returning a wrong or crashing conformance_report" do
+      with_piped_path(png_with_fat_text_before_phys) do |path|
+        image = Claricle::Image.new(format: :png, path: path)
+
+        expect { image.conformance_report }.to raise_error(Claricle::InvocationError, /not a regular file/)
+      end
+    end
+
+    # Proves: (a) the scanner's own finding is present at all, (b) the
+    # delegate still runs on the same file (no short-circuit), (c)
+    # structural precedes the delegate's even where every issue is the
+    # same severity, so ordering isn't an artifact of a severity sort.
+    it "runs the structural scanner before the delegate, without dropping either" do
+      ihdr = PngStreams.chunk("IHDR", PngStreams::IHDR_13)
+      bytes = PngStreams::SIGNATURE + ihdr + ihdr + PngStreams.chunk("IEND", "")
+      image = Claricle::Image.from_content(bytes, format: :png)
+
+      report = image.conformance_report
+
+      expect(report.issues.map(&:code)).to eq(
+        %w[png.duplicate_ihdr png.iend_chunk_before_idat png.missing_idat_chunk]
+      )
+      expect(report.issues.first).to have_attributes(
+        severity: "error", location: have_attributes(chunk: "IHDR", byte_offset: 33)
+      )
+    end
+
+    # Two issues sharing the SAME code both survive concatenation -- the
+    # specific gap an unordered check over distinct codes cannot see: a
+    # `.uniq(&:code)` bug would satisfy the example above (three distinct
+    # codes) while silently dropping one of these two.
+    it "keeps two structural issues that share the same code" do
+      ihdr = PngStreams.chunk("IHDR", PngStreams::IHDR_13)
+      bytes = PngStreams::SIGNATURE + ihdr + ihdr + ihdr + PngStreams.chunk("IEND", "")
+      image = Claricle::Image.from_content(bytes, format: :png)
+
+      report = image.conformance_report
+      duplicate_ihdr_offsets = report.issues.select { |issue| issue.code == "png.duplicate_ihdr" }
+                                     .map { |issue| issue.location.byte_offset }
+
+      expect(duplicate_ihdr_offsets).to eq([33, 58])
+    end
+
+    # Ordering holds even against an `info`-severity delegate issue, so it
+    # is positional rather than an artifact of a severity sort.
+    it "puts a structural finding before the delegate's own, even an info one" do
+      bytes = "#{File.binread(conform_fixture("valid.png"))}TRAILING JUNK"
+      image = Claricle::Image.from_content(bytes, format: :png)
+
+      report = image.conformance_report
+
+      expect(report.issues.map(&:code)).to eq(%w[png.trailing_data png.gama])
+    end
   end
 end
 
@@ -916,9 +1289,11 @@ module PngBounded
   end
 end
 
-# The structural pre-pass (D23). Nothing calls `structural_issues` yet --
-# the conform wiring is item 03 -- so these drive it directly, the same
-# way the `read_chunks` examples above do.
+# The structural pre-pass (D23). `conformance_report` now calls
+# `structural_issues` (see the `conformance_report` describe block above),
+# but these examples still drive the scanner directly, the same way the
+# `read_chunks` examples above do -- so a fault in `StructureScanner` itself
+# is pinned to the scanner, not to how `conformance_report` happens to wire it.
 RSpec.describe "Claricle PNG structural scanner" do
   let(:handler) { Claricle.const_get(:Handlers).const_get(:Png).new }
 
@@ -1021,13 +1396,19 @@ RSpec.describe "Claricle PNG structural scanner" do
   # the worst way for a gate to be wrong. `svg_spec.rb:49` is a different
   # list again ([read, close, closed?, path, to_path, to_io, fileno]), and
   # `permitted_class_calls` below is a CLASS-method list sharing only `path`.
-  # The scanner is measured to reach the filesystem through exactly ONE
-  # class method: File.open. So this is an ALLOWLIST -- refused by names
-  # derived from the class, not by a list someone has to remember to extend.
-  # NOT total, and the gap is named rather than implied: `:open` is
-  # subtracted BY NAME from a set built from BOTH receivers, so `IO.open`
-  # is permitted too, and neither `Kernel.open` nor a subprocess is on
-  # either receiver at all. Those routes are known-open follow-ups.
+  # The scanner is measured to reach the filesystem through exactly TWO
+  # class methods: `File.stat`, now doing double duty for the temp-file
+  # plumbing below AND the non-regular/ENOENT guard beside
+  # `structural_issues` (`File.stat(path).ftype` answers "does it exist"
+  # and "what kind" in one syscall, rather than `File.exist?` plus
+  # `File.file?`), then `File.open`. `stat` is not a read -- it costs
+  # nothing against the bounded-read guarantee these examples pin, which is
+  # about payload bytes, not syscall count. So this is an ALLOWLIST --
+  # refused by names derived from the class, not by a list someone has to
+  # remember to extend. NOT total, and the gap is named rather than implied:
+  # `:open` is subtracted BY NAME from a set built from BOTH receivers, so
+  # `IO.open` is permitted too, and neither `Kernel.open` nor a subprocess
+  # is on either receiver at all. Those routes are known-open follow-ups.
   #
   # A denylist was tried and leaked three times: first `each_byte` past a
   # read-only recorder, then `IO.binread` and the non-block `File.open`
@@ -1035,8 +1416,8 @@ RSpec.describe "Claricle PNG structural scanner" do
   # `File.readlines` past a six-name one. Each leak read the whole file
   # while the example stayed green.
   # MEASURED, not guessed: these are every File class method the example
-  # actually uses -- `open` for the scanner, the rest for the temporary file
-  # and its cleanup. None of the others returns file CONTENT.
+  # actually uses -- `stat` and `open` for the scanner, the rest for the
+  # temporary file and its cleanup. None of the others returns file CONTENT.
   # NOT all of them are load-bearing, and that is stated rather than implied:
   # removing `binwrite`, `expand_path` or `writable?` one at a time leaves
   # all five bounded examples GREEN, because those fire BEFORE the guards are

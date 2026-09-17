@@ -34,12 +34,12 @@ RSpec.describe "Claricle conformance API" do
     end
 
     # A predicate answers about conformance and raises about everything
-    # else. png does not conform in this branch, so it stays the
-    # exit-3 story here -- and it must not quietly become false.
+    # else. EPS never conforms (D22), so it stays the permanent exit-3
+    # story here -- and it must not quietly become false.
     it "raises rather than answering false when the format is unsupported" do
-      workspace(["a.png", png]) do
-        expect { Claricle.conform?("a.png") }
-          .to raise_error(Claricle::UnsupportedFormat, /:png is not supported for conform/)
+      workspace(["a.eps", eps]) do
+        expect { Claricle.conform?("a.eps") }
+          .to raise_error(Claricle::UnsupportedFormat, /:eps is not supported for conform/)
       end
     end
 
@@ -65,14 +65,14 @@ RSpec.describe "Claricle conformance API" do
     # made rather than fallen into. Asserted twice: the same input must fail
     # the same way every time.
     it "fails the same way every time when two files fail equally" do
-      workspace(["a.png", png], ["b.eps", eps]) do
+      workspace(["a.eps", eps], ["b.eps", eps]) do
         messages = Array.new(2) do
-          Claricle.conform?(pattern: "*")
+          Claricle.conform?(pattern: "*.eps")
         rescue Claricle::UnsupportedFormat => e
           e.message
         end
 
-        expect(messages).to eq(["format :png is not supported for conform"] * 2)
+        expect(messages).to eq(["format :eps is not supported for conform"] * 2)
       end
     end
 
@@ -130,8 +130,8 @@ RSpec.describe "Claricle conformance API" do
 
   describe ".conformance_report" do
     it "raises for a format no handler conforms" do
-      expect { Claricle.conformance_report(png) }
-        .to raise_error(Claricle::UnsupportedFormat, /:png is not supported for conform/)
+      expect { Claricle.conformance_report(eps) }
+        .to raise_error(Claricle::UnsupportedFormat, /:eps is not supported for conform/)
     end
 
     # A real Report from a real handler, through the literal-path route --
@@ -153,11 +153,13 @@ RSpec.describe "Claricle conformance API" do
     end
   end
 
-  # pdf conforms now, but declares no profile -- `--profile` support for
-  # PDF (Arlington/PdfA/etc, D16) is a later item's work, so passing one
-  # is still a bad invocation. `checked_profile` is format-agnostic (it
-  # runs before any handler is reached), so this holds for every format,
-  # conforming or not, until a per-format profile table exists.
+  # pdf and png both conform now, but neither declares a profile --
+  # `--profile` support (Arlington/PdfA/etc, D16; 03-conform.md: only PDF
+  # and SVG will) is a later item's work, so passing one is still a bad
+  # invocation. `checked_profile` is format-agnostic (it runs before any
+  # handler is reached), so this holds for every format, conforming or
+  # not, until a per-format profile table exists. The flag is not
+  # silently accepted and then ignored.
   describe "profile:" do
     it "refuses a profile on conformance_report, naming it" do
       expect { Claricle.conformance_report(png, profile: "base") }
