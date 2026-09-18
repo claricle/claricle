@@ -65,7 +65,6 @@ module Claricle
       # it as-is and the failure surfaces much later as a NoMethodError.
       def validate_types
         self.class.attributes.each do |name, attribute|
-          validate_cardinality(name, attribute)
           validate_finite(name)
           validate_default_bookkeeping(name, attribute)
 
@@ -119,39 +118,6 @@ module Claricle
         refuse(name, "a finite number", value)
       end
 
-      # An enum that is not a collection must be given one value, never
-      # two. lutaml 0.8.19 accepts a list, stores it whole, and its getter
-      # returns only the first element -- so
-      # `Issue.new(severity: ["info", "error"])` validates, reports
-      # `"info"`, and drops `"error"` on the way to JSON. Nothing about
-      # that is visible to a caller.
-      #
-      # Cardinality only, and deliberately so: `severity: ["error"]`
-      # is accepted, because lutaml has already normalised a bare
-      # `"error"` to the same `["error"]` by the time this runs and the
-      # two are no longer distinguishable. Nothing is lost either way.
-      # Deserialization is stricter -- lutaml's own
-      # `CollectionTrueMissingError` rejects any list from a document
-      # before this runs.
-      #
-      # The raw ivar, because the getter is the thing that hides it.
-      def validate_cardinality(name, attribute)
-        return if attribute.collection?
-        return unless attribute.enum?
-
-        # lutaml stores EVERY enum value as an array, so a valid
-        # `severity: "error"` is `["error"]` here and the shape alone
-        # proves nothing. Only a second element is evidence that a list
-        # was passed, and only that loses data.
-        raw = instance_variable_get(:"@#{name}")
-        return unless inherits_from?(raw, ::Array)
-
-        refuse(name, "a core Array", class_of(raw)) unless core_instance?(raw, ::Array)
-        return unless array_size(raw) > 1
-
-        refuse(name, "a single value", raw.inspect)
-      end
-
       # Lutaml's generated getter consults a scalar enum's backing Array
       # before `validate_types`. Own a core copy first so virtual `first`
       # cannot show validation a different value from the one later
@@ -176,11 +142,17 @@ module Claricle
         own_string(name, value)
       end
 
+      # No `unless value.is_a?(Array)` guard here any more: lutaml-model
+      # 0.8.32 (lutaml/lutaml-model#185) auto-wraps ANY non-Array value
+      # handed to a `collection: true` attribute into a one-element Array
+      # before this runs, at both construction and deserialization --
+      # `Report.new(issues: some_issue)` and
+      # `Report.from_json({"issues":{...}})` both now read back
+      # `issues == [some_issue]`. The shape check can no longer fire; only
+      # the per-element type check below still can, unchanged.
       def validate_attribute(name, attribute, type)
         value = public_send(name)
         return validate_type(name, type, value, nullable: true) unless attribute.collection?
-
-        refuse(name, "a collection", value.class) unless value.is_a?(Array)
 
         value.each { |element| validate_type(name, type, element, nullable: false) }
       end
@@ -387,8 +359,8 @@ module Claricle
 
       # lutaml wraps a singular enum's value in an Array, so its sentinel
       # arrives as `[sentinel]` and identity against the singleton walks
-      # straight past it. The same wrapper `validate_cardinality` reads
-      # through, and the same two guards it uses to find it.
+      # straight past it. The same wrapper `own_enum_storage` reads
+      # through, and the same guard it uses to find it.
       #
       # Measured before this looked inside: `Inspection.new { |x|
       # x.parse_status = sentinel }` sealed and rendered `{"issues":[]}`

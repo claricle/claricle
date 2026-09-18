@@ -44,14 +44,20 @@ RSpec.describe Claricle::Models do
     # itself. Every one of those goes through `Base#refuse`, and handing
     # that a bare String would leave the whole suite green while
     # `error_messages` blew up with NoMethodError.
+    #
+    # A two-value `severity` and a bare model where `issues` declares a
+    # collection both used to raise through `Base#refuse` too, and are
+    # deliberately not here any more: lutaml-model 0.8.32 (lutaml/lutaml-
+    # model#185) now raises the first through its own error before
+    # `refuse` ever runs (covered under "enum cardinality" below), and no
+    # longer raises the second at all (see `validate_attribute`'s
+    # comment).
     it "raises its own errors so they survive error_messages too" do
-      [-> { models::Issue.new(severity: %w[info error], message: "m") },
-       -> { models::Location.new(byte_offset: -1) },
+      [-> { models::Location.new(byte_offset: -1) },
        -> { models::Inspection.new(parse_status: "ok", width: Float::NAN) },
        -> { models::Inspection.new(parse_status: "ok", meta: { "r" => Float::INFINITY }) },
        -> { models::Inspection.new(parse_status: "ok", meta: { "r" => "\xFF".b }) },
-       -> { models::Report.new(issues: [42]) },
-       -> { models::Report.new(issues: models::Issue.new(severity: "info", message: "m")) }]
+       -> { models::Report.new(issues: [42]) }]
         .each do |build|
           raised = begin
             build.call
@@ -248,15 +254,19 @@ RSpec.describe Claricle::Models do
       expect(models::Issue.new(severity: "info", message: "m").location).to be_nil
     end
 
-    # A bare model where a collection is declared has the right type but
-    # the wrong shape; without this it dies inside lutaml's method_missing
-    # as "undefined method [] for nil".
-    it "rejects a bare model where a collection is declared" do
+    # A bare model where a collection is declared used to have the right
+    # type but the wrong shape, and was refused. lutaml-model 0.8.32
+    # (lutaml/lutaml-model#185) auto-wraps it into a one-element Array
+    # itself instead, at both doors -- see `validate_attribute`'s comment.
+    # Every production caller (lib/claricle/handlers/*.rb) already passes
+    # a real Array, so this only pins the new, looser contract rather than
+    # guarding against one of our own handlers regressing to a bare value.
+    it "auto-wraps a bare model where a collection is declared" do
       lone = models::Issue.new(severity: "info", message: "m")
-      expect { models::Report.new(issues: lone) }
-        .to raise_error(Lutaml::Model::ValidationError, /issues expects a collection/)
-      expect { models::Report.from_json(%({"issues":{"severity":"info","message":"m"}})) }
-        .to raise_error(Lutaml::Model::ValidationError, /issues expects a collection/)
+      expect(models::Report.new(issues: lone).issues).to eq([lone])
+
+      from_doc = models::Report.from_json(%({"issues":{"severity":"info","message":"m"}}))
+      expect(from_doc.issues.map(&:severity)).to eq(["info"])
     end
 
     it "still composes correctly typed models" do
@@ -1456,22 +1466,31 @@ RSpec.describe Claricle::Models do
     end
   end
 
-  # lutaml accepts a list for a non-collection enum, stores it whole, and
-  # returns only the first element -- so the extra values vanish between
-  # construction and JSON with nothing to show for it.
+  # lutaml-model < 0.8.32 accepted a list for a non-collection enum,
+  # stored it whole, and returned only the first element -- so the extra
+  # values vanished between construction and JSON with nothing to show
+  # for it. 0.8.32+ (the gemspec floor) refuses it outright instead.
   describe "enum cardinality" do
+    # lutaml-model 0.8.32 (lutaml/lutaml-model#185) enforces this itself
+    # now, before our own validate_types ever runs -- as a ValidationError
+    # wrapping its own CollectionTrueMissingError, not our former message.
     it "refuses two values for Issue#severity" do
       expect do
         described_class.const_get(:Issue)
                        .new(severity: %w[info error], code: "c", message: "m")
-      end.to raise_error(Lutaml::Model::ValidationError, /single value/)
+      end.to raise_error(Lutaml::Model::ValidationError, /collection: true.*missing/)
+    end
+
+    it "refuses two values for Issue#severity from a document" do
+      expect { described_class.const_get(:Issue).from_json(%({"severity":["info","error"],"message":"m"})) }
+        .to raise_error(Lutaml::Model::ValidationError, /collection: true.*missing/)
     end
 
     it "refuses two values for Inspection#parse_status" do
       expect do
         described_class.const_get(:Inspection)
                        .new(format: "svg", parse_status: %w[ok failed])
-      end.to raise_error(Lutaml::Model::ValidationError, /single value/)
+      end.to raise_error(Lutaml::Model::ValidationError, /collection: true.*missing/)
     end
 
     # lutaml stores every enum value as an array internally, so the check
@@ -1490,14 +1509,17 @@ RSpec.describe Claricle::Models do
 
     # Cardinality only. By the time this runs lutaml has already turned a
     # bare "error" into ["error"], so a one-element list is indistinguish-
-    # able from the value it wraps and nothing is lost by taking it. A
-    # document is stricter: lutaml rejects any list there itself.
-    it "accepts a one-element list but refuses one from a document" do
+    # able from the value it wraps and nothing is lost by taking it.
+    # lutaml-model 0.8.32 relaxed deserialization to match: a single-
+    # element list from a document is no longer refused either, only a
+    # multi-element one (the ".from_json" example above this describe
+    # block's first two examples).
+    it "accepts a one-element list from construction and from a document" do
       wrapped = described_class.const_get(:Issue).new(severity: ["error"], message: "m")
+      from_doc = described_class.const_get(:Issue).from_json(%({"severity":["error"],"message":"m"}))
 
       expect(wrapped.severity).to eq("error")
-      expect { described_class.const_get(:Issue).from_json(%({"severity":["error"],"message":"m"})) }
-        .to raise_error(Lutaml::Model::CollectionTrueMissingError)
+      expect(from_doc.severity).to eq("error")
     end
 
     # clear_uninitialized and lutaml's getter both used virtual `first`.
