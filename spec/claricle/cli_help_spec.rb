@@ -6,6 +6,28 @@
 # reason.
 require_relative "../support/shell_helpers"
 
+# Watches ONE call to `Claricle::Cli.class_options_help` made while `probe`
+# runs, and hands back what `probe` saw -- WHEN a write reached the shell,
+# not merely that it did. Refuses a second `help` call inside one block
+# instead of silently answering about the first. An instance method, not a
+# module function: it calls `allow`, which only resolves on a running
+# example. Stays on `and_wrap_original`, not `prepend`: RSpec tears its own
+# stub down at the end of the example, so a leaked hook can't outlive it
+# (same pattern at `spec/claricle/handlers/postscript_spec.rb:964`).
+module GenerationObserver
+  def observing_generation(probe)
+    seen = []
+    allow(Claricle::Cli).to receive(:class_options_help).and_wrap_original do |original, *args|
+      seen << probe.call
+      original.call(*args)
+    end
+    yield
+    raise "observing_generation saw #{seen.length} generations, expected 1" unless seen.one?
+
+    seen.first
+  end
+end
+
 # What `Cli#help` promises a caller's SHELL, kept apart from cli_spec.rb
 # because it is a different subject -- it shares no fixture or helper with the
 # exit-code, inspect, formats or presenter groups there -- and because
@@ -38,6 +60,7 @@ RSpec.describe Claricle::Cli::Runner do
 
   describe "help's shell contract" do
     include ShellHelpers
+    include GenerationObserver
 
     # `help`'s rescue deliberately covers generation as well as the write.
     # Every other command narrows its own rescue to the write half -- see
@@ -96,24 +119,7 @@ RSpec.describe Claricle::Cli::Runner do
     # WHEN a write reached the shell, not merely that it did -- Thor calls
     # `class_options_help` AFTER its three shell writes, so an output
     # assertion alone can't tell the examples below what drove them.
-    #
-    # `and_wrap_original`, not `prepend`: RSpec tears its own stub down at
-    # the end of THIS example, so a leaked hook can't outlive it (same
-    # pattern at `spec/claricle/handlers/postscript_spec.rb:965`).
-    #
-    # Refuses a second `help` call inside one block instead of silently
-    # answering about the first.
-    def observing_generation(probe)
-      seen = []
-      allow(Claricle::Cli).to receive(:class_options_help).and_wrap_original do |original, *args|
-        seen << probe.call
-        original.call(*args)
-      end
-      yield
-      raise "observing_generation saw #{seen.length} generations, expected 1" unless seen.one?
-
-      seen.first
-    end
+    # `observing_generation` lives in `spec/support/generation_observer.rb`.
 
     # Runner asks the settable `Thor::Base.shell` factory for each
     # invocation's shell. Returning this exact instance exercises the real

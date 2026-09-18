@@ -2,7 +2,24 @@
 
 require "tmpdir"
 
+# Calls `Claricle::Batch.run` with `pattern:`/`classify:` keywords already
+# named, so every example below reads the argument it is actually varying
+# instead of repeating the two defaults each time. A top-level module here,
+# not a `def` in the describe body: it takes arguments, so a `let` (no
+# arity) can't stand in for it, and a bare `def` would leak onto Object.
+#
+# `include`, not `module_function`: it closes over no host state and could
+# be either, but this file calls it bare at dozens of sites, and
+# `module_function` would mean rewriting every one to `BatchRunner.run(...)`.
+module BatchRunner
+  def run(batch, arguments, pattern: nil, classify: nil, &operation)
+    batch.run(arguments, pattern: pattern, classify: classify, &operation)
+  end
+end
+
 RSpec.describe "Claricle::Batch" do
+  include BatchRunner
+
   batch = Claricle.const_get(:Batch)
 
   # A real tree, never a stubbed Dir: the whole helper is a set of claims
@@ -18,10 +35,6 @@ RSpec.describe "Claricle::Batch" do
   # the cheapest thing that produces a result: a Report naming the path.
   report = ->(path) { Claricle::Models::Report.new(source_path: path) }
   clean = ->(_result) { 0 }
-
-  def run(batch, arguments, pattern: nil, classify: nil, &operation)
-    batch.run(arguments, pattern: pattern, classify: classify, &operation)
-  end
 
   describe "which files an argument names" do
     # D19: a positional is a literal path when it names an existing file.

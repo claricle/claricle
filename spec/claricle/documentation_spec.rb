@@ -5,7 +5,35 @@ require "stringio"
 require "timeout"
 require "tmpdir"
 
+# Asserts that a snippet or claim is still IN the README, so renaming
+# `image.format` to `image.formatt` in the docs turns these red instead of
+# leaving replica examples green. Instance methods, not module functions:
+# both read `readme`, the `let` defined below alongside `include
+# DocumentationExamples`, and `expect` is only available inside a running
+# example. A top-level module here, not a `def` in the describe body: both
+# helpers take an argument -- a `let` has no arity, and a bare `def` would
+# leak onto Object.
+module DocumentationExamples
+  # Whole lines, not substrings: asserting "image.format" would still pass
+  # if the doc said "image.formatt".
+  def shows(snippet)
+    lines = readme.lines.map(&:strip)
+    expect(lines).to include(snippet), "README no longer shows the line: #{snippet}"
+  end
+
+  # `shows` is for a code line, which the README never wraps. Prose is
+  # hard wrapped, so a sentence is matched with its wrap points left free.
+  # Each word is escaped, so backticks and punctuation inside the claim
+  # stay literal.
+  def claims(sentence)
+    pattern = /#{sentence.split.map { |word| Regexp.escape(word) }.join('\s+')}/
+    expect(readme).to match(pattern), "README no longer claims: #{sentence}"
+  end
+end
+
 RSpec.describe "the documentation" do
+  include DocumentationExamples
+
   root = File.expand_path("../..", __dir__)
 
   # `let`, not describe-scope locals: a local here is shared by closure
@@ -20,24 +48,8 @@ RSpec.describe "the documentation" do
 
   # Each example asserts the expression it runs is still IN the README.
   # Without that these are replicas: renaming image.format to image.formatt
-  # in the docs would leave them green.
-  # A helper method, not a lambda: `expect` is unavailable at describe
-  # scope and only works inside the example.
-  # Whole lines, not substrings: asserting "image.format" would still pass
-  # if the doc said "image.formatt".
-  def shows(snippet)
-    lines = readme.lines.map(&:strip)
-    expect(lines).to include(snippet), "README no longer shows the line: #{snippet}"
-  end
-
-  # `shows` is for a code line, which the README never wraps. Prose is
-  # hard wrapped, so a sentence is matched with its wrap points left
-  # free. Each word is escaped, so backticks and punctuation inside the
-  # claim stay literal.
-  def claims(sentence)
-    pattern = /#{sentence.split.map { |word| Regexp.escape(word) }.join('\s+')}/
-    expect(readme).to match(pattern), "README no longer claims: #{sentence}"
-  end
+  # in the docs would leave them green. `shows` and `claims` live in
+  # `spec/support/documentation_examples.rb` and read `readme` above.
 
   describe "the examples in Usage" do
     it "detects from bytes and from an IO" do
