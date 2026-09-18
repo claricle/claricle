@@ -2,10 +2,22 @@
 
 require "tmpdir"
 
-require_relative "../support/batch_runner"
+# Calls `Claricle::Batch.run` with `pattern:`/`classify:` keywords already
+# named, so every example below reads the argument it is actually varying
+# instead of repeating the two defaults each time. A top-level module here,
+# not a `def` in the describe body: it takes arguments, so a `let` (no
+# arity) can't stand in for it, and a bare `def` would leak onto Object.
+#
+# `include`, not `module_function`: it closes over no host state and could
+# be either, but this file calls it bare at dozens of sites, and
+# `module_function` would mean rewriting every one to `BatchRunner.run(...)`.
+module BatchRunner
+  def run(batch, arguments, pattern: nil, classify: nil, &operation)
+    batch.run(arguments, pattern: pattern, classify: classify, &operation)
+  end
+end
 
 RSpec.describe "Claricle::Batch" do
-  # `run` lives in `spec/support/batch_runner.rb`.
   include BatchRunner
 
   batch = Claricle.const_get(:Batch)
