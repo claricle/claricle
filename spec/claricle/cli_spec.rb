@@ -5,9 +5,13 @@ require "fileutils"
 require "stringio"
 require "tmpdir"
 require_relative "../support/pdf_builder"
+require_relative "../support/extra_handler_cli"
 
 RSpec.describe Claricle::Cli::Runner do
+  include ExtraHandlerCli
+
   status = described_class::Status
+  boom_handler = File.join(__dir__, "..", "fixtures", "faulting_handler", "boom.rb")
 
   # A real Thor subclass, not a double: the runner's whole job is what
   # happens to an exception on its way out of Thor. Status is captured in
@@ -221,32 +225,34 @@ RSpec.describe Claricle::Cli::Runner do
       expect(described_class.run(%w[inspect image.png], output: StringIO.new)).to eq(4)
     end
 
+    # A real handler (spec/fixtures/faulting_handler/boom.rb) whose
+    # `inspection` raises the broken pipe, reached through the real
+    # executable.
     it "maps inspection generation's broken pipe to 4" do
-      image = instance_double(Claricle::Image)
-      allow(Claricle::Image).to receive(:from_path).and_return(image)
-      allow(image).to receive(:inspection).and_raise(Errno::EPIPE)
+      _, stderr, code = claricle_with_handler(boom_handler, %w[inspect a.boom],
+                                              files: { "a.boom" => "BOOM epipe\n" })
 
-      expect(described_class.run(%w[inspect image.png], output: StringIO.new)).to eq(4)
+      expect(code).to eq(4)
+      expect(stderr).to end_with("claricle: Errno::EPIPE: Broken pipe\n")
     end
 
+    # Nothing a file can contain makes the presenter itself fail, so the
+    # fault is injected at that one seam; the image and inspection are real.
     it "maps inspection rendering's broken pipe to 4" do
-      inspection = instance_double(Claricle::Models::Inspection)
-      image = instance_double(Claricle::Image, inspection: inspection)
+      valid_png = File.join(__dir__, "..", "fixtures", "inspect", "valid.png")
+      inspection = Claricle::Image.from_path(valid_png).inspection
       presenter = Claricle.const_get(:Cli).const_get(:Presenter)
-      allow(Claricle::Image).to receive(:from_path).and_return(image)
       allow(presenter).to receive(:inspection).with(inspection).and_raise(Errno::EPIPE)
 
-      expect(described_class.run(%w[inspect image.png], output: StringIO.new)).to eq(4)
+      expect(described_class.run(["inspect", valid_png], output: StringIO.new)).to eq(4)
     end
 
     it "maps inspection JSON generation's broken pipe to 4" do
-      inspection = instance_double(Claricle::Models::Inspection)
-      image = instance_double(Claricle::Image, inspection: inspection)
-      allow(Claricle::Image).to receive(:from_path).and_return(image)
-      allow(inspection).to receive(:to_json).and_raise(Errno::EPIPE)
+      _, stderr, code = claricle_with_handler(boom_handler, %w[inspect a.boom --json],
+                                              files: { "a.boom" => "BOOM json_epipe\n" })
 
-      arguments = %w[inspect image.png --json]
-      expect(described_class.run(arguments, output: StringIO.new)).to eq(4)
+      expect(code).to eq(4)
+      expect(stderr).to end_with("claricle: Errno::EPIPE: Broken pipe\n")
     end
 
     it "maps a formats operation's broken pipe to 4" do
@@ -637,6 +643,7 @@ RSpec.describe Claricle::Cli::Runner do
   # inside a describe defines an instance method on THAT example group's
   # class, which a sibling does not inherit either.
   fixtures = File.join(__dir__, "..", "fixtures", "inspect")
+  convert_fixtures = File.join(__dir__, "..", "fixtures", "convert")
 
   workspace = lambda do |*names, &block|
     Dir.mktmpdir do |dir|
@@ -751,19 +758,16 @@ RSpec.describe Claricle::Cli::Runner do
       end
     end
 
-    # Exit 4 is the defect code. A crashing delegate is the wrong probe --
-    # a corrupt fixture is nonconformance and exits 1 -- so the real PNG
-    # handler is made to raise something outside every allowlist.
+    # Exit 4 is the defect code. A corrupt fixture is nonconformance and
+    # exits 1, so the probe is a real handler class (boom.rb, dropped into
+    # a scratch lib/) that raises outside every allowlist, run through the
+    # real executable.
     it "exits 4 when the handler raises outside its allowlist, and says what" do
-      handler = Claricle.const_get(:Registry).handler_for(:png)
-      faulting = handler.new
-      allow(faulting).to receive(:conformance_report).and_raise(RuntimeError, "handler defect")
-      allow(handler).to receive(:new).and_return(faulting)
+      stdout, stderr, code = claricle_with_handler(boom_handler, %w[conform a.boom],
+                                                   files: { "a.boom" => "BOOM defect\n" })
 
-      workspace.call(["a.png", "valid.png"]) do
-        expect { expect(described_class.run(%w[conform a.png], output: StringIO.new)).to eq(4) }
-          .to output(/a\.png: handler defect/).to_stderr
-      end
+      expect([code, stdout]).to eq([4, ""])
+      expect(stderr).to end_with("claricle: a.boom: handler defect\n")
     end
 
     # The first real conformance verdicts to reach the CLI end to end: pdf
@@ -814,21 +818,14 @@ RSpec.describe Claricle::Cli::Runner do
       end
     end
 
-    # No handler answers a verdict yet, so `--strict` has nowhere to change
-    # anything -- every real call raises UnsupportedFormat before a verdict
-    # exists to be strict about. This proves the wiring instead: the flag
-    # the user typed is the flag the module API receives, not a default that
-    # silently won.
-    it "forwards strict: only when --strict was given" do
-      result = instance_double(Claricle::BatchResult, exit_code: 0, items: [])
-
-      expect(Claricle).to receive(:conformance_batch)
-        .with("a.png", pattern: nil, strict: true, profile: nil).and_return(result)
-      described_class.run(%w[conform a.png --strict], output: StringIO.new)
-
-      expect(Claricle).to receive(:conformance_batch)
-        .with("a.png", pattern: nil, strict: false, profile: nil).and_return(result)
-      described_class.run(%w[conform a.png], output: StringIO.new)
+    # described_92.emf conforms with a warning (verdict "suspicious"):
+    # clean enough to pass, not clean enough for --strict. The flag the
+    # user typed has to reach the verdict, not a default that silently won.
+    it "applies strict only when --strict was given" do
+      workspace.call(["a.emf", "described_92.emf"]) do
+        expect(described_class.run(%w[conform a.emf], output: StringIO.new)).to eq(0)
+        expect(described_class.run(%w[conform a.emf --strict], output: StringIO.new)).to eq(1)
+      end
     end
 
     # Three profile outcomes, and they are three DIFFERENT exit codes,
@@ -968,19 +965,13 @@ RSpec.describe Claricle::Cli::Runner do
     end
   end
 
-  # These specs drive png fixtures, and no handler with a png SOURCE
-  # implements convert yet (only emf does, item 04's first edge) -- so a
-  # real conversion here still answers UnsupportedFormat, exit 3. That
-  # keeps this describe block the command's own boundary/plumbing:
-  # argument validation, --to inference, the whole-batch destination
-  # preflight, and --force reaching Writer. The two examples that need a
-  # successful conversion (stdout carries the bytes untouched, and a
-  # closed pipe on that stream still exits 0) stand `Image#convert` in
-  # with a narrow `instance_double` returning a real `Models::Conversion`,
-  # rather than switching this block's fixtures to emf. The real emf
-  # handler is exercised directly in
-  # `spec/claricle/handlers/metafile_spec.rb`, and end to end through this
-  # CLI in "convert end to end against a real emf fixture" below.
+  # Most specs here drive png fixtures, and no handler with a png SOURCE
+  # implements convert -- so a real conversion of one answers
+  # UnsupportedFormat, exit 3. That keeps those examples on the command's
+  # own boundary/plumbing: argument validation, --to inference, the
+  # whole-batch destination preflight, and --force reaching Writer. The
+  # examples that need a successful conversion copy a real svg fixture in
+  # and convert it to ps.
   describe "convert" do
     it "exits 2 when given neither a file nor a pattern" do
       workspace.call do
@@ -1198,33 +1189,21 @@ RSpec.describe Claricle::Cli::Runner do
     end
 
     # 04-convert.md's own explicit ask for this step: "`--output -` spec
-    # asserts stdout carries bytes only, with no trailing newline." No
-    # handler with a png SOURCE completes a real conversion yet (only emf
-    # does, per item 04's first edge), so `Image#convert` is stood in for
-    # here with a real `Models::Conversion` -- `instance_double` is
-    # verified against Image's real public interface, so a renamed or
-    # dropped method here fails this spec, not silently. The returned
-    # Conversion is a real instance, not a further double: it is a plain
-    # data model, so building one exercises `convert_one`'s own field
-    # copy and `writer.write` path exactly as a real handler's return
-    # value would.
+    # asserts stdout carries bytes only, with no trailing newline." A real
+    # svg -> ps conversion; the expected bytes come from converting the
+    # same file through the module API, so any byte the CLI adds or drops
+    # on stdout fails this.
     #
     # stderr is NOT expected to stay empty: the plan card also says
     # "everything else -- the human summary, lossiness warnings, error
-    # text -- goes to stderr in that mode", and `write_convert` now
-    # renders that summary for real, so this asserts the exact line
-    # rather than silence. One example, not two: this is a claim about
-    # BOTH streams' division of labor, so a stray write on either one
-    # should fail it. Reverted, `stdout.string` goes empty rather than
-    # `"RAWBYTES"`.
-    it "writes exactly the converted bytes to stdout, with no trailing newline, and the summary line to stderr" do
-      workspace.call(["a.png", "valid.png"]) do
-        converted = Claricle::Models::Conversion.new(
-          source_path: "a.png", source_format: "png", target_format: "svg",
-          lossiness: "unknown", content: "RAWBYTES"
-        )
-        fake = instance_double(Claricle::Image, format: :png, convert: converted)
-        allow(Claricle::Image).to receive(:from_path).with("a.png").and_return(fake)
+    # text -- goes to stderr in that mode", and `write_convert` renders
+    # that summary, so this asserts the exact line rather than silence.
+    # One example, not two: this is a claim about BOTH streams' division
+    # of labor, so a stray write on either one should fail it.
+    it "writes exactly the converted bytes to stdout, nothing added, and the summary line to stderr" do
+      workspace.call do
+        FileUtils.cp(File.join(convert_fixtures, "rect_and_line.svg"), "a.svg")
+        expected = Claricle::Image.from_path("a.svg").convert(to: :ps).content
 
         stdout = StringIO.new
         stderr = StringIO.new
@@ -1233,14 +1212,14 @@ RSpec.describe Claricle::Cli::Runner do
         $stdout = stdout
         $stderr = stderr
         begin
-          described_class.run(%w[convert a.png --to svg --output -], output: StringIO.new)
+          described_class.run(%w[convert a.svg --to ps --output -], output: StringIO.new)
         ensure
           $stdout = previous_stdout
           $stderr = previous_stderr
         end
 
-        expect(stdout.string).to eq("RAWBYTES")
-        expect(stderr.string).to eq("a.png -> svg: - (unknown)\n")
+        expect(stdout.string.b).to eq(expected.b)
+        expect(stderr.string).to eq("a.svg -> ps: - (lossless)\n")
       end
     end
 
@@ -1253,16 +1232,11 @@ RSpec.describe Claricle::Cli::Runner do
     # got a chance to see it, because the write already happened and
     # already failed by the time that line runs.
     it "returns 0 when a converted file's stdout is closed, the same as every other command" do
-      workspace.call(["a.png", "valid.png"]) do
-        converted = Claricle::Models::Conversion.new(
-          source_path: "a.png", source_format: "png", target_format: "svg",
-          lossiness: "unknown", content: "RAWBYTES"
-        )
-        fake = instance_double(Claricle::Image, format: :png, convert: converted)
-        allow(Claricle::Image).to receive(:from_path).with("a.png").and_return(fake)
+      workspace.call do
+        FileUtils.cp(File.join(convert_fixtures, "rect_and_line.svg"), "a.svg")
 
         result = closed_stdout do
-          described_class.run(%w[convert a.png --to svg --output -], output: StringIO.new)
+          described_class.run(%w[convert a.svg --to ps --output -], output: StringIO.new)
         end
 
         expect(result).to eq(0)
@@ -1305,52 +1279,37 @@ RSpec.describe Claricle::Cli::Runner do
     end
 
     {
-      "lossy" => "claricle: warning: a.png -> svg is lossy\n",
-      "lossless" => ""
-    }.each do |lossiness, expected|
+      "gradient_linear" => ["lossy", "claricle: warning: a.svg -> ps is lossy\n"],
+      "rect_and_line" => ["lossless", ""]
+    }.each do |fixture, (lossiness, expected)|
       it "writes the expected stderr for a #{lossiness} conversion" do
-        workspace.call(["a.png", "valid.png"]) do
-          converted = Claricle::Models::Conversion.new(
-            source_path: "a.png", source_format: "png", target_format: "svg",
-            lossiness: lossiness, content: "X", output_path: "out.svg"
-          )
-          fake = instance_double(Claricle::Image, format: :png, convert: converted)
-          allow(Claricle::Image).to receive(:from_path).with("a.png").and_return(fake)
+        workspace.call do
+          FileUtils.cp(File.join(convert_fixtures, "#{fixture}.svg"), "a.svg")
 
-          expect { described_class.run(%w[convert a.png --to svg --output out.svg]) }
+          expect { described_class.run(%w[convert a.svg --to ps --output out.ps]) }
             .to output(expected).to_stderr
         end
       end
     end
 
     it "stays silent on stderr under --json even for a lossy conversion" do
-      workspace.call(["a.png", "valid.png"]) do
-        converted = Claricle::Models::Conversion.new(
-          source_path: "a.png", source_format: "png", target_format: "svg",
-          lossiness: "lossy", content: "X", output_path: "out.svg"
-        )
-        fake = instance_double(Claricle::Image, format: :png, convert: converted)
-        allow(Claricle::Image).to receive(:from_path).with("a.png").and_return(fake)
+      workspace.call do
+        FileUtils.cp(File.join(convert_fixtures, "gradient_linear.svg"), "a.svg")
 
-        expect { described_class.run(%w[convert a.png --to svg --output out.svg --json]) }
+        expect { described_class.run(%w[convert a.svg --to ps --output out.ps --json]) }
           .not_to output.to_stderr
       end
     end
 
-    # The convert half of the defect code, through the same real handler
-    # that produced the line above.
+    # The convert half of the defect code: boom.rb's `convert` raises
+    # outside every allowlist, through the real executable.
     it "exits 4 when the handler raises outside its allowlist, and says what" do
-      handler = Claricle.const_get(:Registry).handler_for(:emf)
-      faulting = handler.new
-      allow(faulting).to receive(:convert).and_raise(RuntimeError, "handler defect")
-      allow(handler).to receive(:new).and_return(faulting)
+      stdout, stderr, code = claricle_with_handler(
+        boom_handler, %w[convert a.boom --to svg --output out.svg], files: { "a.boom" => "BOOM defect\n" }
+      )
 
-      workspace.call do
-        FileUtils.cp(emf_fixture, "rect_and_line.emf")
-
-        expect { expect(described_class.run(%w[convert rect_and_line.emf --to svg --output out.svg])).to eq(4) }
-          .to output(/rect_and_line\.emf: handler defect/).to_stderr
-      end
+      expect([code, stdout]).to eq([4, ""])
+      expect(stderr).to end_with("claricle: a.boom: handler defect for svg\n")
     end
 
     it "emits a Conversion-shaped BatchItem under --json, with no bare nil fields" do
