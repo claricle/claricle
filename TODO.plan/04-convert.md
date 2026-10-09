@@ -44,9 +44,10 @@ svg/emf/eps/ps were measured working, so v1 ships the full matrix.
   `:lossless` / `:lossy` / `:unknown` vocabulary stands; the static
   table becomes a pessimistic floor, never the answer. Build the
   feature list from the fixture corpus and grow it as more losses are
-  found. Lossy/unknown conversions warn on stderr and carry the
-  classification in the result. No consent-gate flag — the issue
-  requires disclosure, not consent.
+  found. Human output discloses lossy/unknown conversions through its
+  warning or batch summary; JSON output carries the classification in
+  the result and deliberately keeps stderr clean. No consent-gate flag
+  — the issue requires disclosure, not consent.
 - **Write lifecycle**: `Image#convert(to:)` never touches disk.
   `Claricle.convert(src, to:, output: nil, force: false)` writes to the
   given path; stdout for `"-"`; with `output: nil` derives the sibling
@@ -191,11 +192,12 @@ Plumbing first again, then one edge family per commit.
 ## Done when
 
 - [x] All acceptance-matrix conversions work via API and CLI with correct
-  exit codes and lossiness warnings.
+  exit codes and output-mode-appropriate lossiness disclosure.
 - [x] Semantic suite green; every `:lossless` classification is
   fixture-proven for the features present in that fixture, and the
   gradient, clip-path and embedded-raster cases each produce a
-  `:lossy` classification with a warning rather than silent loss.
+  `:lossy` classification disclosed in human or JSON output rather than
+  silent loss.
 - [x] A batch that would collide or overwrite an input is refused before
   anything is written, and specs cover the four concrete cases.
 - [x] `claricle formats` prints the complete support matrix — every cell
