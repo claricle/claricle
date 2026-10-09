@@ -7,6 +7,7 @@ require "rexml/parsers/baseparser"
 
 require_relative "base"
 require_relative "../detector"
+require_relative "../emf_header"
 require_relative "../models/inspection"
 require_relative "../models/issue"
 require_relative "../models/location"
@@ -698,7 +699,7 @@ module Claricle
       # exist for is fixed outright above, at file-load time.
       def convert_content(content, to)
         PostscriptFidelity.convert(content, to) do |svg|
-          ::Vectory::Svg.from_content(svg).public_send(CONVERT_TARGET_METHODS.fetch(to)).content
+          EmfHeader.seal(to, ::Vectory::Svg.from_content(svg).public_send(CONVERT_TARGET_METHODS.fetch(to)).content)
         end
       rescue StandardError => e
         raise ConversionError, "#{e.class}: #{e.message}"
