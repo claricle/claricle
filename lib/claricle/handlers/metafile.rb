@@ -306,6 +306,20 @@ module Claricle
         found << missing_eof
       end
 
+      def self.body_record_count(content, offset)
+        count = 0
+        while offset < content.bytesize
+          type, size = EmfRecords.record_at(content, offset)
+          return nil if size.nil?
+
+          count += 1
+          return count if EmfRecords.eof?(type, size)
+
+          offset += size
+        end
+        nil
+      end
+
       def self.ending(content, offset, size)
         at = offset + size - SIZE_LAST_BYTES
         last = content.byteslice(at, SIZE_LAST_BYTES).unpack1("V")
@@ -404,6 +418,7 @@ module Claricle
       # The header's Bytes field: MS-EMF defines it as the size of the whole
       # metafile.
       BYTES_OFFSET = 48
+      RECORDS_OFFSET = 52
 
       # The structural walk is the authority on whether the file is broken;
       # the gem is a second opinion that may not arrive. A gem exception
@@ -444,7 +459,7 @@ module Claricle
         return [unexamined] if walked.nil?
 
         structural = byte_count_issues(content) + walked
-        structural + delegate_issues(content, structural)
+        structural + delegate_issues(content, structural, declared)
       end
 
       # EMR_HEADER is a record, framed by the same rule as every other --
@@ -476,11 +491,31 @@ module Claricle
       # derives `:suspicious` instead of claiming `:yes` or `:no`. Where the
       # walk already found real damage, the gem's failure adds nothing and
       # is dropped rather than restated in weaker words.
-      def self.delegate_issues(content, structural)
-        metafile = ::Emf.parse(content)
+      def self.delegate_issues(content, structural, declared)
+        metafile = parsed(content)
+        return fallback_issues(content, structural, declared, metafile) if metafile.is_a?(::Exception)
+
         metafile.errors.map { |error| parse_issue(error) } + [count_issue(metafile)].compact
+      end
+
+      def self.parsed(content)
+        ::Emf.parse(content)
       rescue *MALFORMED => e
-        structural.empty? ? [unverified(e)] : []
+        e
+      end
+
+      def self.fallback_issues(content, structural, declared, error)
+        base = structural.empty? ? [unverified(error)] : []
+        base + [independent_count_issue(content, declared)].compact
+      end
+
+      def self.independent_count_issue(content, declared)
+        expected = content.byteslice(RECORDS_OFFSET, 4)&.unpack1("V")
+        actual = EmfStructure.body_record_count(content, declared)
+        return if expected.nil? || actual.nil? || expected == actual + 1
+
+        issue("emf.record_count_mismatch",
+              "the header declares #{expected} records and #{actual + 1} were read")
       end
 
       def self.unexamined
@@ -524,6 +559,7 @@ module Claricle
 
       private_class_method :bounded, :issues_for, :header_size, :header_framing,
                            :byte_count_issues, :delegate_issues, :unexamined, :unverified,
+                           :parsed, :fallback_issues, :independent_count_issue,
                            :parse_issue, :count_issue, :issue
     end
 
