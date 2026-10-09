@@ -912,6 +912,24 @@ RSpec.describe "Claricle SVG handler" do
       expect(report).to have_attributes(format: "svg", issues: [], valid: :yes)
     end
 
+    it "allows foreign namespace elements under an SVG root in the base profile" do
+      source = <<~SVG
+        <svg xmlns="#{svg_ns}" viewBox="0 0 1 1">
+          <meta:data xmlns:meta="https://example.test/metadata"/>
+        </svg>
+      SVG
+      image = Claricle::Image.from_content(source, format: :svg)
+
+      expect(handler.conformance_report(image).issues).to be_empty
+    end
+
+    it "still rejects a root outside the SVG namespace in the base profile" do
+      source = %(<svg xmlns="https://example.test/not-svg" viewBox="0 0 1 1"/>)
+      image = Claricle::Image.from_content(source, format: :svg)
+
+      expect(handler.conformance_report(image).issues.map(&:code)).to eq(["namespace"])
+    end
+
     # A discriminating pair, not one fixture: the two differ by the single
     # `viewBox` attribute, so a mapping that reported every document clean
     # -- or every document broken -- fails one of them.

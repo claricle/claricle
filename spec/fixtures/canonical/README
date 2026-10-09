@@ -13,7 +13,24 @@ svg/  IETF svgcheck test inputs (svgcheck/Tests/)
            svgcheck-viewBox-none.svg, svgcheck-malformed.svg
   Note:    svgcheck checks the RFC 7996 SVG profile; its expected verdicts
            (svgcheck/Results/) were used as the reference for these four.
-           No W3C SVG 1.1 test-suite files are included (see the spec header).
+
+svg/  W3C SVG 1.1 Second Edition Test Suite (accepted tests)
+  Release: https://www.w3.org/Graphics/SVG/Test/20110816/
+  Archive: https://www.w3.org/Graphics/SVG/Test/20110816/archives/W3C_SVG_11_TestSuite.tar.gz
+           SHA-256 b5f46cca1ad79b670f9179770b2366c57efd5c671d084144090feab4b7ff1030
+  License: W3C Document License,
+           https://www.w3.org/copyright/document-license-2023/
+           Copyright 2008-2009 World Wide Web Consortium (MIT, ERCIM,
+           Keio University). The embedded copyright notices are retained.
+  Files:   shapes-circle-01-t.svg
+           https://www.w3.org/Graphics/SVG/Test/20110816/svg/shapes-circle-01-t.svg
+           struct-svg-01-f.svg
+           https://www.w3.org/Graphics/SVG/Test/20110816/svg/struct-svg-01-f.svg
+           extend-namespace-01-f.svg
+           https://www.w3.org/Graphics/SVG/Test/20110816/svg/extend-namespace-01-f.svg
+  Note:    These accepted test IDs were extracted without modification. They
+           form a software-development subset, not an authoritative W3C Test
+           Suite or a claim of complete SVG 1.1 conformance.
 
 pdf/  veraPDF corpus (valid files)
   Source:  https://github.com/veraPDF/veraPDF-corpus at bb75f4f0073d9350dfd058c0162a367e6fadf25e
