@@ -8,6 +8,7 @@ RSpec.describe "Claricle conformance API" do
   fixtures = File.expand_path("../../fixtures/inspect", __dir__)
   png = File.join(fixtures, "valid.png")
   eps = File.join(fixtures, "basic.eps")
+  ps = File.join(fixtures, "plain.ps")
   pdf = PdfBuilder.path(name: "module-api-valid")
 
   # A real tree with real bytes, so detection is the real detector and the
@@ -34,19 +35,21 @@ RSpec.describe "Claricle conformance API" do
     end
 
     # A predicate answers about conformance and raises about everything
-    # else. EPS never conforms (D22), so it stays the permanent exit-3
-    # story here -- and it must not quietly become false.
-    it "raises rather than answering false when the format is unsupported" do
-      workspace(["a.eps", eps]) do
+    # else. EPS and PS never conform (D22), so they stay the permanent
+    # exit-3 story here -- and neither may quietly become false.
+    it "raises rather than answering false when EPS or PS is unsupported" do
+      workspace(["a.eps", eps], ["a.ps", ps]) do
         expect { Claricle.conform?("a.eps") }
           .to raise_error(Claricle::UnsupportedFormat, /:eps is not supported for conform/)
+        expect { Claricle.conform?("a.ps") }
+          .to raise_error(Claricle::UnsupportedFormat, /:ps is not supported for conform/)
       end
     end
 
-    # pdf now conforms: a real, structurally valid document reads as
+    # PDF now conforms: a real, structurally valid document reads as
     # `true` through the predicate, driven by a live handler rather than
     # a stub.
-    it "answers a real conformance verdict for a format that conforms" do
+    it "answers true for a real conformant PDF through the positional call" do
       workspace(["a.pdf", pdf]) do
         expect(Claricle.conform?("a.pdf")).to be(true)
       end
@@ -57,6 +60,21 @@ RSpec.describe "Claricle conformance API" do
       svg = File.expand_path("../../fixtures/conform/valid.svg", __dir__)
       workspace(["a.emf", emf], ["a.svg", svg]) do
         expect([Claricle.conform?("a.emf"), Claricle.conform?("a.svg")]).to eq([true, true])
+      end
+    end
+
+    it "answers true for a real conformant PNG through the positional call" do
+      workspace(["a.png", png]) do
+        expect(Claricle.conform?("a.png")).to be(true)
+      end
+    end
+
+    it "answers true for an all-conforming mixed-format pattern" do
+      svg = File.expand_path("../../fixtures/conform/valid.svg", __dir__)
+      emf = File.join(fixtures, "distinct_device.emf")
+
+      workspace(["a.png", png], ["b.svg", svg], ["c.emf", emf], ["d.pdf", pdf]) do
+        expect(Claricle.conform?(pattern: "*")).to be(true)
       end
     end
 

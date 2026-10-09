@@ -173,18 +173,27 @@ so no commit declares a capability the CLI can't yet deliver.
 ## Done when
 
 - [x] `Claricle.conform?` correct for png, svg, emf and pdf, both call
-  shapes; eps/ps raise `UnsupportedFormat` per D22 (`module_api_spec.rb:39,49`).
+  shapes; eps/ps raise `UnsupportedFormat` per D22
+  (`spec/claricle/conformance/module_api_spec.rb`, examples
+  `answers true for a real conformant PNG through the positional call`,
+  `answers true for a real conformant PDF through the positional call`,
+  `answers true for a real conformant EMF and a real conformant SVG`,
+  `answers true for an all-conforming mixed-format pattern`, and
+  `raises rather than answering false when EPS or PS is unsupported`).
 - [x] Invalid fixture of each format yields a `Report` with populated,
   correctly-mapped issues; exit codes verified end-to-end. png, svg, pdf
-  (`cli_spec.rb`); invalid EMF exits 1 with its `emf.record_framing` error
-  line (`cli_spec.rb:804`, #71).
+  (`spec/claricle/cli_spec.rb`); invalid EMF exits 1 with its
+  `emf.record_framing` error line (`spec/claricle/cli_spec.rb`, example
+  `exits 1 for a nonconformant EMF, with an error line on stdout`; #71).
 - [x] Batch glob over mixed formats returns highest-code exit and a
   positionally complete JSON array of `BatchItem`, failures included.
 - [x] A single-file failure emits the same JSON envelope as a batch one.
 - [x] Exit code 4 is reached end-to-end. A corrupt-but-recognised fixture
   exits 1 for png, svg, emf and pdf; eps and ps exit 3 regardless of
   content (D22). Exit 4 comes from a real faulting handler run through
-  the real executable (`cli_spec.rb:765`, `boom.rb`, #63).
+  the real executable (`spec/claricle/cli_spec.rb`, example
+  `exits 4 when the handler raises outside its allowlist, and says what`,
+  with `spec/fixtures/faulting_handler/boom.rb`; #63).
 - [x] `formats` now reports conform, and its spec says so.
 - [x] PDF named profiles map all eight planned pdfrb validators; `--level`
   validates and maps the accepted PDF/A, PDF/X, PDF/VT and PAdES levels,
