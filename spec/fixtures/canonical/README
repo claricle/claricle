@@ -1,0 +1,42 @@
+Canonical conformance fixtures
+==============================
+
+Third-party files copied unmodified from the upstream projects below, used by
+spec/claricle/conformance/canonical_fixtures_spec.rb. PNG is covered by PngSuite
+in spec/claricle/png_spec.rb and is not repeated here. Each file keeps the
+license of its source, which permits redistribution with this notice.
+
+svg/  IETF svgcheck test inputs (svgcheck/Tests/)
+  Source:  https://github.com/ietf-tools/svgcheck  at 52f2845f1379ead67444d61660c6ad79774985ec
+  License: BSD-3-Clause, Copyright (C) 2017, 2022 IETF Trust
+  Files:   svgcheck-good.svg, svgcheck-DrawBerry-sample-2.svg,
+           svgcheck-viewBox-none.svg, svgcheck-malformed.svg
+  Note:    svgcheck checks the RFC 7996 SVG profile; its expected verdicts
+           (svgcheck/Results/) were used as the reference for these four.
+           No W3C SVG 1.1 test-suite files are included (see the spec header).
+
+pdf/  veraPDF corpus (valid files)
+  Source:  https://github.com/veraPDF/veraPDF-corpus at bb75f4f0073d9350dfd058c0162a367e6fadf25e
+  License: CC BY 4.0, https://creativecommons.org/licenses/by/4.0/
+           (c) veraPDF Consortium and contributors. Unmodified.
+  Files:   verapdf-6-8-2-2-t01-pass-a.pdf  (PDF_A-1a/6.8.2.2, "pass" file)
+           verapdf-6-2-3-2-t01-pass-a.pdf  (PDF_A-1b/6.2.3.2, "pass" file)
+
+pdf/  qpdf test suite (malformed files)
+  Source:  https://github.com/qpdf/qpdf at 4eba95899886e851cc41d76886483b347612f2a8
+           (qtest/qpdf/bad-xref.pdf, qtest/qpdf/bad10.pdf)
+  License: Apache-2.0, Copyright Jay Berkenbilt and Manfred Holger
+  Files:   qpdf-bad-xref.pdf, qpdf-bad10.pdf
+
+emf/  Apache POI test data
+  Source:  https://github.com/apache/poi at ae62bb5116b9aee19ebd5834e3a82066132c9f7f
+           (test-data/document/vector_image.emf, test-data/slideshow/wrench.emf,
+            test-data/spreadsheet/63327.emf, test-data/spreadsheet/61294.emf,
+            test-data/slideshow/crash-7b60e9fe792eaaf1bba8be90c2b62f057cfff142.emf)
+  License: Apache-2.0, Copyright The Apache Software Foundation
+  Files:   poi-vector_image.emf, poi-wrench.emf, poi-63327.emf (valid);
+           poi-61294.emf (record size 4294902055 at byte 2384),
+           poi-crash-7b60e9fe.emf (header declares 40276 bytes, file is 21258)
+
+Not used: the EMF fixtures shipped with the emf gem (claricle/emf spec/fixtures)
+come from kakwa/libemf2svg, GPL-2.0, which this BSD-2 gem does not redistribute.
