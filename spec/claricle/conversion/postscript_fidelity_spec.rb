@@ -107,4 +107,45 @@ RSpec.describe "svg -> eps/ps fidelity repairs" do
       expect(round.scan("translate(0 50) scale(1 -1)").length).to eq(2)
     end
   end
+
+  describe "a viewBox whose origin is not 0 0" do
+    def box_of(source) = ConvertSemantics.extent(shapes(source).first.points)
+
+    {
+      "50 50 100 100" => [10.0, 80.0, 20.0, 90.0],
+      "50,50,100,100" => [10.0, 80.0, 20.0, 90.0],
+      "40 50 100 100" => [20.0, 80.0, 30.0, 90.0],
+      "50 40 100 100" => [10.0, 70.0, 20.0, 80.0]
+    }.each do |view_box, expected|
+      it "paints the rect where #{view_box.inspect} puts it" do
+        source = svg(%(<rect x="60" y="60" width="10" height="10"/>), root: %(viewBox="#{view_box}"))
+
+        expect(box_of(source)).to eq(expected)
+      end
+    end
+
+    it "keeps the bounding box at the viewBox size" do
+      source = svg(%(<rect x="60" y="60" width="10" height="10"/>), root: 'viewBox="50 50 100 80"')
+
+      expect(postscript(source).lines.grep(/BoundingBox/)).to eq(["%%BoundingBox: 0 0 100 80\n"])
+    end
+
+    it "leaves a nested svg's viewBox alone" do
+      source = svg(%(<svg viewBox="5 5 10 10"><rect width="1" height="1"/></svg>), root: 'viewBox="0 0 100 100"')
+
+      expect(repair.call(source)).to equal(source)
+    end
+  end
+
+  describe "text" do
+    let(:text) { svg(%(<text x="10" y="20" font-size="14">Hi (a)</text>)) }
+
+    it "is drawn upright inside the flipped page" do
+      lines = postscript(text).lines.map(&:strip)
+      at = lines.index("(Hi \\(a\\)) show")
+
+      expect(lines[(at - 4)..(at + 1)])
+        .to eq(["gsave", "10 20 translate", "1 -1 scale", "0 0 moveto", "(Hi \\(a\\)) show", "grestore"])
+    end
+  end
 end

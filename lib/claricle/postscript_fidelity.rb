@@ -2,9 +2,10 @@
 
 require "rexml/document"
 require_relative "detector"
+require_relative "postscript_fidelity/view_box"
 
 module Claricle
-  # Closes four silent losses in postsvg-0.3.0's SVG -> PS/EPS writer, so the
+  # Closes six silent losses in postsvg-0.3.0's SVG -> PS/EPS writer, so the
   # `:lossless` verdict for the shapes Lossiness proves kept is true.
   # `repair` rewrites the SVG before the writer sees it; `orient` fixes the
   # PostScript it returns. Both pass their input through untouched when they
@@ -15,6 +16,10 @@ module Claricle
   #   line_handler.rb:12      a <line> is always stroked; SVG's default stroke is none
   #   (no code)               user space is y-down; PostScript is y-up and nothing flips it.
   #                         `translate` + `scale`, not `concat`: Postsvg.to_svg ignores concat.
+  #   svg/parser.rb:27-33     viewBox is read as [llx lly urx ury], so a non-zero origin is
+  #                         misplaced: `repair` rewrites it to origin 0 0, `orient` shifts by it.
+  #   (no code)               the flip mirrors `show` text: each is counter-flipped about its origin.
+  #                         (`<image>` is emitted as a bare `image` operator with no data: nothing to flip.)
   module PostscriptFidelity
     SVG_NAMESPACE = "http://www.w3.org/2000/svg"
     LENGTH_ATTRIBUTES = %w[width height x y x1 y1 x2 y2].freeze
@@ -23,7 +28,8 @@ module Claricle
     RGB = /\A[ \t\r\n]*rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)[ \t\r\n]*\z/
     STROKE_INHERITING = %w[stroke style class].freeze
     BBOX = /^%%BoundingBox: (\S+) (\S+) (\S+) (\S+)$/
-    HINT = /px|rgb\(|<line|[+.]\d/i
+    HINT = /px|rgb\(|<line|[+.]\d|viewBox/i
+    SHOW = /^(\S+) (\S+) moveto\n(\((?:\\.|[^\\)])*\) show)$/
 
     POSTSCRIPT_TARGETS = %i[eps ps].freeze
 
@@ -34,7 +40,8 @@ module Claricle
     def convert(svg, target)
       return yield(svg) unless POSTSCRIPT_TARGETS.include?(target)
 
-      orient(yield(repair(svg)), svg)
+      fixed = repair(svg)
+      orient(yield(fixed), fixed, ViewBox.rebased_origin(svg, fixed))
     end
 
     def repair(svg)
@@ -44,42 +51,36 @@ module Claricle
       return svg unless doc.root && doc.encoding == "UTF-8"
 
       changed = svg_elements(doc.root).map { |element| repaired?(element, doc) }
+      changed << ViewBox.rebase_origin?(doc.root)
       changed.any? ? doc.to_s : svg
     rescue REXML::ParseException, RuntimeError, EncodingError, ArgumentError
       svg
     end
 
-    def orient(postscript, svg)
+    def orient(postscript, svg, origin = [0.0, 0.0])
       match = BBOX.match(postscript)
       return postscript unless match && postscript.include?("%%EndComments\n")
 
       box = match.captures.map { |text| Float(text, exception: false) }
       return postscript unless box.all?
 
-      reflect(postscript, box, viewport_sum(svg) || (box[1] + box[3]))
+      upright(reflect(postscript, box, ViewBox.viewport_sum(svg) || (box[1] + box[3]), origin))
     end
 
-    def reflect(postscript, box, sum)
+    def reflect(postscript, box, sum, origin)
       llx, lly, urx, ury = box
       bbox = [llx, sum - ury, urx, sum - lly].map { |value| number(value) }.join(" ")
+      shift = origin.all?(&:zero?) ? "" : "#{origin.map { |value| number(-value) }.join(" ")} translate\n"
       postscript.sub(BBOX) { "%%BoundingBox: #{bbox}" }
-                .sub("%%EndComments\n") { "%%EndComments\n0 #{number(sum)} translate\n1 -1 scale\n" }
+                .sub("%%EndComments\n") { "%%EndComments\n0 #{number(sum)} translate\n1 -1 scale\n#{shift}" }
     end
 
-    # y' = sum - y reflects the viewport top to bottom. A viewBox counts only at
-    # origin 0 0: postsvg reads it as [llx lly urx ury], not [x y width height].
-    def viewport_sum(svg)
-      attributes = Detector.read_root(svg)&.last or return
-      box = attributes["viewBox"]
-      return view_box_height(box) if box
-
-      height = LENGTH.match(attributes["height"].to_s)
-      Float(height[1]) if height
-    end
-
-    def view_box_height(text)
-      min_x, min_y, _, height = text.split(/[\s,]+/).map { |part| Float(part, exception: false) }
-      height if min_x&.zero? && min_y&.zero?
+    # The page flip mirrors glyphs; flip each `show` back about its own origin.
+    def upright(postscript)
+      postscript.gsub(SHOW) do
+        x, y, text = Regexp.last_match.captures
+        "gsave\n#{x} #{y} translate\n1 -1 scale\n0 0 moveto\n#{text}\ngrestore"
+      end
     end
 
     def svg_elements(root)
@@ -133,7 +134,7 @@ module Claricle
     end
 
     private_class_method :svg_elements, :repaired?, :rewrite, :removed_unstroked_line?, :stroke_free?, :number,
-                         :reflect, :viewport_sum, :view_box_height
+                         :reflect, :upright
   end
 
   private_constant :PostscriptFidelity
