@@ -4,18 +4,23 @@
 # fixtures"). PNG is exercised against PngSuite in png_spec.rb. Provenance and
 # licenses: spec/fixtures/canonical/README.
 #
-# Not covered: a W3C SVG 1.1 suite (not shipped by svg_conform; the IETF
-# svgcheck corpus stands in), a Microsoft EMF reference corpus (none is
-# freely redistributable), and PDF/A-failing files (claricle checks structure
-# and Arlington, not PDF/A).
+# Not covered: a Microsoft EMF reference corpus (none is freely
+# redistributable), and PDF/A-failing files (claricle checks structure and
+# Arlington, not PDF/A).
 RSpec.describe "Claricle conformance over canonical fixtures" do
   root = File.expand_path("../../fixtures/canonical", __dir__)
 
   rows = [
-    { file: "svg/svgcheck-good.svg", conforms: true, codes: [] },
-    { file: "svg/svgcheck-viewBox-none.svg", conforms: false, codes: %w[viewbox_required] },
-    { file: "svg/svgcheck-malformed.svg", conforms: false, codes: %w[namespace] },
-    { file: "svg/svgcheck-DrawBerry-sample-2.svg", conforms: false, codes: %w[namespace_attributes] },
+    { file: "svg/svgcheck-good.svg", profile: :svg_1_2_rfc, conforms: true, codes: [] },
+    { file: "svg/svgcheck-viewBox-none.svg", profile: :svg_1_2_rfc, conforms: false,
+      codes: %w[color_restrictions viewbox_required] },
+    { file: "svg/svgcheck-malformed.svg", profile: :svg_1_2_rfc, conforms: false,
+      codes: %w[allowed_elements color_restrictions namespace_validation style] },
+    { file: "svg/svgcheck-DrawBerry-sample-2.svg", profile: :svg_1_2_rfc, conforms: false,
+      codes: %w[namespace_attributes style_promotion] },
+    { file: "svg/shapes-circle-01-t.svg", conforms: true, codes: [] },
+    { file: "svg/struct-svg-01-f.svg", conforms: true, codes: [] },
+    { file: "svg/extend-namespace-01-f.svg", conforms: true, codes: [] },
     { file: "pdf/verapdf-6-8-2-2-t01-pass-a.pdf", conforms: true, codes: [] },
     { file: "pdf/verapdf-6-2-3-2-t01-pass-a.pdf", conforms: true, codes: [] },
     { file: "pdf/qpdf-bad-xref.pdf", conforms: false, codes: %w[PDF_STRUCTURE_UNREADABLE] },
@@ -32,10 +37,10 @@ RSpec.describe "Claricle conformance over canonical fixtures" do
   rows.each do |row|
     it "#{row[:file]} #{row[:conforms] ? "conforms" : "is rejected"}" do
       path = File.join(root, row[:file])
-      codes = Claricle.conformance_report(path).issues.map(&:code).uniq.sort
+      codes = Claricle.conformance_report(path, profile: row[:profile]).issues.map(&:code).uniq.sort
 
       expect(codes).to eq(row[:codes])
-      expect(Claricle.conform?(path)).to be(row[:conforms])
+      expect(Claricle.conform?(path, profile: row[:profile])).to be(row[:conforms])
     end
   end
 end

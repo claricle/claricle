@@ -233,7 +233,7 @@ module Claricle
           Models::Report.new(
             source_path: image.path, format: image.format.to_s,
             profile: profile.to_s, validator_version: ::SvgConform::VERSION,
-            issues: issues_from(result)
+            issues: issues_from(result, profile: profile)
           )
         end
 
@@ -266,8 +266,20 @@ module Claricle
           Svg.supported_profiles.each { |name| ::SvgConform::Profiles.get(name) }
         end
 
-        def self.issues_from(result)
-          BUCKETS.flat_map { |bucket| result.public_send(bucket).to_a }.map { |raw| issue_from(raw) }
+        def self.issues_from(result, profile:)
+          BUCKETS.flat_map { |bucket| result.public_send(bucket).to_a }
+            .reject { |raw| base_foreign_namespace_issue?(raw, profile) }
+            .map { |raw| issue_from(raw) }
+        end
+
+        # SVG 1.1 permits foreign-namespace elements. svg_conform's base
+        # profile applies its SVG-only element whitelist to them; root
+        # namespace failures have no parent and remain.
+        def self.base_foreign_namespace_issue?(raw, profile)
+          data = raw.data
+          profile == :base && raw.requirement_id.to_s == "namespace" &&
+            data.key?(:element_name) && data.key?(:namespace) &&
+            raw.node.respond_to?(:parent) && !raw.node.parent.nil?
         end
 
         def self.issue_from(raw)
@@ -291,7 +303,8 @@ module Claricle
           Models::Location.new(line: line, column: column)
         end
 
-        private_class_method :report_for, :issues_from, :issue_from, :location_for,
+        private_class_method :report_for, :issues_from, :base_foreign_namespace_issue?,
+                             :issue_from, :location_for,
                              :not_well_formed, :warm_profile_cache,
                              :malformed_report
       end
