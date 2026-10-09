@@ -1572,7 +1572,7 @@ RSpec.describe "Claricle PDF handler" do
   # has been missed twice already, once for the four `*_CODE` constants
   # and once for `VERSION_TOKEN` when the version comparison landed.
   it "keeps its helpers and its tuning constants private" do
-    %i[VersionGate Resolver MetadataGate Progress DEADLINE_SECONDS HEADER_SCAN_BYTES
+    %i[VersionGate CrDocumentOpening Resolver MetadataGate Progress DEADLINE_SECONDS HEADER_SCAN_BYTES
        MAX_PAGE_COUNT MESSAGES VERSION_TOKEN HEADER_CODE OPEN_CODE STRUCTURE_CODE TIMEOUT_CODE]
       .each { |name| expect(pdf_class.const_get(name, false)).not_to be_nil, name.to_s }
 

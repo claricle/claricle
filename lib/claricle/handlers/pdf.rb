@@ -827,69 +827,75 @@ module Claricle
         readable(image, progress) unless progress.code
       end
 
-      # The BLOCK form, always. Measured on a 1 MB file: the non-block
-      # branch is `File.binread(path)` into a `StringIO` held for the
-      # document's life, whose `string` is exactly the file; the block
-      # form's `doc.io` is a `File` handle that does not respond to
-      # `string` at all.
-      #
-      # `Errno::ENOENT` is deliberately NOT rescued. pdfrb opens the file
-      # itself and `with_path` re-yields a path-born image's path without
-      # holding the handle, so a file deleted between the header read and
-      # this call raises it -- and reporting "failed" would claim the PDF
-      # is unreadable when it is simply gone.
-      #
-      # `opened` narrows this rescue to the OPEN itself. The block form is
-      # required (see above), so the rescue would otherwise also cover the
-      # stages inside the block, where this handler's own code runs: a bug
-      # there was reported as `pdf.unreadable` instead of crashing. Once
-      # pdfrb has yielded, every delegate call inside is guarded on its
-      # own, so anything still escaping is ours and is re-raised.
-      def open_document(path, progress)
-        open_native_document(path, progress)
-        return unless progress.code == STRUCTURE_CODE && cr_terminated_header?(path)
+      module CrDocumentOpening
+        private
 
-        progress.code = nil
-        progress.node = nil
-        open_cr_document(path, progress)
-      end
+        # The BLOCK form, always. Measured on a 1 MB file: the non-block
+        # branch is `File.binread(path)` into a `StringIO` held for the
+        # document's life, whose `string` is exactly the file; the block
+        # form's `doc.io` is a `File` handle that does not respond to
+        # `string` at all.
+        #
+        # `Errno::ENOENT` is deliberately NOT rescued. pdfrb opens the file
+        # itself and `with_path` re-yields a path-born image's path without
+        # holding the handle, so a file deleted between the header read and
+        # this call raises it -- and reporting "failed" would claim the PDF
+        # is unreadable when it is simply gone.
+        #
+        # `opened` narrows this rescue to the OPEN itself. The block form is
+        # required (see above), so the rescue would otherwise also cover the
+        # stages inside the block, where this handler's own code runs: a bug
+        # there was reported as `pdf.unreadable` instead of crashing. Once
+        # pdfrb has yielded, every delegate call inside is guarded on its
+        # own, so anything still escaping is ours and is re-raised.
+        def open_document(path, progress)
+          open_native_document(path, progress)
+          return unless progress.code == STRUCTURE_CODE && cr_terminated_header?(path)
 
-      def open_native_document(path, progress)
-        opened = false
-        ::Pdfrb::Document.open(path) do |document|
-          opened = true
-          read_document(document, progress)
+          progress.code = nil
+          progress.node = nil
+          open_cr_document(path, progress)
         end
-      rescue *parse_failures, Errno::EINVAL
-        raise if opened
 
-        progress.code = OPEN_CODE
-      end
+        def open_native_document(path, progress)
+          opened = false
+          ::Pdfrb::Document.open(path) do |document|
+            opened = true
+            read_document(document, progress)
+          end
+        rescue *parse_failures, Errno::EINVAL
+          raise if opened
 
-      # A fallback rather than the default path: ordinary documents retain
-      # pdfrb's own block-form open, while a document whose header proves it
-      # uses CR gets a second parse with only line reads adapted. The File
-      # remains the backing store, so neither the PDF nor its streams are
-      # materialised or rewritten.
-      def open_cr_document(path, progress)
-        opened = false
-        File.open(path, "rb") do |file|
-          document = ::Pdfrb::Document.new(io: UniversalLineReader.new(file))
-          opened = true
-          read_document(document, progress)
+          progress.code = OPEN_CODE
         end
-      rescue *parse_failures, Errno::EINVAL
-        raise if opened
 
-        progress.code = OPEN_CODE
-      end
+        # A fallback rather than the default path: ordinary documents retain
+        # pdfrb's own block-form open, while a document whose header proves it
+        # uses CR gets a second parse with only line reads adapted. The File
+        # remains the backing store, so neither the PDF nor its streams are
+        # materialised or rewritten.
+        def open_cr_document(path, progress)
+          opened = false
+          File.open(path, "rb") do |file|
+            document = ::Pdfrb::Document.new(io: UniversalLineReader.new(file))
+            opened = true
+            read_document(document, progress)
+          end
+        rescue *parse_failures, Errno::EINVAL
+          raise if opened
 
-      def cr_terminated_header?(path)
-        prefix = VersionGate.read(path)
-        cr = prefix.index("\r")
-        lf = prefix.index("\n")
-        cr && (!lf || cr < lf)
+          progress.code = OPEN_CODE
+        end
+
+        def cr_terminated_header?(path)
+          prefix = VersionGate.read(path)
+          cr = prefix.index("\r")
+          lf = prefix.index("\n")
+          cr && (!lf || cr < lf)
+        end
       end
+      private_constant :CrDocumentOpening
+      include CrDocumentOpening
 
       # The stages that run once pdfrb has handed the document over. A
       # method of its own so the rescue above covers the open and nothing
