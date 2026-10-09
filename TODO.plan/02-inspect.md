@@ -85,23 +85,19 @@ earlier "200x100 page" described a fixture that was never built.
   blank-looking success. JSON uses lutaml-model `to_json`, and empty
   collections must still serialize as `[]` rather than being omitted —
   lutaml-model drops them by default unless the mapping says otherwise.
-  Dimensions carry whatever D15's sign-off decides; until then do not
-  assert cross-format dimension equality anywhere. `claricle formats` prints the format ×
+  Dimensions follow D15 (settled): numeric values are normalised and
+  cross-format dimension equality is never asserted. `claricle formats` prints the format ×
   operation matrix (human + `--json`). `formats --json` is an array of
   `{"format": "svg", "inspect": true, "conform": false, "convert":
   false, "convert_to": []}` objects, sorted by format — the keys stay fixed across items, so
   03 and 04 flip booleans and fill `convert_to` without reshaping the
   schema. Missing file → exit 2 (runner spec example deferred from 01
   lands here).
-- Registry: `HANDLER_CLASSES` gains the five classes. Each handler file
-  is required **at the top of `registry.rb`**, above the list that
-  names it — item 01 deliberately replaced the original "require from
-  `lib/claricle.rb` before registry" rule, because that made the entry
-  point's ordering load-bearing. The frozen map still derives at load
-  and there is still no autoloading, so a class named but not required
-  is a `NameError` at boot; a handler required but omitted from the list
-  is the silent case, and item 02 catches it by asserting the exact
-  expected format set rather than a self-consistency check. Replace
+- Registry: nothing to list. `registry.rb:8` globs `handlers/*.rb` and
+  `:14` derives `HANDLER_CLASSES` from `Base.subclasses`, so each of the
+  five handlers is one new file. A handler file that is missing is the
+  silent case, and item 02 catches it by asserting the exact expected
+  format set rather than a self-consistency check. Replace
   01's "no handler registered" spec example with
   `from_content("x", format: :unregistered)`.
 
