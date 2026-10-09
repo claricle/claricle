@@ -87,6 +87,26 @@ RSpec.describe "Claricle.convert" do
     end
   end
 
+  it "converts only the file selected by the first pattern expansion" do
+    workspace(["a.emf", emf]) do |dir|
+      first_expansion = true
+      batch = Claricle.const_get(:Batch, false)
+      allow(batch).to receive(:expand).and_wrap_original do |method, *arguments|
+        files = method.call(*arguments)
+        if first_expansion
+          first_expansion = false
+          FileUtils.cp(emf, "b.emf")
+        end
+        files
+      end
+
+      conversion = Claricle.convert("*.emf", to: :svg)
+
+      expect(File.basename(conversion.output_path)).to eq("a.svg")
+      expect(Dir.children(dir).sort).to eq(%w[a.emf a.svg b.emf])
+    end
+  end
+
   it "raises when the source does not exist" do
     workspace do
       expect { Claricle.convert("missing.emf", to: :svg) }
