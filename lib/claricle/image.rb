@@ -48,6 +48,8 @@ module Claricle
         # the caller's IO read `Errno::EBADF` while `io.closed?` still
         # said false.
         name = checked_path(path)
+        raise InvocationError, "#{name.inspect} is a directory, not a file" if File.directory?(name)
+
         new(format: Detector.detect_path(name), path: name)
       end
 

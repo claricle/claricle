@@ -537,6 +537,15 @@ RSpec.describe Claricle::Cli::Runner do
       expect(stream.string).not_to include("Errno")
     end
 
+    it "exits 2 for a directory, naming it as one" do
+      Dir.mktmpdir do |dir|
+        stream = StringIO.new
+
+        expect(described_class.run(["inspect", dir], output: stream)).to eq(2)
+        expect(stream.string).to eq(%(claricle: #{dir.inspect} is a directory, not a file\n))
+      end
+    end
+
     it "exits 3 for bytes it cannot identify" do
       Tempfile.create(["junk", ".bin"]) do |file|
         file.write("not an image at all")
@@ -1015,6 +1024,31 @@ RSpec.describe Claricle::Cli::Runner do
           .to eq(2)
         expect { described_class.run(["convert", "--pattern", "none-*.png"], output: $stderr) }
           .to output(/no files matched "none-\*\.png"/).to_stderr
+      end
+    end
+
+    it "exits 2 for an unknown --to, naming the value" do
+      workspace.call(["a.png", "valid.png"]) do
+        stream = StringIO.new
+
+        expect(described_class.run(%w[convert a.png --to bogus], output: stream)).to eq(2)
+        expect(stream.string).to eq(%(claricle: unknown format "bogus" for --to\n))
+      end
+    end
+
+    it "keeps exit 3 for a known but unsupported --to" do
+      workspace.call(["a.png", "valid.png"]) do
+        expect(described_class.run(%w[convert a.png --to svg], output: StringIO.new)).to eq(3)
+      end
+    end
+
+    it "exits 2 for a directory, naming it as one" do
+      workspace.call do
+        Dir.mkdir("d")
+        stream = StringIO.new
+
+        expect(described_class.run(%w[convert d --to eps], output: stream)).to eq(2)
+        expect(stream.string).to eq(%(claricle: "d" is a directory, not a file\n))
       end
     end
 

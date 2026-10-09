@@ -189,6 +189,9 @@ module Claricle
         given = [*arguments, pattern].compact
         return "no files given" if given.empty?
 
+        directory = arguments.find { |argument| File.directory?(argument) }
+        return "#{directory.inspect} is a directory, not a file" if directory
+
         "no files matched #{given.map(&:inspect).join(", ")}"
       end
     end
