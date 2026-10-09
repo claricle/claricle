@@ -53,10 +53,13 @@ The name reflects what the library is for:
 * `inspect` for EPS and PS -- dimensions from a **concrete bounding box
   declared in the DSC header**, preferring `%%HiResBoundingBox` and
   falling back to `%%BoundingBox`, plus the title, creator, creation
-  date and language level. Only the header is parsed. A box is reported
-  only when the parser reads the same values the file's **first**
-  declaration spells out in DSC syntax. A box that fails that check is
-  discarded rather than guessed at -- the other box, if the file
+  date and language level. Inspection parses a bounded header. When a
+  bounding box is declared as `(atend)`, it also scans the outer document
+  trailer while skipping nested documents and declared data sections. A
+  box is reported only when the parser reads the same values the file's
+  **first** declaration spells out in DSC syntax, or when one unambiguous
+  concrete trailer value resolves `(atend)`. A box that fails that check
+  is discarded rather than guessed at -- the other box, if the file
   declares one, is still used, and dimensions are nil only when neither
   survives. The page count is deliberately not
   reported: the parser fills it in only for the two-argument
@@ -93,14 +96,6 @@ The name reflects what the library is for:
 
 * `inspect` for WMF -- every other format has a handler, so WMF is the
   one that still raises `Claricle::UnsupportedFormat`
-* **`(atend)` bounding boxes for EPS and PS.** The value lives in the
-  trailer, and resolving it needs the nested-document and data-section
-  handling that reading only the header exists to avoid. Such a file
-  inspects as `ok`, and its dimensions come from a concrete
-  `%%HiResBoundingBox` beside it or from nothing at all
-* **CR-only line endings for EPS and PS.** The parser reads no DSC
-  comments from them, so those files inspect as `ok` with no dimensions
-  and no metadata
 * **CR-only line endings for PDF.** A lone `\r` in the xref and trailer
   region leaves the parser reading no trailer at all, so those files
   inspect as `failed` with `pdf.structure_unreadable` rather than `ok`.

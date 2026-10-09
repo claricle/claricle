@@ -619,8 +619,18 @@ module Claricle
           next if key.nil? || seen.key?(key)
 
           seen[key] = true
-          kept << line
+          kept << delegate_line(line)
         end
+      end
+
+      # postscript 0.2.0 recognises LF and CRLF but not DSC's third line
+      # ending, a bare CR. Normalise only that terminator in the small,
+      # filtered copy sent to the delegate; the original bytes still
+      # govern declaration order and validation everywhere else.
+      def self.delegate_line(line)
+        return line unless line.end_with?("\r")
+
+        "#{line.delete_suffix("\r")}\n"
       end
 
       # What `line` would occupy in the filtered header, or nil for a
@@ -642,6 +652,10 @@ module Claricle
         text = first_text(source, name)
         return nil unless text
 
+        parsed_declaration(text, name)
+      end
+
+      def self.parsed_declaration(text, name)
         operands = DscNumbers::GRAMMARS.fetch(name).match(text)
         return nil unless operands
 
@@ -649,7 +663,273 @@ module Claricle
       end
     end
 
-    private_constant :Dsc, :DscHeader, :DscKeywords, :DscNumbers, :HeaderScanner
+    # A bounded-memory reader for DSC's CR, LF and CRLF-delimited lines.
+    # It also exposes exact byte/line skips for DSC data sections, whose
+    # payload may contain arbitrary bytes that resemble structuring comments.
+    class DscStream
+      # DSC comments top out at 255 characters. Extra room tolerates a
+      # non-DSC body line without letting one unterminated line grow with
+      # the file.
+      MAX_LINE_BYTES = 1024
+
+      def initialize(source, offset:, length:, chunk_bytes:)
+        @source = source
+        @cursor = offset
+        @remaining = length
+        @chunk_bytes = chunk_bytes
+        @buffer = +"".b
+        @discarding = false
+        @source.seek(offset) if @source.respond_to?(:read)
+      end
+
+      def next_line
+        loop do
+          ending = @buffer.index(Dsc::LINE_BREAK)
+          return extract_line(ending) if ending
+          return final_line unless fill?
+
+          discard_long_line if @buffer.bytesize > MAX_LINE_BYTES
+        end
+      end
+
+      def skip_bytes(count)
+        buffered = [count, @buffer.bytesize].min
+        @buffer.slice!(0, buffered)
+        skip_source(count - buffered)
+      end
+
+      def skip_lines(count)
+        count.times { break unless next_line }
+      end
+
+      private
+
+      def extract_line(ending)
+        fill? if pending_cr?(ending)
+        line = @buffer.slice!(0, line_end(ending))
+        return line unless @discarding
+
+        @discarding = false
+        +"".b
+      end
+
+      def fill?
+        return false if @remaining.zero?
+
+        bytes = source_bytes
+        if bytes.nil? || bytes.empty?
+          @remaining = 0
+          return false
+        end
+
+        @cursor += bytes.bytesize
+        @remaining -= bytes.bytesize
+        @buffer << bytes
+        true
+      end
+
+      def source_bytes
+        amount = [@chunk_bytes, @remaining].min
+        return @source.read(amount) if @source.respond_to?(:read)
+
+        @source.byteslice(@cursor, amount)
+      end
+
+      def pending_cr?(ending)
+        @buffer.getbyte(ending) == 13 && ending + 1 == @buffer.bytesize && @remaining.positive?
+      end
+
+      def line_end(ending)
+        crlf = @buffer.getbyte(ending) == 13 && @buffer.getbyte(ending + 1) == 10
+        ending + (crlf ? 2 : 1)
+      end
+
+      def final_line
+        if @discarding
+          @buffer.clear
+          @discarding = false
+          return +"".b
+        end
+        return nil if @buffer.empty?
+
+        @buffer.slice!(0, @buffer.bytesize)
+      end
+
+      def discard_long_line
+        @buffer.clear
+        @discarding = true
+      end
+
+      def skip_source(count)
+        amount = [count, @remaining].min
+        if @source.respond_to?(:read)
+          @source.seek(amount, IO::SEEK_CUR)
+        else
+          @cursor += amount
+        end
+        @remaining -= amount
+      end
+    end
+
+    # Resolves box comments deferred with `(atend)` from the outer
+    # document trailer. Nested documents and declared data payloads are
+    # opaque, so comment-shaped bytes inside them never become metadata.
+    module DscTrailer
+      TRAILER = /\A%%Trailer[ \t]*(?:\r\n|\r|\n|\z)/
+      EOF_COMMENT = /\A%%EOF[ \t]*(?:\r\n|\r|\n|\z)/
+      BEGIN_DOCUMENT = /\A%%BeginDocument:/
+      END_DOCUMENT = /\A%%EndDocument[ \t]*(?:\r\n|\r|\n|\z)/
+      BEGIN_BINARY = /\A%%BeginBinary:[ \t]*(\d+)[ \t]*(?:\r\n|\r|\n|\z)/
+      BEGIN_DATA = /\A%%BeginData:[ \t]*(\d+)(?:[ \t]+(?:Binary|ASCII|Hex))?[ \t]+(Bytes|Lines)[ \t]*(?:\r\n|\r|\n|\z)/
+
+      class Scanner
+        def initialize(stream)
+          @stream = stream
+          @declarations = Hash.new { |hash, key| hash[key] = [] }
+          @depth = 0
+          @trailer = false
+          @done = false
+        end
+
+        def scan
+          until @done
+            line = @stream.next_line
+            break unless line
+
+            consume(line)
+          end
+          @declarations
+        end
+
+        private
+
+        def consume(line)
+          return if skip_payload?(line)
+          return @depth += 1 if BEGIN_DOCUMENT.match?(line)
+          return @depth -= 1 if END_DOCUMENT.match?(line) && @depth.positive?
+          return if @depth.positive?
+
+          consume_outer(line)
+        end
+
+        def consume_outer(line)
+          @trailer = true if TRAILER.match?(line)
+          @done = @trailer && EOF_COMMENT.match?(line)
+          collect(line) if @trailer && !@done
+        end
+
+        def skip_payload?(line)
+          if (match = BEGIN_BINARY.match(line))
+            @stream.skip_bytes(Integer(match[1], 10))
+          elsif (match = BEGIN_DATA.match(line))
+            skip_data(match)
+          else
+            return false
+          end
+          true
+        end
+
+        def skip_data(match)
+          count = Integer(match[1], 10)
+          return @stream.skip_bytes(count) if match[2] == "Bytes"
+
+          @stream.skip_lines(count)
+        end
+
+        def collect(line)
+          %w[BoundingBox HiResBoundingBox].each do |name|
+            next unless Dsc.declares?(line, name)
+
+            @declarations[name] << Dsc.trim(line.delete_prefix("%%#{name}:"))
+          end
+        end
+      end
+
+      private_constant :Scanner
+
+      def self.boxes(raw, signature, chunk_bytes)
+        range = postscript_range(raw, signature)
+        return {} unless range
+
+        stream = DscStream.new(raw, offset: range.first, length: range.last, chunk_bytes: chunk_bytes)
+        declarations = Scanner.new(stream).scan
+        declarations.to_h do |name, values|
+          unique = values.uniq
+          [name, unique.one? ? Dsc.parsed_declaration(unique.first, name) : nil]
+        end.compact
+      end
+
+      def self.postscript_range(raw, signature)
+        size = raw.respond_to?(:read) ? raw.size : raw.bytesize
+        first = if raw.respond_to?(:read)
+                  raw.seek(0)
+                  raw.read([30, size].min) || "".b
+                else
+                  raw.byteslice(0, [30, size].min)
+                end
+        return [0, size] if first.start_with?(signature)
+
+        EpsBinary.postscript_range(first, size)
+      end
+    end
+
+    # Coordinates the extra reads and box validation needed by inspection,
+    # leaving the handler responsible for building the public result.
+    module PostscriptInspection
+      def self.source(image, signature, probe_bytes, scan_limit, box_names)
+        settings = { signature:, probe_bytes:, box_names: }
+        image.with_source do |raw|
+          header = DscHeader.signed_header(raw, signature, probe_bytes, scan_limit)
+          next [nil, nil, {}] unless header
+
+          bytes, truncated = header
+          [bytes, truncated, trailer_boxes(raw, bytes, truncated, settings)]
+        end
+      end
+
+      def self.filtered(source, field_comments)
+        Dsc.filter(source, field_comments)
+      end
+
+      def self.boxes(header, source, trailer_boxes, box_comments)
+        box_comments.to_h do |key, name|
+          [key, box(header, source, key, name, trailer_boxes[name])]
+        end
+      end
+
+      def self.trailer_boxes(raw, source, truncated, settings)
+        return {} if truncated || !deferred?(source, settings[:box_names])
+
+        DscTrailer.boxes(raw, settings[:signature], settings[:probe_bytes])
+      end
+
+      def self.deferred?(source, names)
+        names.any? { |name| Dsc.first_text(source, name) == "(atend)" }
+      end
+
+      def self.box(header, source, key, name, trailer_box)
+        return deferred_box(source, name, trailer_box) if Dsc.first_text(source, name) == "(atend)"
+
+        direct_box(header, source, key, name)
+      end
+
+      def self.deferred_box(source, name, trailer_box)
+        return nil unless Dsc.settled?(source, name)
+
+        trailer_box
+      end
+
+      def self.direct_box(header, source, key, name)
+        declared = header.public_send(key)
+        return nil unless declared.is_a?(Array) && Dsc.settled?(source, name)
+        return nil unless Dsc.declaration(source, name) == declared
+
+        declared
+      end
+    end
+
+    private_constant :Dsc, :DscHeader, :DscKeywords, :DscNumbers, :DscStream, :DscTrailer,
+                     :HeaderScanner, :PostscriptInspection
 
     # The conversion path's own pieces, kept out of Postscript's body for
     # the same reason Handlers::Metafile's own MetafileConvert is: that
@@ -871,9 +1151,9 @@ module Claricle
       # `with_source` instead, the same reader `Handlers::Svg` uses for
       # the same reason.
       def inspection(image)
-        source, truncated = image.with_source do |raw|
-          DscHeader.signed_header(raw, SIGNATURE, HEADER_PROBE_BYTES, HEADER_LIMIT_BYTES)
-        end
+        source, truncated, trailer_boxes = PostscriptInspection.source(
+          image, SIGNATURE, HEADER_PROBE_BYTES, HEADER_LIMIT_BYTES, BOX_COMMENTS.values
+        )
         # A truncated header has only been seen as a PREFIX -- see
         # HeaderScanner#truncated? -- so `settled?`/`disputed?`/`continued?`
         # below cannot be trusted to have seen the whole document.
@@ -882,7 +1162,7 @@ module Claricle
         header = read_header(source)
         return unreadable(image) unless header
 
-        readable(image, header, source)
+        readable(image, header, source, trailer_boxes)
       end
 
       # The target guard, the delegate call and the `Models::Conversion`
@@ -897,14 +1177,14 @@ module Claricle
         require "postscript"
 
         begin
-          ::Postscript.parse(Dsc.filter(source, FIELD_COMMENTS)).header
+          ::Postscript.parse(PostscriptInspection.filtered(source, FIELD_COMMENTS)).header
         rescue ::Postscript::ParseError
           nil
         end
       end
 
-      def readable(image, header, source)
-        boxes = BOX_COMMENTS.to_h { |key, name| [key, box(header, source, key, name)] }
+      def readable(image, header, source, trailer_boxes)
+        boxes = PostscriptInspection.boxes(header, source, trailer_boxes, BOX_COMMENTS)
         spans = usable_spans(boxes)
 
         Models::Inspection.new(
@@ -939,45 +1219,6 @@ module Claricle
         [boxes["hires_bounding_box"], boxes["bounding_box"]]
           .filter_map { |box| spans(box) }
           .first
-      end
-
-      # A box is published only when the delegate's four Floats match the
-      # four operands of the FIRST declaration in the header, each of
-      # which is well-formed in its own comment's grammar -- integers for
-      # `%%BoundingBox`, reals for `%%HiResBoundingBox`.
-      #
-      # Two rules meet here. The delegate's numbers cannot be trusted on
-      # their own, because its grammar fabricates finite values out of
-      # lexemes like `e` -- so they must match the operands of the first
-      # declaration, each well-formed in that grammar. And a header that
-      # declares the box twice, disagreeing with itself, has not stated
-      # one rectangle, so `disputed?` refuses it rather than picking.
-      #
-      # `Dsc.filter` hands the delegate only the first declaration, so
-      # the value here can only have come from that one. It used to be
-      # the equality check that established this, by catching 0.2.0's
-      # last-wins value disagreeing -- but that held only for repeats
-      # 0.2.0 recognises, and it cost the delegate every repeated line.
-      #
-      # `%%BoundingBox: (atend)` defers to the trailer. It is valid, so
-      # it is simply unresolved here -- a concrete `%%HiResBoundingBox`
-      # beside it still supplies the dimensions, and with no concrete box
-      # at all they are nil while the header is still `"ok"`. Searching
-      # the trailer would need the nested-document and data-section
-      # handling this slice exists to avoid.
-      def box(header, source, key, name)
-        declared = header.public_send(key)
-        return nil unless declared.is_a?(Array)
-        # DSC allows `%%+` after ANY structuring comment, boxes included,
-        # and a header may declare the box twice. Neither leaves one
-        # rectangle stated: 0.2.0 keeps only a continued box's first
-        # fragment, and a repeat that disagrees states two.
-        return nil unless Dsc.settled?(source, name)
-
-        operands = Dsc.declaration(source, name)
-        return nil unless operands == declared
-
-        declared
       end
 
       # `[width, height]`, or nil when either cannot be computed.
