@@ -180,6 +180,26 @@ RSpec.describe "svg -> eps/ps fidelity repairs" do
     end
   end
 
+  # The root svg's overflow is `visible` (SVG's UA stylesheet only hides it on
+  # `svg:not(:root)`), so the output keeps content past the viewport and sizes
+  # the page around it. Pinned: a clip here would contradict that rule.
+  describe "content outside the root viewport" do
+    def box_of(source) = ConvertSemantics.extent(shapes(source).first.points)
+
+    [
+      ['width="100" height="50"', [80, 10, 60, 20], [80.0, 20.0, 140.0, 40.0]],
+      ['width="100" height="50"', [-30, 10, 60, 20], [-30.0, 20.0, 30.0, 40.0]],
+      ['width="100" height="100" viewBox="0 0 200 100"', [150, 10, 100, 20], [75.0, 60.0, 125.0, 70.0]]
+    ].each do |root, rect, expected|
+      it "paints #{rect.inspect} unclipped inside #{root}" do
+        x, y, width, height = rect
+        source = svg(%(<rect x="#{x}" y="#{y}" width="#{width}" height="#{height}"/>), root: root)
+
+        expect(box_of(source)).to eq(expected)
+      end
+    end
+  end
+
   describe "the lossiness verdict" do
     let(:shifted) { svg(%(<rect width="5" height="5"/>), root: 'width="100" height="100" viewBox="10 10 100 100"') }
 
@@ -195,6 +215,38 @@ RSpec.describe "svg -> eps/ps fidelity repairs" do
 
     it "stays lossless for the same SVG once it is readable" do
       expect(verdict(shifted)).to eq("lossless")
+    end
+
+    {
+      "zero viewBox width" => 'viewBox="0 0 0 100"',
+      "negative viewBox width" => 'viewBox="0 0 -200 100"',
+      "zero viewBox height" => 'viewBox="0 0 200 0"',
+      "negative viewBox height" => 'viewBox="0 0 200 -100"'
+    }.each do |name, root|
+      it "is not lossless for a #{name}, which disables rendering" do
+        source = svg(%(<rect width="5" height="5"/>), root: %(width="100" height="50" #{root}))
+
+        expect(verdict(source)).not_to eq("lossless")
+      end
+    end
+
+    {
+      "preserveAspectRatio none" => 'viewBox="0 0 200 100" preserveAspectRatio="none"',
+      "preserveAspectRatio slice" => 'viewBox="0 0 200 100" preserveAspectRatio="xMinYMin slice"',
+      "preserveAspectRatio meet" => 'viewBox="0 0 200 100" preserveAspectRatio="xMinYMin meet"',
+      "a percentage size" => 'width="50%" height="50%" viewBox="0 0 200 100"',
+      "a mm size" => 'width="100mm" height="50mm" viewBox="0 0 200 100"',
+      "an em size" => 'width="10em" height="5em" viewBox="0 0 200 100"'
+    }.each do |name, root|
+      it "is not lossless for #{name}, which the scaling does not model" do
+        expect(verdict(svg(%(<rect width="5" height="5"/>), root: root))).not_to eq("lossless")
+      end
+    end
+
+    it "is not lossless for a nested svg, which postsvg does not place" do
+      nested = svg(%(<svg x="50" width="100" height="50" viewBox="0 0 200 100"><rect width="5" height="5"/></svg>))
+
+      expect(verdict(nested)).not_to eq("lossless")
     end
 
     {

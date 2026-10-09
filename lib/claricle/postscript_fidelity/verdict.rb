@@ -14,7 +14,14 @@ module Claricle
         lossiness = Lossiness.classify(source_format: source_format, target_format: target, source: svg)
         return lossiness unless lossiness == "lossless" && POSTSCRIPT_TARGETS.include?(target)
 
-        repairable?(svg) ? lossiness : "unknown"
+        repairable?(svg) && renderable?(svg) ? lossiness : "unknown"
+      end
+
+      # A viewBox with no area disables rendering, so nothing it draws is right.
+      def renderable?(svg)
+        text = Detector.read_root(svg)&.last&.fetch("viewBox", nil)
+        box = ViewBox.parse(text)
+        text.nil? || box.nil? || box.last(2).all?(&:positive?)
       end
 
       def repairable?(svg)
