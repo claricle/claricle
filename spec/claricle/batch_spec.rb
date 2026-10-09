@@ -153,6 +153,13 @@ RSpec.describe "Claricle::Batch" do
       end
     end
 
+    it "reports a lone metacharacter-free positional that names nothing as no match" do
+      tree do
+        expect { run(batch, %w[missing.png], classify: clean, &report) }
+          .to raise_error(Claricle::InvocationError, /no files matched "missing\.png"/)
+      end
+    end
+
     it "keeps a glob that matches nothing quiet while other arguments match" do
       tree do
         File.write("a.png", "x")
