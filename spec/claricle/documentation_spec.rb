@@ -516,6 +516,11 @@ RSpec.describe "the documentation" do
       expect(urls).to all(start_with("https://github.com/claricle/claricle"))
     end
 
+    it "links changelog metadata to the release history" do
+      expect(spec.metadata["changelog_uri"])
+        .to eq("https://github.com/claricle/claricle/releases")
+    end
+
     # Any bare uppercase token, so an added BMP or AVIF fails rather than
     # going unnoticed by a fixed alternation.
     it "names every format detection supports, and no others" do
