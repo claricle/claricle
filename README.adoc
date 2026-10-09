@@ -96,10 +96,6 @@ The name reflects what the library is for:
 
 * `inspect` for WMF -- every other format has a handler, so WMF is the
   one that still raises `Claricle::UnsupportedFormat`
-* **CR-only line endings for PDF.** A lone `\r` in the xref and trailer
-  region leaves the parser reading no trailer at all, so those files
-  inspect as `failed` with `pdf.structure_unreadable` rather than `ok`.
-  Most common in PDFs produced by macOS and Quartz
 * **A memory bound for PDF.** The five second deadline bounds TIME only.
   A small crafted file can still make the parser build a very large
   string before the clock fires -- measured, a 190 KB file whose object

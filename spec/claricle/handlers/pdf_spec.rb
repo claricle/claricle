@@ -481,6 +481,26 @@ RSpec.describe "Claricle PDF handler" do
       expect(inspection.issues).to be_empty
     end
 
+    it "reports the same metadata for a structurally valid CR-only PDF" do
+      path = raw_pdf(PdfBuilder.document.gsub("\n", "\r"))
+
+      inspection = inspect_pdf(path)
+
+      expect(inspection.parse_status).to eq("ok")
+      expect(inspection.meta).to eq("version" => "1.4", "pages" => 1)
+      expect(inspection.issues).to be_empty
+    end
+
+    it "still refuses a structurally malformed CR-only PDF" do
+      path = raw_pdf(PdfBuilder.document(startxref: 999_999).gsub("\n", "\r"))
+
+      inspection = inspect_pdf(path)
+
+      expect(inspection.parse_status).to eq("failed")
+      expect(inspection.meta).to be_nil
+      expect(inspection.issues.map(&:code)).to eq(["pdf.unreadable"])
+    end
+
     # 1.4 is what the delegate FABRICATES for an unreadable header, so the
     # baseline alone cannot tell a reading from the default.
     it "reads the declared version rather than the delegate's default" do
@@ -1552,11 +1572,18 @@ RSpec.describe "Claricle PDF handler" do
   # has been missed twice already, once for the four `*_CODE` constants
   # and once for `VERSION_TOKEN` when the version comparison landed.
   it "keeps its helpers and its tuning constants private" do
-    %i[VersionGate Resolver MetadataGate Progress DEADLINE_SECONDS HEADER_SCAN_BYTES
+    %i[VersionGate CrDocumentOpening Resolver MetadataGate Progress DEADLINE_SECONDS HEADER_SCAN_BYTES
        MAX_PAGE_COUNT MESSAGES VERSION_TOKEN HEADER_CODE OPEN_CODE STRUCTURE_CODE TIMEOUT_CODE]
       .each { |name| expect(pdf_class.const_get(name, false)).not_to be_nil, name.to_s }
 
     expect(pdf_class.constants(false)).to be_empty
+  end
+
+  it "keeps the CR line reader private to the handlers namespace" do
+    handlers = Claricle.const_get(:Handlers)
+
+    expect(handlers.const_get(:UniversalLineReader, false)).not_to be_nil
+    expect(handlers.constants(false)).not_to include(:UniversalLineReader)
   end
 
   # The fixtures are the evidence for every example above, so a typo in
