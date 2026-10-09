@@ -148,4 +148,62 @@ RSpec.describe "svg -> eps/ps fidelity repairs" do
         .to eq(["gsave", "10 20 translate", "1 -1 scale", "0 0 moveto", "(Hi \\(a\\)) show", "grestore"])
     end
   end
+
+  describe "a width/height that differs from the viewBox" do
+    let(:rect) { %(<rect x="20" y="10" width="40" height="20"/>) }
+
+    def box_of(source) = ConvertSemantics.extent(shapes(source).first.points)
+
+    {
+      'width="100" height="100" viewBox="0 0 200 100"' => [10.0, 60.0, 30.0, 70.0],
+      'width="100px" height="100px" viewBox="0 0 200 100"' => [10.0, 60.0, 30.0, 70.0],
+      'width="50" height="50" viewBox="0 0 100 100"' => [10.0, 35.0, 30.0, 45.0],
+      'width="100" viewBox="0 0 200 100"' => [10.0, 35.0, 30.0, 45.0],
+      'width="200" height="50" viewBox="0 0 100 100"' => [85.0, 35.0, 105.0, 45.0],
+      'width="100" height="100" viewBox="50 0 200 100"' => [-15.0, 60.0, 5.0, 70.0]
+    }.each do |root, expected|
+      it "paints the rect where #{root} puts it" do
+        expect(box_of(svg(rect, root: root))).to eq(expected)
+      end
+    end
+
+    it "sizes the page to width and height" do
+      source = svg(rect, root: 'width="100" height="100" viewBox="0 0 200 100"')
+
+      expect(postscript(source).lines.grep(/BoundingBox/)).to eq(["%%BoundingBox: 0 0 100 100\n"])
+    end
+
+    it "leaves a viewBox that already is the viewport unscaled" do
+      source = svg(rect, root: 'width="200" height="100" viewBox="0 0 200 100"')
+
+      expect(box_of(source)).to eq([20.0, 70.0, 60.0, 90.0])
+    end
+  end
+
+  describe "the lossiness verdict" do
+    let(:shifted) { svg(%(<rect width="5" height="5"/>), root: 'width="100" height="100" viewBox="10 10 100 100"') }
+
+    def verdict(source, target = :eps)
+      Claricle::Image.from_content(source, format: :svg).convert(to: target).lossiness
+    end
+
+    it "is not lossless for an SVG the repair could not read" do
+      declared = "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n#{shifted}"
+
+      expect(%i[eps ps].map { |target| verdict(declared, target) }).to eq(%w[unknown unknown])
+    end
+
+    it "stays lossless for the same SVG once it is readable" do
+      expect(verdict(shifted)).to eq("lossless")
+    end
+
+    {
+      "text-anchor" => %(<text x="50" y="20" text-anchor="middle">Hi</text>),
+      "tspan x/y" => %(<text x="5" y="20">A<tspan x="50" y="40">B</tspan></text>)
+    }.each do |name, body|
+      it "is not lossless for #{name}, which postsvg drops" do
+        expect(verdict(svg(body))).not_to eq("lossless")
+      end
+    end
+  end
 end

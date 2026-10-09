@@ -26,6 +26,36 @@ module Claricle
         Float(height[1]) if height
       end
 
+      # [width, height, scale, dx, dy] mapping the viewBox into the width/height
+      # viewport (preserveAspectRatio's default, xMidYMid meet), or nil when
+      # the viewBox already is the viewport.
+      def fit(svg)
+        attributes = Detector.read_root(svg)&.last or return
+        box = parse(attributes["viewBox"])
+        return unless box && box[2].positive? && box[3].positive?
+
+        width, height = viewport(attributes, box)
+        place(width, height, box) unless [width, height] == box[2, 2]
+      end
+
+      def place(width, height, box)
+        scale = [width / box[2], height / box[3]].min
+        [width, height, scale, *[width - (scale * box[2]), height - (scale * box[3])].map { |slack| slack / 2 }]
+      end
+
+      # A missing width or height follows the viewBox's aspect ratio.
+      def viewport(attributes, box)
+        width, height = %w[width height].map { |name| length(attributes[name]) }
+        width ||= height ? height * box[2] / box[3] : box[2]
+        [width, height || (width * box[3] / box[2])]
+      end
+
+      def length(text)
+        match = PostscriptFidelity::LENGTH.match(text.to_s)
+        Float(match[1]) if match
+      end
+      private_class_method :place, :viewport, :length
+
       # The origin the delegate was NOT shown: `rebase_origin?` zeroed it, so `orient` must shift by it.
       def rebased_origin(original, fixed)
         before = root(original)
