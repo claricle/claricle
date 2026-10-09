@@ -208,6 +208,8 @@ module Claricle
 
   def self.resolved_to_target(to, output)
     target = to.to_s.downcase.to_sym
+    raise InvocationError, "unknown format #{to.to_s.inspect} for --to" unless Registry.formats.include?(target)
+
     check_to_output_conflict(target, output)
     target
   end
