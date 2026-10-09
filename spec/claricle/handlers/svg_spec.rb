@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "English"
 require "open3"
 # The DOM parser. `inspection` never loads it -- it reads a bounded root
 # prefix -- but `conformance_report` does (svg.rb requires rexml/document
