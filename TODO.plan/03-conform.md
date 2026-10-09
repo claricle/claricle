@@ -54,14 +54,13 @@ coordinates:
   "Valid PDF" and "valid PDF/A" are different claims, and so are
   "well-formed SVG" and "SVG that satisfies the RFC colour rules".
   Neither is silently substituted for the other.
-- **Arlington is not delivered in v1.** Released pdfrb exposes
-  `Arlington::Loader` (`list_object_names`, `object_definition`),
-  `Predicate`, `ObjectDefinition`, `FieldDefinition` — the grammar, not
-  a validator. No `Conformance` profile references it. Driving those
-  predicates across a document is a validator we would be writing, not
-  a delegate call. Issue #1 asks for Arlington, so this omission is the
-  one part of D16 that needs the author's sign-off. Say it plainly in
-  the README rather than letting "conform" imply it.
+- **Arlington is delivered by Claricle's document walk.** Released pdfrb
+  exposes `Arlington::Loader`, predicates and definitions — the grammar,
+  not a runner. `Handlers::PdfArlington` supplies the missing walk from
+  the Catalog down and maps required-key, type and enumerated-name
+  findings into Claricle issues (#55). Generic PDF conformance combines
+  those findings with the structural validator; named profiles remain
+  opt-in.
 - **`conform` still means different things per format, so say so.**
   PNG gets chunk-level validation, SVG the `base` requirement set, EMF
   a parse plus `ok?`, PDF a structural check. Those are not comparable
@@ -173,18 +172,21 @@ so no commit declares a capability the CLI can't yet deliver.
 
 ## Done when
 
-- `Claricle.conform?` correct for png, svg, emf and pdf, both call
-  shapes; eps/ps raise `UnsupportedFormat` per D22.
-- Invalid fixture of each format yields a `Report` with populated,
-  correctly-mapped issues; exit codes verified end-to-end.
-- Batch glob over mixed formats returns highest-code exit and a
+- [x] `Claricle.conform?` correct for png, svg, emf and pdf, both call
+  shapes; eps/ps raise `UnsupportedFormat` per D22 (`module_api_spec.rb:39,49`).
+- [x] Invalid fixture of each format yields a `Report` with populated,
+  correctly-mapped issues; exit codes verified end-to-end. png, svg, pdf
+  (`cli_spec.rb`); invalid EMF exits 1 with its `emf.record_framing` error
+  line (`cli_spec.rb:804`, #71).
+- [x] Batch glob over mixed formats returns highest-code exit and a
   positionally complete JSON array of `BatchItem`, failures included.
-- A single-file failure emits the same JSON envelope as a batch one.
-- Exit code 4 is reached end-to-end. A corrupt-but-recognised fixture
+- [x] A single-file failure emits the same JSON envelope as a batch one.
+- [x] Exit code 4 is reached end-to-end. A corrupt-but-recognised fixture
   exits 1 for png, svg, emf and pdf; eps and ps exit 3 regardless of
-  content (D22).
-- `formats` now reports conform, and its spec says so.
-- Full Pre-Push Review Chain passed.
+  content (D22). Exit 4 comes from a real faulting handler run through
+  the real executable (`cli_spec.rb:765`, `boom.rb`, #63).
+- [x] `formats` now reports conform, and its spec says so.
+- ~~Full Pre-Push Review Chain passed.~~ Superseded: Hassan 2026-10-09 requires TDD, only changed specs, and green GHA; no extra review chain.
 
 ## Files
 

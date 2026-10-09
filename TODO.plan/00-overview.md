@@ -3,6 +3,8 @@
 **Date**: 2026-08-11. Restructured from the reviewed single-file plan
 (git history: `docs/plans/issue-1-unified-library.md`, removed in this
 restructure — these files are self-contained).
+**Status**: complete as of 2026-10-09. Every acceptance item below is
+implemented or covered by a signed-off scope decision.
 **Goal**: turn `claricle` from a placeholder shim into the real umbrella
 library for issue #1 — one Ruby API and one CLI providing **inspect**,
 **conformance check**, and **conversion** over PNG, SVG, EMF/WMF, PS/EPS,
@@ -41,13 +43,14 @@ flowchart TD
     HPDF -.-> MOD
 ```
 
-Every handler is a plain subclass declaring its formats once; the
-registry derives a frozen map from one class list. Adding a format costs
-one handler class, one `require_relative` for it in `registry.rb` —
-there is no autoloading — one entry in `Registry::HANDLER_CLASSES`, one
-probe in the detector — detection is a hand-rolled sequence, not a
-per-handler sniffer — and, for an inbound conversion, an entry in the
-source handler's target list together with its feature-loss rules.
+Every handler is a plain subclass declaring its formats once. As built,
+`registry.rb` loads every file in `handlers/` and derives
+`HANDLER_CLASSES` from `Base.subclasses`, so adding a format costs ONE
+file: a handler class that declares its formats, its `detect` block and,
+for an inbound conversion, its target list and feature-loss rules. (The
+original design here — a `require_relative`, a list entry and a detector
+probe per format — was replaced; `spec/claricle/one_class_per_format_spec.rb`
+proves the one-file claim in a fresh process.)
 
 ## Item topology
 
@@ -65,12 +68,12 @@ flowchart LR
     SO -. D11 .-> I04
 ```
 
-## Decision gates
+## Decision record
 
 No decision blocks implementation — all twenty-four are settled. Items
 run in sequence for the ordinary reason that each builds on the last.
 
-The seven reported narrowings are posted to issue #1 for visibility. If
+The six reported narrowings are posted to issue #1 for visibility. If
 the author objects to one, the affected item is revisited then; we do
 not hold work waiting for a response to a report.
 
@@ -85,7 +88,7 @@ not hold work waiting for a response to a report.
 
 ## Contracts falsified by execution (2026-08-12)
 
-Adversarial Claude+Codex rounds ran the delegates instead of reading
+Adversarial execution rounds ran the delegates instead of reading
 them. Ten "verified" facts in earlier drafts were false. They are
 recorded because the plan asserted each one confidently, and the same
 mistake is easy to repeat. The pattern is always the same: reading
@@ -99,7 +102,7 @@ agreed with reading, and only running the thing disagreed.
 | svg_conform's `type` carries severity | `ErrorTracker#add_error` hardcodes `type: :error` and keeps real severity in a separate field. Mapping from `type` flattens info and warning into error |
 | A 4096-byte binary `<svg` regex is XML-tolerant | vectory accepts UTF-16LE+BOM, `<s:svg>` prefixed roots, internal DTD subsets, and a root at byte 5028. The regex matched none of the last three |
 | SVG→EMF is the lossy direction (emfsvg "lossy matcher") | That phrase describes a 0.1px **comparison tolerance**, not a lossy direction. Issue #1 names EMF→SVG as the one that drops semantics |
-| `postscript` and `pdfrb` are not installable here | Both install cleanly (`pdfrb` 0.7.10, `postscript` 0.2.0). The earlier draft confused "absent from every local gemset" with "unavailable" and built a blocking gate on it |
+| `postscript` and `pdfrb` are not installable here | Both install cleanly (`pdfrb` 0.7.10, `postscript` 0.2.0). The earlier draft confused "absent from every local gemset" with "unavailable" and treated it as blocking |
 | `libpng` is unused, no v1 operation needs it | `vectory → emfsvg → libpng ~> 1.6`, and emfsvg uses it for embedded images in SVG→EMF. It is a live transitive dependency. Only Claricle's **direct** dependency is redundant |
 | vectory's own round-trip specs are semantic | vectory 0.12.0 has no A→B→A suite at all — only one-way conversion and reference tests, some checking little more than a format signature. The claim was invented |
 | Ruby floor 3.2 comes from pdfrb (asserted, unverified) | Only the delegate fact was true: confirmed 2026-08-13, `pdfrb` 0.7.10 requires `>= 3.2.0`; every other delegate tops out at 3.1 (`emf`, `svg_conform`, `vectory`, `emfsvg` 3.1; `lutaml-model`, `png_conform`, `postscript` 3.0). That establishes the highest delegate minimum, not Claricle's deliberate 3.3 project floor |
@@ -176,7 +179,7 @@ A delegate version bump invalidates this section until it is re-run.
 | pdfrb profiles | `Conformance::PdfA.validate(doc, level: :a1b)` → `ValidationResult`. Read violations through **`.violations`** (or `.errors`/`.warnings`/`.infos`/`.violation_count`/`.passed?`), never by enumerating the result — see the trap below. Each is a `Violation` struct `{rule_id, message, object, severity, spec_clause}` plus `error?`/`warning?`, e.g. `6.1-2 "PDF/A requires /Catalog/Metadata XMP stream"`, severity `:error`. `PdfUA.validate(doc)` takes no level. Fully usable |
 | **`ValidationResult` is Enumerable over its struct members, not its violations** | Measured on both 0.7.10 and 0.7.23: it is a keyword-init `Struct` including `Enumerable` with members `profile` and `violations`, so `result.size` is **2**, `result.first` is the String `"PDF/A-1"`, and `result.map(&:class)` is `[String, Array]`. On the fixture used, `size` happened to equal `violation_count`, so a naive `.size` looks right and is wrong everywhere else. Use `.violations` |
 | pdfrb version drift | The contracts above were first measured on **0.7.10**; a clean `bundle install` under `~> 0.7.x` now resolves **0.7.23**. Re-measured on 0.7.23: `Document.open`, `Validator.validate` → `[]`, the catalog-less `Pdfrb::Error`, the `Violation` shape, and the silent fallback on an invalid `level:` all still hold. Two changes: the standards list gained `PdfA4Deep`, `PdfUA2Deep`, `PdfUATaggingDeep` and `StructureElements`, and **`Pades` now takes `level:`** as well as `PdfA`/`PdfX`/`PdfVT`. `VeraPdfBridge.validate` takes `(pdf_bytes, profile:)` — bytes, not a document. Ruby floor is still `>= 3.2.0` |
-| pdfrb Arlington | `Arlington::Loader` offers only `list_object_names`, `object_definition`, `clear_cache!`. No document runner, and no `Conformance` profile references it |
+| pdfrb Arlington | `Arlington::Loader` offers only `list_object_names`, `object_definition`, `clear_cache!`. No upstream document runner or `Conformance` profile references it; Claricle now supplies the document walk described by D16 |
 
 **What the delegates' conformance checks actually catch**
 
@@ -282,9 +285,9 @@ property is fixture-specific and collapses on real content, as the
 idempotence section above shows. Determinism is the only round-trip
 property measured to hold generally.
 
-## Delegate verification gate — RUN 2026-08-13
+## Delegate verification record — RUN 2026-08-13
 
-The gate is no longer blocking. Both previously-unverified delegates were
+Both previously-unverified delegates were
 installed and inspected. Findings:
 
 - **`postscript` 0.2.0**, Ruby `>= 3.0`. Entry points `Postscript.parse`
@@ -300,27 +303,27 @@ installed and inspected. Findings:
   `Conformance` ships named standards: `PdfA` (A1–A4), `PdfUA`, `PdfX`,
   `PdfVT`, `Pades`, `Ltv`, `Pdf2AF`, `TaggedPdf`, plus `Rule`,
   `RuleSet`, `ValidationResult`, `Violation` and a `VeraPdfBridge`.
-- **No general Arlington document runner exists.** `Pdfrb::Arlington`
+- **No upstream Arlington document runner exists.** `Pdfrb::Arlington`
   ships `Loader`, `Predicate`, `ObjectDefinition`, `FieldDefinition`,
   `Type`, `PdfVersion`, but `Arlington::Loader` offers only
   `list_object_names` and `object_definition` — it loads the grammar,
   it does not validate a document against it. No `Conformance` profile
-  references Arlington. Driving those predicates over a document is
-  work we would be writing ourselves. This is what D16 turns on.
+  references Arlington. Claricle therefore supplies that document walk
+  itself; D16 records the delivered scope.
 
 Still true and still binding: **every delegate contract in the item
 files is an assumption until executed.** Mark it ⚙ and run it before
 writing a spec against it. Ten entries in the table above are what
 happens otherwise.
 
-## Decisions of record (Claude + Codex consensus, 2026-08-10, revised 2026-08-12)
+## Decisions of record (2026-08-10, revised 2026-10-09)
 
 Twenty-four decisions, **all settled**. Issue #1 specified the goal in
 detail and we have measured the ground it stands on; choosing scope,
 design and validation strategy inside that goal is our job, not the
 author's.
 
-Seven of them narrow something the issue explicitly named, so they are
+Six of them narrow something the issue explicitly named, so they are
 **reported** in the issue rather than decided silently — the author can
 object to any of them:
 
@@ -329,7 +332,6 @@ object to any of them:
 | D2 | `Image#inspect` renamed to `#inspection` (Ruby owns `inspect`) |
 | D11 | Byte-identical round trips are unreachable, and so is idempotence |
 | D14 | WMF unsupported — no upstream parser |
-| D16 | Arlington predicates unavailable; generic PDF conform is structural |
 | D17 | `Inspection#valid` becomes `parse_status` |
 | D18 | EMF+ payload never validated — no upstream parser |
 | D22 | EPS/PS conform unsupported — the parser certifies raw binary |
@@ -358,10 +360,10 @@ D10 folded into D23.
 | D11 | Round-trip: **neither byte identity nor idempotence is achievable, and both were measured.** Byte identity against the original never held — the first pass always rewrites. Idempotence held only for a rect-and-line fixture; adding one `<text>` element made every cycle differ on both the EMF and EPS chains, geometry drifting each time. So there is no general round-trip invariant to assert, and issue #1's "correctness backbone" cannot be delivered as written. What remains: determinism (same input → identical bytes, measured true), same-format parse→serialize identity for EMF, and per-feature semantic assertions over a fixture corpus. The author chooses what replaces the backbone | settled — report: the issue's stated correctness backbone is unreachable |
 | D12 | Batch argument handling is defined once, by D19 — a positional is a literal path when it names an existing file and a glob otherwise, with `--pattern` forcing glob interpretation. `--pattern` **adds to** any positionals rather than replacing them; the combined set is deduplicated by realpath and processed in sorted order. `Dir.glob(pattern).sort`; zero matches → 2; failures don't stop the batch; exit = highest code. Every batch-capable JSON output is **always an array**, including a single result. Each slot is one `Models::BatchItem{path, status, exit_code, result, error}` envelope — never a mixed `Report`/failure array, so `jq '.[].result.valid'` can't silently return null for an operational failure. `--output` single-source only; derived names, `--force` to overwrite; `--output -` = bytes-only stdout, rejects `--json`. ONE batch helper (built in 03, reused in 04) | settled |
 | D13 | Constrain against released delegate versions and **stop calling `~>` a pin** — `~> 0.7` admits every 0.x below 1.0, and this gem commits no lockfile, so a clean build can install an unreviewed API. Use three-segment constraints on the reviewed line. Version floors are stated once, in the item that adds the dependency; D4 does not restate them | settled |
-| D13a | **The measured conversion graph is not reproducible without pinning the engines.** vectory 0.12.0 permits any pre-1.0 `emfsvg` and `postsvg`, and this gem commits no lockfile, so a clean install can silently swap the code that produced every conversion measurement in this plan. Either constrain the measured engine versions directly or add a CI gate that fails when resolved versions drift from the ones recorded here | settled |
+| D13a | **The measured conversion graph is not reproducible without pinning the engines.** vectory 0.12.0 permits any pre-1.0 `emfsvg` and `postsvg`, and this gem commits no lockfile, so a clean install can silently swap the code that produced every conversion measurement in this plan. Either constrain the measured engine versions directly or add a CI check that fails when resolved versions drift from the ones recorded here | settled |
 | D14 | **WMF leaves v1 entirely — proposed, not forced.** Missing upstream support does not by itself decide the question; implementing a WMF parser, or waiting for one, are defensible alternatives, exactly as D22 acknowledges for PostScript. What is forced is that it cannot ship *through `emf` 0.1.0*. Released `emf` 0.1.0 raises `WMF parser not yet implemented`, so no WMF operation can ship through the chosen delegate. The detector still recognises `:wmf`; no handler registers it, so it raises `UnsupportedFormat` → exit 3, which is the honest answer. Note the issue *body* does ask for WMF conformance even though the acceptance checklist omits it | settled — report: narrows the format list, though the issue already prescribes UnsupportedFormat here |
 | D15 | **Dimensions follow the shape issue #1 already sketched** — `#<Inspection format=:emf, width=800, height=600, dpi=96, meta={...}>`. So `width`/`height` are plain numbers in the format's own device or user units, `dpi` is a separate nullable field carrying physical resolution where the format records it, and everything format-native goes in `meta`. Sources measured: EMF `header.device_pixels` with `device_mm` (100×50 px against 26×13 mm, so dpi derives); PNG `ImageInfo` from IHDR plus pHYs; SVG declared width/height with the viewBox in `meta`; EPS/PS BoundingBox. Normalize to a consistent numeric type — vectory returns Integer for SVG and Float for EPS. **Cross-format dimension equality is never asserted**, because `3×1` as SVG and `96×48` as EPS are both correct answers about different things | settled |
-| D16 | PDF conformance. **Two things need sign-off, not one**: omitting Arlington, *and* substituting `Validator.validate` for it — that call is a pre-write integrity check (catalog, pages, MediaBox, references), not ISO 32000 conformance, so calling it "conform" is itself a narrowing. Generic `conform` runs `Validator.validate` (structural). Named standards are opt-in via `--profile NAME`, mapping to `Pdfrb::Conformance::{PdfA,PdfUA,PdfX,PdfVT,Pades,Ltv,Pdf2AF,TaggedPdf}` — **measured working**, returning `Violation{rule_id, message, object, severity, spec_clause}`. Note `PdfA`/`PdfX`/`PdfVT` take a `level:` keyword and `PdfUA` does not, so the adapter is per-profile, not uniform. **Arlington is not delivered in v1** — pdfrb ships the grammar but no document runner, so honouring the issue literally means writing that validator ourselves | settled — report: Arlington was named in the issue and is not runnable |
+| D16 | PDF conformance combines `Pdfrb::Validator.validate` structural findings with Claricle's Arlington document walk. `Handlers::PdfArlington` drives pdfrb's Arlington tables from the Catalog down, checking required keys, value types and enumerated names; this fills the upstream gap where pdfrb provides the grammar but no runner. Named standards remain opt-in via `--profile NAME`, mapping to `Pdfrb::Conformance::{PdfA,PdfUA,PdfX,PdfVT,Pades,Ltv,Pdf2AF,TaggedPdf}` and their measured `Violation{rule_id, message, object, severity, spec_clause}` results | settled — Arlington delivered in PR #55 |
 | D17 | `Inspection#valid` becomes `parse_status` (`"ok"`/`"failed"`), and inspection stops making any validity claim — it would otherwise mean five different things across five delegates, and vectory parses SVG in Nokogiri RECOVER mode so a repaired file would read as valid. Issue #1 names a `valid` field on inspection, so this changes the public model | settled — report: renames a field the issue named |
 | D18 | EMF+ is surfaced as inspection metadata only — **proposed, same reasoning as D14**: the released parser raises "not yet implemented", but writing one is a defensible alternative the author may prefer. its payload is never validated, because the released EMF+ parser is unimplemented. Issue #1 includes EMF+ conformance | settled — report: narrows conformance coverage |
 | D19 | CLI batch accepts `FILE...` positionals **and** honours the issue's `PATTERN` examples: a positional is a literal path when it names an existing file, and a glob otherwise. `--pattern` forces glob interpretation for the ambiguous case (a filename legitimately containing glob characters). This satisfies the issue's CLI as written without the unquoted-glob trap | settled — supports both, so nothing is deviated from |
@@ -406,7 +408,7 @@ runner.
 | emf | 02 | 03 | svg, eps, ps (04) |
 | wmf | — | — | — (D14: recognised, never handled, exit 3) |
 | eps / ps | 02 | — (D22: no basis exists) | svg, emf, and each other (04) |
-| pdf | 02 | 03 (structural; profiles via `--profile`, D16) | — |
+| pdf | 02 | 03 (structural + Arlington; profiles via `--profile`, D16) | — |
 
 Every cell above was executed against a real fixture on 2026-08-13 —
 see the measured-contracts section. Two deliberate holes, both with a
@@ -435,16 +437,16 @@ operations land.
 
 ## Acceptance criteria → items
 
-- [ ] `Claricle::Image.from_path(...).inspection` for PNG, SVG, EMF, PS/EPS, PDF → 02 (WMF removed per D14)
-- [ ] `Claricle.conform?` delegates for png, svg, emf, pdf → 03; eps/ps refused per D22
-- [ ] `Claricle.convert` covers EMF↔SVG, PS/EPS↔SVG, SVG→EPS → 04
-- [ ] CLI inspect/conform/convert, human + JSON → 02/03/04
-- [ ] `claricle formats` support matrix → 02 (command, inspect only), grows in 03 and 04, complete at 04
-- [ ] Handler registry documented; adding a format costs a handler class + its `require_relative` in `registry.rb` + a `HANDLER_CLASSES` entry + a detector probe, plus — for an inbound conversion — an entry in the source handler's target list **and** its feature-loss rules. **Not** one class → 01 (code), 01 step 7b (README correction)
-- [ ] Exit codes match the matrix → 01 (runner, all rows incl. 4), verified per command in 02/03/04; 03 reaches 4 end-to-end
-- [ ] Conformance specs on canonical fixtures; round-trip specs per D11 → 03/04
-- [ ] `compress` stub removed → 01
-- [ ] README.adoc and gemspec truthful → 01 (full baseline), extended per item, final rewrite 04
+- [x] `Claricle::Image.from_path(...).inspection` for PNG, SVG, EMF, PS/EPS, PDF → 02 (WMF removed per D14)
+- [x] `Claricle.conform?` delegates for png, svg, emf, pdf → 03; eps/ps refused per D22
+- [x] `Claricle.convert` covers EMF↔SVG, PS/EPS↔SVG, SVG→EPS → 04
+- [x] CLI inspect/conform/convert, human + JSON → 02/03/04
+- [x] `claricle formats` support matrix → 02 (command, inspect only), grows in 03 and 04, complete at 04 (complete: `cli_spec.rb:596-630`)
+- [x] Handler registry documented; adding a format costs ONE handler class in `handlers/` (`registry.rb:8` globs the directory, `:14` derives `HANDLER_CLASSES`; README "Adding a format"; `one_class_per_format_spec.rb`). → 01 (code), 01 step 7b (README)
+- [x] Exit codes match the matrix → 01 (runner, all rows incl. 4), verified per command in 02/03/04; 03 reaches 4 end-to-end through a real faulting handler (`cli_spec.rb:765`, `spec/fixtures/faulting_handler/boom.rb`, #63)
+- [x] Conformance specs on canonical fixtures → 03 (`spec/fixtures/canonical/**`, `canonical_fixtures_spec.rb`, #64); round-trip specs per D11 → 04 are done (`determinism_spec.rb`, `emf_identity_spec.rb`)
+- [x] `compress` stub removed → 01
+- [x] README.adoc and gemspec truthful → 01 (full baseline), extended per item, final rewrite 04 (`documentation_spec.rb`)
 
 Two promises the plan must own rather than escalate:
 
@@ -453,11 +455,14 @@ Two promises the plan must own rather than escalate:
   `Claricle.detect` facade accepting an IO or a String.** No sign-off
   needed — it is a missing method, not a design question.
 - The byte **range** the issue asks for is delivered by `Location`'s
-  `byte_offset + byte_length` half-open pair (01).
+  `byte_offset + byte_length` half-open pair (01). Done: measured on
+  main, `lib/claricle/models/location.rb` carries both, each refused if
+  negative or non-integer (`models_spec.rb:794`, `:850`, `:866`).
 
-Promises narrowed by a signed-off decision, and traceable to it:
-Arlington conformance (D16), EMF+ payload conformance (D18),
-cross-format round trips (D11). PNG locations are **not** in this list
+Promises narrowed by a signed-off decision, and traceable to it: WMF
+support (D14), EMF+ payload conformance (D18), EPS/PS conformance (D22)
+and cross-format round trips (D11). Arlington is delivered by D16, and
+PNG locations are **not** in this list
 — D20 restored them, so that promise is met rather than narrowed.
 
 ## Global constraints (every item)
@@ -467,13 +472,24 @@ cross-format round trips (D11). PNG locations are **not** in this list
   it actually allows.
 - Claricle's own code is pure Ruby; delegates are not (vectory pulls in
   Nokogiri, a native extension). The issue's "to the extent possible"
-  governs.
-- `frozen_string_literal: true` in every file; RuboCop clean;
-  `bundle exec rake` (spec + rubocop) green at every commit.
-- lutaml-model for every model — no hand-rolled `to_h`/`from_h`.
+  governs. Measured 2026-10-09 on be34132: 186 fixtures through conform and
+  convert made 0 subprocess calls (positive control 3/3).
+- lutaml-model for every serialized model and CLI result shape — no
+  hand-rolled `to_h`/`from_h`. `formats --json` uses
+  `Models::FormatCapability` (#72).
+- `frozen_string_literal: true` in every file. GHA runs the default task
+  on Ruby 3.3/3.4/4.0 before merge; local work runs only the specs changed
+  by that PR.
 - Real specs, no `double()`; fixtures from the delegates' canonical corpora.
-- Commit subjects: one line, under 10 words.
-- Every item passes the full Pre-Push Review Chain before push
-  (thermo-nuclear → dependency-contract-check → execution-diff → Codex → copilot-review).
+  Met: `grep -rn "double(\|instance_double\|class_double" spec/` finds only a
+  comment (#63); canonical fixtures landed in #64. `allow(...).to receive`
+  partial stubs remain in `cli_spec.rb` (the EPIPE specs, e.g. `:223`); they
+  are not `double()`.
+- Commit subjects: one line, under 10 words. A forward rule only: 38 of
+  268 commits already on main break it, and pushed history is not rewritten.
+- ~~Every item passes the full Pre-Push Review Chain before push
+  (thermo-nuclear → dependency-contract-check → execution-diff → Codex → copilot-review).~~
+  Superseded by Hassan 2026-10-09: use TDD, run only changed specs, open
+  the PR, and merge after GHA is green. No extra review chain.
 - Out of scope entirely: compression, rendering/rasterization, editing,
   `arroolio`, WMF conversion, `libpng`, gem release (maintainer-driven, post-04).
