@@ -41,12 +41,12 @@ dependency where marked ⚙):
   it decides in D8 order error → warning → else `yes`.
   `Inspection{format, width, height, dpi, color_space, meta,
   parse_status, issues}` — see the inspection contract below.
-- **Invariants are enforced, not just described** ⚙: lutaml-model
-  0.8.19 constructs and serializes a bogus enum value happily until
-  `validate!` is called explicitly. Validate and normalize on
-  construction AND on deserialization, then deep-freeze the issue
-  collection. Contract specs must cover an invalid severity, a missing
-  message, post-build mutation, and inconsistent JSON.
+- **Invariants are enforced, not just described** ⚙: the gemspec
+  constrains lutaml-model to `~> 0.8.32`, currently resolved to 0.8.97.
+  Claricle validates and normalizes on construction AND on
+  deserialization, then deep-freezes the issue collection. Contract
+  specs cover an invalid severity, a missing message, post-build
+  mutation, and inconsistent JSON.
 - **Inspection means "did the metadata parse", nothing more.**
   `parse_status` is `"ok"` or `"failed"` — Strings, because the model
   declares a string enum. A Symbol is accepted on construction and reads
@@ -64,8 +64,8 @@ dependency where marked ⚙):
   *valid* dimensionless SVG. "The delegate didn't complain" is not
   evidence the file parsed.
 - **Detector** (`lib/claricle/detector.rb`): internal --
-  `Claricle::Detector` is a `private_constant`
-  (`detector.rb:694`), so `Claricle::Detector` raises `NameError` from
+  `Claricle::Detector` is a `private_constant`, so
+  `Claricle::Detector` raises `NameError` from
   outside the gem. `Detector.detect(bytes)` / `Detector.detect_path(path)`
   are reached through the public `Claricle.detect(source)` (a String or
   an IO) and `Image.from_path` / `Image.from_content`;
@@ -96,36 +96,30 @@ dependency where marked ⚙):
     the user gets `UnsupportedFormat`/3 rather than a misleading
     "unknown format".
 - **Registry** (`lib/claricle/registry.rb`): internal
-  (`private_constant :Registry`, `registry.rb:124`); reached through
-  `Image` operations and the `formats` command. `HANDLER_CLASSES` (one
-  list, empty when 01 shipped) → `HANDLERS` frozen map derived via each
-  class's `supported_formats`; `handler_for(format)` fetches or raises
-  `UnsupportedFormat`; `formats -> [Symbol]` (sorted; feeds 02's
-  `formats` command); no runtime mutation, no test-only APIs.
-- **Handler metadata carries what the registry derives.** The advertised
-  "adding a format = one handler class" was **not** true under the
-  design first settled here (a `require_relative`, a `HANDLER_CLASSES`
-  entry and a detector probe on top of the class). It is true on main:
-  `registry.rb:8` globs `handlers/*.rb` and `:14` derives
-  `HANDLER_CLASSES` from `Base.subclasses`, with detection a per-handler
-  `detect` block; the README says one file and
-  `one_class_per_format_spec.rb` proves it. An inbound conversion still
-  adds its target list and loss rules, in that same class. Step 7b corrects the README
-  claim; making the promise true would mean redesigning discovery and
-  loss-rule ownership, which is out of scope for item 01.
-  A handler declares its formats, its capabilities, its conversion
-  targets, the **feature-loss rules** for each of those targets (per
-  D23, lossiness is classified per conversion from the source's
-  content, so a handler declares which source features a target
-  discards, not a flat per-edge label), and its canonical file
-  extensions (needed by 04's `--to` inference from an `--output`
-  suffix). **Detection is not among them** — probes live in the detector
-  as one ordered sequence, because they are heterogeneous (prefix
-  matches, a delegate call, an XML parse) and their order is
-  load-bearing. That is the central table the README has to be honest
-  about rather than pretend away.
+  (`private_constant :Registry`); reached through `Image` operations and
+  the `formats` command. It loads every file in `handlers/`, derives
+  `HANDLER_CLASSES` from `Base.subclasses`, and builds the frozen
+  `HANDLERS` map from each class's `supported_formats`;
+  `handler_for(format)` fetches or raises `UnsupportedFormat`;
+  `formats -> [Symbol]` (sorted; feeds 02's `formats` command); no runtime
+  mutation, no test-only APIs.
+- **Handler metadata carries what the registry derives.** Adding a
+  format is one handler class on main: registry discovery is automatic,
+  and `spec/claricle/one_class_per_format_spec.rb` proves that a dropped-in
+  class supplies detection, dispatch, formats output and inbound
+  conversion without another edit. A handler declares its formats, an
+  optional `detect` block, its conversion targets, the **feature-loss
+  rules** for each of those targets (per D23, lossiness is classified per
+  conversion from the source's content, so a handler declares which
+  source features a target discards, not a flat per-edge label), and its
+  canonical file extensions (needed by 04's `--to` inference from an
+  `--output` suffix). The built-in probes remain Detector's ordered,
+  load-bearing prefix/delegate/XML sequence; handler-declared probes are
+  the extension point and run afterwards through `Registry.detect`, so
+  a new format cannot change an existing format's verdict. Capabilities
+  are derived from the operations the handler overrides, not declared.
 - **Handlers::Base** (`lib/claricle/handlers/base.rb`): internal
-  (`private_constant :Handlers`, `base.rb:168`) -- a handler is a
+  (`private_constant :Handlers`) -- a handler is a
   subclass of it, never called by name from outside the gem.
   `formats(*syms)`
   class macro is pure declaration; instance `inspection(image)`,
@@ -178,7 +172,8 @@ dependency where marked ⚙):
 - **Tooling outcome.** `rexml` also joined `emf` and `lutaml-model`,
   because `detector.rb` requires it directly. No direct runtime
   dependency forces 3.3: measured, `emf` 0.1.0 asks `>= 3.1.0`
-  and `lutaml-model` 0.8.19 asks `>= 3.0.0`, while `rexml` 3.4.4 asks
+  and the current lutaml-model resolution, 0.8.97, asks `>= 3.0.0`,
+  while `rexml` 3.4.4 asks
   `>= 2.5.0` and Thor 1.2.0 asks `>= 2.0.0`. The 3.3 project floor is a
   deliberate policy, not a delegate constraint. Thor's floor is 1.2:
   1.0 and 1.1 reference the removed `DidYouMean::SPELL_CHECKERS` and
@@ -218,7 +213,8 @@ subjects in quotes):
 3. Models + derived tri-state spec + JSON round-trip spec + invariant
    specs (invalid severity, nil message, post-build mutation,
    inconsistent JSON); run the lutaml-model validation contract check in
-   `bin/console` first — 0.8.19 does not validate until told to.
+   `bin/console` first against the constrained line (`~> 0.8.32`, current
+   resolution 0.8.97).
    "feat: add unified issue and report models"
 4. Detector + spec. Fixtures: smallest real `.emf`/`.wmf` from the emf
    corpus into `spec/fixtures/detector/`; inline byte strings for the
@@ -258,9 +254,11 @@ subjects in quotes):
   exercises 4 end-to-end through a deliberately faulting handler
   raising an off-allowlist exception. A real crashing delegate is the
   wrong probe — once the allowlists exist, a corrupt fixture is
-  nonconformance and exits 1. (Matrix covered across `cli_spec.rb`: exit 2 at `:524`, 3 at `:540`
-  and `:551`, 1 at `:709`. End-to-end exit 4: `:765` (conform) and
-  `:1330` (convert), through `spec/fixtures/faulting_handler/boom.rb`, #63.)
+  nonconformance and exits 1. `spec/claricle/cli_spec.rb` covers these with
+  the missing-file and directory examples (2), unknown and unhandled
+  format examples (3), nonconformant format examples (1), and the two
+  "exits 4 when the handler raises outside its allowlist" examples
+  (conform and convert) through `spec/fixtures/faulting_handler/boom.rb`, #63.
 - [x] `Report#valid` spec covers info-only and warning-plus-info inputs,
   proves the frozen issue collection refuses mutation rather than
   silently accepting it, and proves the verdict is correct after a
@@ -272,9 +270,11 @@ subjects in quotes):
   and a namespace-less root are all refused, and no external entity is
   ever resolved. Both bounds are real divergences from a permissive XML
   reader, not formalities ⚙: REXML parses a valid SVG behind a
-  comment longer than `SVG_PROLOG_BYTES` (8192; pinned either side at
-  `detector_spec.rb:1064-1078`), and behind no comment at all with the namespace
-  dropped, that `Claricle.detect` refuses in both cases.
+  comment longer than `SVG_PROLOG_BYTES` (8192; pinned on both sides by
+  `spec/claricle/detector_spec.rb`, examples "accepts a root that ends on
+  the last byte of the bound" and "rejects the same root one byte beyond
+  the bound"), and behind no comment at all with the namespace dropped,
+  that `Claricle.detect` refuses in both cases.
 - [x] (one-time check, now complete) Execution-diff vs main shows ONLY: stubs gone, version unchanged,
   README and gemspec truthful.
 - [x] (PR-time record, superseded by CI) Every ⚙ contract check ran against the installed gem and its outcome
