@@ -505,7 +505,7 @@ RSpec.describe "the documentation" do
     it "constrains the measured conversion engine lines directly" do
       {
         "emfsvg" => %w[0.1.1 0.1.2 0.2.0],
-        "postsvg" => %w[0.2.9 0.3.0 0.4.0],
+        "postsvg" => %w[0.2.9 0.3.0 0.4.0]
       }.each do |name, (previous, reviewed, next_minor)|
         dependency = spec.runtime_dependencies.find { |item| item.name == name }
 
