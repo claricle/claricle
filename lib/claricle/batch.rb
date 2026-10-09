@@ -131,7 +131,7 @@ module Claricle
 
       def path_string(value)
         File.path(value)
-      rescue TypeError => e
+      rescue TypeError, ArgumentError => e
         raise InvocationError, "invalid path: #{e.message}"
       end
 
