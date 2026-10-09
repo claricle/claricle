@@ -4,6 +4,7 @@ require "fileutils"
 require "stringio"
 require "timeout"
 require "tmpdir"
+require "yaml"
 
 # Asserts that a snippet or claim is still IN the README, so renaming
 # `image.format` to `image.formatt` in the docs turns these red instead of
@@ -545,6 +546,20 @@ RSpec.describe "the documentation" do
       allowed = %w[EMF EPS PDF PNG PS SVG WMF]
       tokens = prose.scan(/\b[A-Z]{2,5}\b/).uniq
       expect(tokens.sort).to eq(allowed.sort)
+    end
+  end
+
+  describe "the continuous integration workflow" do
+    let(:workflow) do
+      YAML.safe_load(File.read(File.join(root, ".github/workflows/main.yml")), aliases: true)
+    end
+
+    it "uses a stable runner and current checkout runtime with read-only access" do
+      build = workflow.fetch("jobs").fetch("build")
+
+      expect(workflow.fetch("permissions")).to eq("contents" => "read")
+      expect(build.fetch("runs-on")).to eq("ubuntu-24.04")
+      expect(build.fetch("steps").first.fetch("uses")).to eq("actions/checkout@v6")
     end
   end
 end
