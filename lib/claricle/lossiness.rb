@@ -239,15 +239,17 @@ module Claricle
       # `TaggedSource`) closes the IO-shaped version of this same defect,
       # where the fault itself is the missing signal; nothing dispatched on a
       # core String ever faults.
-      def classify(source_format:, target_format:, source:)
+      #
+      # `rule:` is the loss rule of the TARGET. The built-in targets are in
+      # RULES; a handler added later supplies its own with `loss_rules`,
+      # which is why it can be passed in. nil means unmeasured: `unknown`.
+      def classify(source_format:, target_format:, source:, rule: RULES[target_format])
         return "unknown" unless source_format == :svg
-
-        rule = RULES[target_format]
         return "unknown" if rule.nil?
 
         refuse_unreadable(source)
         refuse_unpositioned(source)
-        root_ok, present = scan(source)
+        root_ok, present = scan(source, rule)
         verdict(rule, root_ok, present)
       end
 
@@ -255,9 +257,9 @@ module Claricle
 
       # The caller's own fault reaches them as their own exception, not as
       # a verdict and not wrapped in one of ours.
-      def scan(source)
+      def scan(source, rule)
         tagged = TaggedSource.new(source)
-        found = Scanner.new(tagged).run
+        found = Scanner.new(tagged, kept: KEPT_FEATURES | rule[:kept]).run
         # Checked AFTER the scan, not raised through it. A `read`, `eof?` or
         # `pos` fault propagates out of `Scanner#run` on its own (REXML never
         # wraps those calls in a rescue -- see `TaggedSource`), so this only
@@ -620,12 +622,15 @@ module Claricle
       class Unreadable < StandardError; end
       private_constant :Unreadable
 
-      def initialize(source)
+      # `kept:` is every feature some target keeps. A name with a namespace
+      # prefix is not trusted to mean the feature it spells for any of them,
+      # so a target declared after this file was written must be in the set.
+      def initialize(source, kept: KEPT_FEATURES)
         @source = source
+        @kept = kept
         @found = []
         @root_ok = false
-        @depth = 0
-        @roots = 0
+        @depth = @roots = 0
         @phase = :prolog
       end
 
@@ -832,7 +837,7 @@ module Claricle
 
       def content_feature(prefix, name)
         feature = ELEMENTS.fetch(name, :unclassified)
-        prefix && KEPT_FEATURES.include?(feature) ? :unclassified : feature
+        prefix && @kept.include?(feature) ? :unclassified : feature
       end
 
       def split_name(qualified)

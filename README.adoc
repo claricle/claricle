@@ -408,18 +408,42 @@ vocabularies those models validate against,
 
 === Adding a format
 
-Not one file. A new format costs:
+One file: a handler class in `lib/claricle/handlers/`. Every file in that
+directory is loaded, and the registry is derived from the classes that
+subclass `Handlers::Base` -- there is no list to extend.
 
-. a handler class under `handlers/`, declaring its formats
-. a `require_relative` for it in `registry.rb` -- there is no autoloading
-. an entry in `Registry::HANDLER_CLASSES`, next to that require
-. a probe in `Detector` -- detection is one ordered sequence, not a
-  per-handler sniffer, because the probes are heterogeneous and their
-  order is load-bearing
-. for an inbound conversion, an entry in the source handler's target
-  list together with its feature-loss rules. The target list is the
-  handler's `convert_to` declaration; the loss rules live in
-  `lossiness.rb`
+[source,ruby]
+----
+module Claricle
+  module Handlers
+    class Qoi < Base
+      formats :qoi                                   # what it owns
+      detect { |header| :qoi if header.start_with?("qoif") }
+      convert_from(:svg) { |content, to| encode(content) }
+      loss_rules lost: %i[gradient], kept: %i[basic_shape]
+
+      def inspection(image) = ...                    # each operation it supports
+    end
+  end
+end
+----
+
+* `formats` makes the format routable and listed by `claricle formats`.
+* `detect` is handed the first bytes (at most `Detector::HEADER_BYTES`) and
+  answers one of the handler's own formats, or nil. It runs after the
+  built-in probes, so it cannot change what an existing format detects.
+* `convert_from` lets other formats convert INTO this one without editing
+  their handlers; it also adds this format to their `convert_to` column.
+  A source handler that already lists the target keeps its own path.
+* `loss_rules` is optional; without it a conversion into this format
+  reports `unknown` lossiness, never `lossless`.
+* Operations (`inspection`, `conformance_report`, `convert`) are the
+  methods the class overrides; `capabilities` is derived from them.
+
+The five built-in formats still detect through `Detector`'s own ordered
+probes, which are heterogeneous (fixed offsets, an XML root, a
+PostScript line scan) and whose order is load-bearing; a handler's
+`detect` is the extension point for everything added after them.
 
 == Installation
 
