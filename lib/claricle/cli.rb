@@ -447,7 +447,7 @@ module Claricle
         # does not need one -- ENOENT included, now that `inspect` takes a
         # path and a typo is an ordinary user error rather than a defect.
         def error_message(error)
-          message = Fault.message(error)
+          message = Presenter.visible(Fault.message(error))
           # Errno::ENOENT joins the bare-message set now that a command
           # takes a path. It was already exit code 2, but its message was
           # unreachable while nothing opened a file, so naming the class
