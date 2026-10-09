@@ -1293,6 +1293,50 @@ RSpec.describe Claricle::Cli::Runner do
       end
     end
 
+    # Plan card 04: lossy and unknown conversions warn on stderr; the stdout
+    # summary line is unchanged.
+    it "warns on stderr that an unknown conversion has unknown lossiness" do
+      workspace.call do
+        FileUtils.cp(emf_fixture, "rect_and_line.emf")
+
+        expect { described_class.run(%w[convert rect_and_line.emf --to svg --output out.svg]) }
+          .to output("claricle: warning: rect_and_line.emf -> svg has unknown lossiness\n").to_stderr
+      end
+    end
+
+    {
+      "lossy" => "claricle: warning: a.png -> svg is lossy\n",
+      "lossless" => ""
+    }.each do |lossiness, expected|
+      it "writes the expected stderr for a #{lossiness} conversion" do
+        workspace.call(["a.png", "valid.png"]) do
+          converted = Claricle::Models::Conversion.new(
+            source_path: "a.png", source_format: "png", target_format: "svg",
+            lossiness: lossiness, content: "X", output_path: "out.svg"
+          )
+          fake = instance_double(Claricle::Image, format: :png, convert: converted)
+          allow(Claricle::Image).to receive(:from_path).with("a.png").and_return(fake)
+
+          expect { described_class.run(%w[convert a.png --to svg --output out.svg]) }
+            .to output(expected).to_stderr
+        end
+      end
+    end
+
+    it "stays silent on stderr under --json even for a lossy conversion" do
+      workspace.call(["a.png", "valid.png"]) do
+        converted = Claricle::Models::Conversion.new(
+          source_path: "a.png", source_format: "png", target_format: "svg",
+          lossiness: "lossy", content: "X", output_path: "out.svg"
+        )
+        fake = instance_double(Claricle::Image, format: :png, convert: converted)
+        allow(Claricle::Image).to receive(:from_path).with("a.png").and_return(fake)
+
+        expect { described_class.run(%w[convert a.png --to svg --output out.svg --json]) }
+          .not_to output.to_stderr
+      end
+    end
+
     # The convert half of the defect code, through the same real handler
     # that produced the line above.
     it "exits 4 when the handler raises outside its allowlist, and says what" do

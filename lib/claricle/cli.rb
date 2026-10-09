@@ -183,6 +183,18 @@ module Claricle
              .map { |item| conversion_line(item.path, item.result) }
       end
 
+      # One stderr line per conversion whose lossiness is not `lossless`:
+      # the plan card requires disclosure, not consent.
+      def conversion_warnings(items)
+        items.reject { |item| item.status == "error" || item.result.lossiness == "lossless" }
+             .map { |item| conversion_warning(item.path, item.result) }
+      end
+
+      def conversion_warning(path, conversion)
+        verdict = conversion.lossiness == "lossy" ? "is lossy" : "has unknown lossiness"
+        "claricle: warning: #{visible(path)} -> #{conversion.target_format} #{verdict}"
+      end
+
       def conversion_line(path, conversion)
         written = conversion.output_path || "-"
         "#{visible(path)} -> #{conversion.target_format}: #{visible(written)} (#{conversion.lossiness})"
@@ -504,7 +516,16 @@ module Claricle
       return puts(Models::BatchItem.to_json(result.items)) if options[:json]
 
       print_conversion_summary(Presenter.conversions(result.items))
+      print_conversion_warnings(result.items)
       Presenter.batch_failures(result.items).each { |line| warn line }
+    end
+
+    # `--output -` already sent the classification to stderr in its summary
+    # line, so a second line per file there would only repeat it.
+    def print_conversion_warnings(items)
+      return if options[:output] == Writer::STDOUT_DESTINATION
+
+      Presenter.conversion_warnings(items).each { |line| warn line }
     end
 
     # The stdout/stderr split `write_convert`'s own comment describes,
