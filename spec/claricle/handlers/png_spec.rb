@@ -1408,7 +1408,8 @@ RSpec.describe "Claricle PNG structural scanner" do
   # remember to extend. NOT total, and the gap is named rather than implied:
   # `:open` is subtracted BY NAME from a set built from BOTH receivers, so
   # `IO.open` is permitted too, and neither `Kernel.open` nor a subprocess
-  # is on either receiver at all. Those routes are known-open follow-ups.
+  # is on either receiver at all. This guard covers File and IO singleton
+  # reads only; it does not claim to intercept those other routes.
   #
   # A denylist was tried and leaked three times: first `each_byte` past a
   # read-only recorder, then `IO.binread` and the non-block `File.open`

@@ -220,7 +220,7 @@ and SVG→EPS:
 | linear gradient | **raises** `Emfsvg::FormatError: unsupported SVG color: "url(#grad)"` | succeeds — gradient **silently becomes solid black** |
 | clip path | succeeds — clipped object **silently becomes invisible** | succeeds — clip **silently removed** |
 | embedded raster | preserved but re-encoded | succeeds — image **silently deleted**. On a cold process it first raises `NameError: uninitialized constant Postsvg::Model::UnknownOperator`, then succeeds after an unrelated conversion warms it — a load-order bug that will look intermittent |
-| text | succeeds, but see idempotence below | succeeds |
+| text | succeeds; cycles are byte-stable after the first | succeeds, but geometry drifts on later cycles |
 
 Issue #1 requires "no silent lossy conversions". Three of these lose
 content with no error and no warning, which is exactly what it forbids.
@@ -233,18 +233,21 @@ part of **D23**'s scope.
 **Round-trip idempotence does not generalise**
 
 The earlier claim — "every cycle after the first is byte-identical" —
-was measured on one rect and one line. With a single `<text>` element
-it fails outright on both chains:
+was measured on one rect and one line. A repeated probe with a single
+`<text>` element separates the two chains:
 
 ```
-via emf: 7dcbdf09  0dd63a1c  ae79f6c3    c1==c2: false  c2==c3: false
-via eps: 3edfd71d  43b50d40  04167252    c1==c2: false  c2==c3: false
+via emf: 9768016f  9768016f  9768016f    c1==c2: true   c2==c3: true
+via eps: 82e95046  c1895d8a  26b657e3    c1==c2: false  c2==c3: false
 ```
 
-The geometry drifts every cycle (a text baseline moved 24.4 → 23.4 →
-22.4; an EPS viewBox went `0 0 100 50` → `0 -25 100 75` → `0 -25 100
-100`). So idempotence holds for trivial geometry and nothing more, and
-cannot serve as the correctness backbone D11 proposed.
+The EMF route stabilises after its first rewrite, including the text
+geometry. The EPS route does not: its viewBox grows `0 0 100 50` →
+`0 0 100 90` → `0 0 100 180`, while the text y coordinate moves
+`-40` → `-90` → `-180`. One stable route does not establish a
+general round-trip invariant when another supported route keeps
+drifting, so idempotence still cannot serve as the correctness backbone
+D11 proposed.
 
 **Conversion from non-SVG sources, and two traps**
 
@@ -253,9 +256,10 @@ itself, so genuine):
 
 - All nine cross-format edges from those three sources succeed on the
   rect fixture, and `emf→svg→emf`, `eps→svg→eps`, `ps→svg→ps` are each
-  byte-stable across three cycles. So idempotence is **content**-
-  dependent, not direction-dependent — the `<text>` element broke it,
-  not the choice of pivot format.
+  byte-stable across three cycles. The text probe above shows that this
+  does not generalise: its EMF route stabilises while its EPS route
+  drifts. Idempotence depends on both the content and the conversion
+  route.
 - **Converting a file to the format it already is raises
   `NoMethodError`** — `Vectory::Svg` has no `to_svg`, `Vectory::Emf` no
   `to_emf`, and so on. `claricle convert x.svg --to svg` would surface
@@ -330,7 +334,7 @@ object to any of them:
 | Decision | What narrowed |
 |---|---|
 | D2 | `Image#inspect` renamed to `#inspection` (Ruby owns `inspect`) |
-| D11 | Byte-identical round trips are unreachable, and so is idempotence |
+| D11 | Byte-identical round trips are unreachable; idempotence is route- and content-specific, not general |
 | D14 | WMF unsupported — no upstream parser |
 | D17 | `Inspection#valid` becomes `parse_status` |
 | D18 | EMF+ payload never validated — no upstream parser |
@@ -357,7 +361,7 @@ D10 folded into D23.
 | D8 | Tri-state `valid`, decided in order: any `error` → `no`; else any `warning` → `suspicious`; else (`info` only, or no issues at all) → `yes`. `info` never downgrades validity. Non-strict `conform?` passes `yes` AND `suspicious`; `--strict`/`strict:` requires `yes` | settled |
 | D9 | Conversion via vectory. **All twelve edges between svg/emf/eps/ps were measured working**, so the earlier "only these are verified" hedge is retired — v1 exposes the full matrix rather than an arbitrary subset. PNG/PDF stay inspect+conform only (vectory has no class for them). EMF+ handling is **not settled here** — see D18. What is measured is only that `Emf::EmfPlus::Parser.call` raises "EMF+ parser not yet implemented", which constrains the options without choosing among them | settled |
 | D10 | **Static per-edge lossiness cannot work — measured.** The same edge is clean for a rect and destructive for a gradient, a clip path or an embedded image, and three of those lose content with no error at all — precisely the "silent lossy conversion" issue #1 forbids. Lossiness must be decided per conversion from what the source document actually contains, with a per-edge table serving only as a pessimistic floor. The `:lossless`/`:lossy`/`:unknown` vocabulary stands; the static-table mechanism does not. Folded into D23's scope | **superseded — see D23** |
-| D11 | Round-trip: **neither byte identity nor idempotence is achievable, and both were measured.** Byte identity against the original never held — the first pass always rewrites. Idempotence held only for a rect-and-line fixture; adding one `<text>` element made every cycle differ on both the EMF and EPS chains, geometry drifting each time. So there is no general round-trip invariant to assert, and issue #1's "correctness backbone" cannot be delivered as written. What remains: determinism (same input → identical bytes, measured true), same-format parse→serialize identity for EMF, and per-feature semantic assertions over a fixture corpus. The author chooses what replaces the backbone | settled — report: the issue's stated correctness backbone is unreachable |
+| D11 | Round-trip: **byte identity is unreachable and idempotence is not a general invariant.** Byte identity against the original never held — the first pass always rewrites. The rect-and-line fixture stabilises on the measured routes. With a `<text>` element, the EMF route also stabilises after its first rewrite, but the EPS route changes on every cycle and its geometry drifts. One stable route cannot establish the issue's proposed correctness backbone across the supported matrix. What remains: determinism (same input → identical bytes, measured true), same-format parse→serialize identity for EMF, and per-feature semantic assertions over a fixture corpus. The author chooses what replaces the backbone | settled — report: the issue's stated general correctness backbone is unreachable |
 | D12 | Batch argument handling is defined once, by D19 — a positional is a literal path when it names an existing file and a glob otherwise, with `--pattern` forcing glob interpretation. `--pattern` **adds to** any positionals rather than replacing them; the combined set is deduplicated by realpath and processed in sorted order. `Dir.glob(pattern).sort`; zero matches → 2; failures don't stop the batch; exit = highest code. Every batch-capable JSON output is **always an array**, including a single result. Each slot is one `Models::BatchItem{path, status, exit_code, result, error}` envelope — never a mixed `Report`/failure array, so `jq '.[].result.valid'` can't silently return null for an operational failure. `--output` single-source only; derived names, `--force` to overwrite; `--output -` = bytes-only stdout, rejects `--json`. ONE batch helper (built in 03, reused in 04) | settled |
 | D13 | Constrain against released delegate versions and **stop calling `~>` a pin** — `~> 0.7` admits every 0.x below 1.0, and this gem commits no lockfile, so a clean build can install an unreviewed API. Use three-segment constraints on the reviewed line. Version floors are stated once, in the item that adds the dependency; D4 does not restate them | settled |
 | D13a | **The measured conversion graph is not reproducible without pinning the engines.** vectory 0.12.0 permits any pre-1.0 `emfsvg` and `postsvg`, and this gem commits no lockfile, so a clean install can silently swap the code that produced every conversion measurement in this plan. Either constrain the measured engine versions directly or add a CI check that fails when resolved versions drift from the ones recorded here | settled |
