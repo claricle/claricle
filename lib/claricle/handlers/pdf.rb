@@ -368,6 +368,49 @@ module Claricle
       end
       private_constant :VersionGate
 
+      # pdfrb's line-oriented readers use IO#gets, whose default separator
+      # recognises LF but not PDF's equally valid bare CR line ending. Keep
+      # every byte-oriented operation on the original IO -- especially reads
+      # of arbitrary binary stream bodies -- and adapt only that line API.
+      class UniversalLineReader
+        def initialize(io)
+          @io = io
+        end
+
+        def gets
+          line = +"".b
+          while (byte = @io.getbyte)
+            line << byte
+            next unless byte == 10 || byte == 13
+
+            consume_lf_after_cr(line) if byte == 13
+            break
+          end
+          line unless line.empty?
+        end
+
+        def method_missing(name, *, &)
+          return super unless @io.respond_to?(name)
+
+          @io.public_send(name, *, &)
+        end
+
+        def respond_to_missing?(name, include_private = false)
+          @io.respond_to?(name, include_private) || super
+        end
+
+        private
+
+        def consume_lf_after_cr(line)
+          byte = @io.getbyte
+          return unless byte
+          return line << byte if byte == 10
+
+          @io.seek(-1, IO::SEEK_CUR)
+        end
+      end
+      private_constant :UniversalLineReader
+
       # THE DELEGATE BOUNDARY: every call that crosses into pdfrb, and the
       # single rescue that covers them.
       #
@@ -803,6 +846,15 @@ module Claricle
       # pdfrb has yielded, every delegate call inside is guarded on its
       # own, so anything still escaping is ours and is re-raised.
       def open_document(path, progress)
+        open_native_document(path, progress)
+        return unless progress.code == STRUCTURE_CODE && cr_terminated_header?(path)
+
+        progress.code = nil
+        progress.node = nil
+        open_cr_document(path, progress)
+      end
+
+      def open_native_document(path, progress)
         opened = false
         ::Pdfrb::Document.open(path) do |document|
           opened = true
@@ -812,6 +864,31 @@ module Claricle
         raise if opened
 
         progress.code = OPEN_CODE
+      end
+
+      # A fallback rather than the default path: ordinary documents retain
+      # pdfrb's own block-form open, while a document whose header proves it
+      # uses CR gets a second parse with only line reads adapted. The File
+      # remains the backing store, so neither the PDF nor its streams are
+      # materialised or rewritten.
+      def open_cr_document(path, progress)
+        opened = false
+        File.open(path, "rb") do |file|
+          document = ::Pdfrb::Document.new(io: UniversalLineReader.new(file))
+          opened = true
+          read_document(document, progress)
+        end
+      rescue *parse_failures, Errno::EINVAL
+        raise if opened
+
+        progress.code = OPEN_CODE
+      end
+
+      def cr_terminated_header?(path)
+        prefix = VersionGate.read(path)
+        cr = prefix.index("\r")
+        lf = prefix.index("\n")
+        cr && (!lf || cr < lf)
       end
 
       # The stages that run once pdfrb has handed the document over. A
