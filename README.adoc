@@ -93,14 +93,6 @@ The name reflects what the library is for:
 
 * `inspect` for WMF -- every other format has a handler, so WMF is the
   one that still raises `Claricle::UnsupportedFormat`
-* **`(atend)` bounding boxes for EPS and PS.** The value lives in the
-  trailer, and resolving it needs the nested-document and data-section
-  handling that reading only the header exists to avoid. Such a file
-  inspects as `ok`, and its dimensions come from a concrete
-  `%%HiResBoundingBox` beside it or from nothing at all
-* **CR-only line endings for EPS and PS.** The parser reads no DSC
-  comments from them, so those files inspect as `ok` with no dimensions
-  and no metadata
 * **CR-only line endings for PDF.** A lone `\r` in the xref and trailer
   region leaves the parser reading no trailer at all, so those files
   inspect as `failed` with `pdf.structure_unreadable` rather than `ok`.
