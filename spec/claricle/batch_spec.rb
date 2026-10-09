@@ -160,6 +160,18 @@ RSpec.describe "Claricle::Batch" do
       end
     end
 
+    it "refuses a literal directory beside a file, before any file runs" do
+      tree do
+        File.write("a.png", "x")
+        Dir.mkdir("dir.png")
+        ran = []
+
+        expect { run(batch, %w[a.png dir.png], classify: clean) { |path| ran << path } }
+          .to raise_error(Claricle::InvocationError, /"dir\.png" is a directory, not a file/)
+        expect(ran).to be_empty
+      end
+    end
+
     it "keeps a glob that matches nothing quiet while other arguments match" do
       tree do
         File.write("a.png", "x")

@@ -132,7 +132,7 @@ module Claricle
         found.concat(glob(pattern)) if pattern
         files = found.select { |path| File.file?(path) }
                      .sort.uniq { |path| File.realpath(path) }
-        reject_missing_literal(arguments, files)
+        reject_invalid_literals(arguments, files)
         files
       rescue ArgumentError => e
         raise InvocationError, "invalid path: #{e.message}"
@@ -142,19 +142,27 @@ module Claricle
         File.file?(argument) ? [argument] : glob(argument)
       end
 
-      # Without a glob metacharacter an argument can only be a literal path,
-      # so one that names nothing is a typo, not a pattern that matched none.
-      # A directory exists, so it still reaches `nothing_matched`'s wording.
+      # Without a glob metacharacter, a nonexistent argument is a likely
+      # literal typo rather than an intentionally unmatched pattern.
       def missing_literal?(argument)
         !argument.match?(GLOB_METACHARACTERS) && !File.exist?(argument)
       end
 
-      # Only raised once something else matched: that is the case where
-      # dropping the typo would be silent. When nothing matched at all,
-      # `nothing_matched`'s "no files matched" is the error.
-      def reject_missing_literal(arguments, files)
+      # Once something else matched, an invalid literal must not disappear.
+      # With no matches, `nothing_matched` keeps the lone-input wording.
+      def reject_invalid_literals(arguments, files)
         return if files.empty?
 
+        reject_directory(arguments)
+        reject_missing_literal(arguments)
+      end
+
+      def reject_directory(arguments)
+        directory = arguments.find { |argument| File.directory?(argument) }
+        raise InvocationError, "#{directory.inspect} is a directory, not a file" if directory
+      end
+
+      def reject_missing_literal(arguments)
         missing = arguments.find { |argument| missing_literal?(argument) }
         raise InvocationError, "No such file or directory - #{missing}" if missing
       end
