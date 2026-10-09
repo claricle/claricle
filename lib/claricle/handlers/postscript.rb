@@ -861,9 +861,8 @@ module Claricle
       # correctly suppresses it as continued.
       HEADER_LIMIT_BYTES = 8 * 1024 * 1024
 
-      private_constant :SIGNATURE, :BOX_COMMENTS,
-                       :FIELD_COMMENTS, :HEADER_PROBE_BYTES, :HEADER_LIMIT_BYTES,
-                       :ISSUE_CODE, :ISSUE_MESSAGE
+      private_constant :SIGNATURE, :BOX_COMMENTS, :FIELD_COMMENTS, :HEADER_PROBE_BYTES,
+                       :HEADER_LIMIT_BYTES, :ISSUE_CODE, :ISSUE_MESSAGE
 
       # `image.content` would cost a path-born image a file-sized
       # allocation it retains for the image's whole lifetime, for a
