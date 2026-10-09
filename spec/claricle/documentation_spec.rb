@@ -502,6 +502,23 @@ RSpec.describe "the documentation" do
       expect(dependency.requirement).not_to be_satisfied_by(Gem::Version.new("2.0.0"))
     end
 
+    it "constrains the measured conversion engine lines directly" do
+      {
+        "emfsvg" => %w[0.1.1 0.1.2 0.2.0],
+        "postsvg" => %w[0.2.9 0.3.0 0.4.0],
+      }.each do |name, (previous, reviewed, next_minor)|
+        dependency = spec.runtime_dependencies.find { |item| item.name == name }
+
+        expect(dependency).not_to be_nil
+        expect(dependency.requirement)
+          .not_to be_satisfied_by(Gem::Version.new(previous))
+        expect(dependency.requirement)
+          .to be_satisfied_by(Gem::Version.new(reviewed))
+        expect(dependency.requirement)
+          .not_to be_satisfied_by(Gem::Version.new(next_minor))
+      end
+    end
+
     # Published metadata, so a wrong URL here is what a user lands on from
     # the gem page rather than something they can correct in a checkout.
     #

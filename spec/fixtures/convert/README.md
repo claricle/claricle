@@ -16,7 +16,7 @@ catalog entry, because they discriminate nothing about `Lossiness.classify`.
 
 **These fixtures demonstrate that the classifier DETECTS a feature. They do not
 demonstrate the loss.** The losses are measurements taken with vectory 0.12.0
-during design; vectory is not a dependency of this gem and nothing here runs a
+during design; vectory is a dependency of this gem, but nothing here runs a
 conversion.
 
 ## The control
