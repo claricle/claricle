@@ -11,6 +11,49 @@ require_relative "pdf_profiles"
 
 module Claricle
   module Handlers
+    # pdfrb's line-oriented readers use IO#gets, whose default separator
+    # recognises LF but not PDF's equally valid bare CR line ending. Keep
+    # every byte-oriented operation on the original IO -- especially reads
+    # of arbitrary binary stream bodies -- and adapt only that line API.
+    class UniversalLineReader
+      def initialize(io)
+        @io = io
+      end
+
+      def gets
+        line = +"".b
+        while (byte = @io.getbyte)
+          line << byte
+          next unless [10, 13].include?(byte)
+
+          consume_lf_after_cr(line) if byte == 13
+          break
+        end
+        line unless line.empty?
+      end
+
+      def method_missing(name, *, &)
+        return super unless @io.respond_to?(name)
+
+        @io.public_send(name, *, &)
+      end
+
+      def respond_to_missing?(name, include_private = false)
+        @io.respond_to?(name, include_private) || super
+      end
+
+      private
+
+      def consume_lf_after_cr(line)
+        byte = @io.getbyte
+        return unless byte
+        return line << byte if byte == 10
+
+        @io.seek(-1, IO::SEEK_CUR)
+      end
+    end
+    private_constant :UniversalLineReader
+
     # Reports a PDF's version and, when it can be read honestly, its
     # DECLARED page count. Dimensions are deliberately absent: reaching
     # the first page's box safely needs a cycle-guarded page-tree walk in
@@ -367,49 +410,6 @@ module Claricle
         end
       end
       private_constant :VersionGate
-
-      # pdfrb's line-oriented readers use IO#gets, whose default separator
-      # recognises LF but not PDF's equally valid bare CR line ending. Keep
-      # every byte-oriented operation on the original IO -- especially reads
-      # of arbitrary binary stream bodies -- and adapt only that line API.
-      class UniversalLineReader
-        def initialize(io)
-          @io = io
-        end
-
-        def gets
-          line = +"".b
-          while (byte = @io.getbyte)
-            line << byte
-            next unless byte == 10 || byte == 13
-
-            consume_lf_after_cr(line) if byte == 13
-            break
-          end
-          line unless line.empty?
-        end
-
-        def method_missing(name, *, &)
-          return super unless @io.respond_to?(name)
-
-          @io.public_send(name, *, &)
-        end
-
-        def respond_to_missing?(name, include_private = false)
-          @io.respond_to?(name, include_private) || super
-        end
-
-        private
-
-        def consume_lf_after_cr(line)
-          byte = @io.getbyte
-          return unless byte
-          return line << byte if byte == 10
-
-          @io.seek(-1, IO::SEEK_CUR)
-        end
-      end
-      private_constant :UniversalLineReader
 
       # THE DELEGATE BOUNDARY: every call that crosses into pdfrb, and the
       # single rescue that covers them.

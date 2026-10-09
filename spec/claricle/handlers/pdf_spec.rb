@@ -1572,11 +1572,18 @@ RSpec.describe "Claricle PDF handler" do
   # has been missed twice already, once for the four `*_CODE` constants
   # and once for `VERSION_TOKEN` when the version comparison landed.
   it "keeps its helpers and its tuning constants private" do
-    %i[VersionGate UniversalLineReader Resolver MetadataGate Progress DEADLINE_SECONDS HEADER_SCAN_BYTES
+    %i[VersionGate Resolver MetadataGate Progress DEADLINE_SECONDS HEADER_SCAN_BYTES
        MAX_PAGE_COUNT MESSAGES VERSION_TOKEN HEADER_CODE OPEN_CODE STRUCTURE_CODE TIMEOUT_CODE]
       .each { |name| expect(pdf_class.const_get(name, false)).not_to be_nil, name.to_s }
 
     expect(pdf_class.constants(false)).to be_empty
+  end
+
+  it "keeps the CR line reader private to the handlers namespace" do
+    handlers = Claricle.const_get(:Handlers)
+
+    expect(handlers.const_get(:UniversalLineReader, false)).not_to be_nil
+    expect(handlers.constants(false)).not_to include(:UniversalLineReader)
   end
 
   # The fixtures are the evidence for every example above, so a typo in
