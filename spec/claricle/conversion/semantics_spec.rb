@@ -192,15 +192,21 @@ RSpec.describe "Conversion semantics" do
       end
     end
 
-    %i[eps ps].each do |target|
-      it "classifies embedded_raster -> #{target} lossy" do
-        expect(convert("embedded_raster", target).lossiness).to eq("lossy")
+    {
+      "embedded_raster" => %i[eps ps emf],
+      "embedded_raster_data_uri" => %i[eps ps]
+    }.each do |fixture, targets|
+      targets.each do |target|
+        it "classifies #{fixture} -> #{target} lossy" do
+          expect(convert(fixture, target).lossiness).to eq("lossy")
+        end
       end
     end
 
-    # README: unmeasured for emf, so unknown rather than a guessed verdict.
-    it "classifies embedded_raster -> emf unknown, never lossless" do
-      expect(convert("embedded_raster", :emf).lossiness).to eq("unknown")
+    # Measured: a data: PNG is written to EMF as a pixel-exact DIB, so it is not
+    # lost; nothing proves the rest of the output faithful, so never lossless.
+    it "classifies a data: URI raster -> emf unknown, never lossless" do
+      expect(convert("embedded_raster_data_uri", :emf).lossiness).to eq("unknown")
     end
 
     # Control for the table above: the label comes from the feature, not from

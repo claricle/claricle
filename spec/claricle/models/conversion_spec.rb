@@ -286,7 +286,7 @@ RSpec.describe "conversion lossiness" do
         %w[gradient_radial] => { eps: "lossy", ps: "lossy", emf: "lossy" },
         %w[clip_path_element] => { eps: "lossy", ps: "lossy", emf: "lossy" },
         %w[clip_path_attribute] => { eps: "lossy", ps: "lossy", emf: "lossy" },
-        %w[embedded_raster] => { eps: "lossy", ps: "lossy", emf: "unknown" }
+        %w[embedded_raster] => { eps: "lossy", ps: "lossy", emf: "lossy" }
       }
       table.each do |(name), targets|
         targets.each do |target, want|
@@ -875,13 +875,13 @@ RSpec.describe "conversion lossiness" do
 
     it "pins every rule table against silent growth" do
       expect(lossiness::RULES).to eq(
-        eps: { lost: %i[gradient clip_path embedded_raster], kept: %i[basic_shape] },
-        ps: { lost: %i[gradient clip_path embedded_raster], kept: %i[basic_shape] },
-        emf: { lost: %i[gradient clip_path], kept: [] }
+        eps: { lost: %i[gradient clip_path embedded_raster linked_raster], kept: %i[basic_shape] },
+        ps: { lost: %i[gradient clip_path embedded_raster linked_raster], kept: %i[basic_shape] },
+        emf: { lost: %i[gradient clip_path linked_raster], kept: [] }
       )
       expect(lossiness::ELEMENTS).to eq(
         "linearGradient" => :gradient, "radialGradient" => :gradient,
-        "clipPath" => :clip_path, "image" => :embedded_raster,
+        "clipPath" => :clip_path, "image" => :linked_raster,
         "rect" => :basic_shape, "line" => :basic_shape
       )
       expect(lossiness::IGNORED).to eq(%w[svg defs])

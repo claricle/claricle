@@ -52,7 +52,7 @@ module Claricle
     # this same rule object rather than a second hand-copied literal, which
     # would drift silently if either target's loss list is ever revised
     # without the other.
-    POSTSCRIPT_RULE = { lost: %i[gradient clip_path embedded_raster], kept: %i[basic_shape] }.freeze
+    POSTSCRIPT_RULE = { lost: %i[gradient clip_path embedded_raster linked_raster], kept: %i[basic_shape] }.freeze
 
     # Per target: features measured LOST, and features measured KEPT. A feature
     # in neither is unmeasured, so it yields `unknown`. A single "discards"
@@ -71,7 +71,7 @@ module Claricle
     RULES = {
       eps: POSTSCRIPT_RULE,
       ps: POSTSCRIPT_RULE,
-      emf: { lost: %i[gradient clip_path], kept: [] }
+      emf: { lost: %i[gradient clip_path linked_raster], kept: [] }
     }.freeze
 
     # Derived, so a feature added to any `kept:` list is covered by the prefix
@@ -86,9 +86,16 @@ module Claricle
 
     ELEMENTS = {
       "linearGradient" => :gradient, "radialGradient" => :gradient,
-      "clipPath" => :clip_path, "image" => :embedded_raster,
+      "clipPath" => :clip_path, "image" => :linked_raster,
       "rect" => :basic_shape, "line" => :basic_shape
     }.freeze
+
+    # An `<image>` is `:embedded_raster` when its href is a `data:` URI and
+    # `:linked_raster` otherwise. Measured on the EMF path: a `data:` PNG is
+    # written as a DIB, pixel-exact, so it is NOT lost there (and not proven
+    # kept either, hence `unknown`); a linked image is dropped, and the output
+    # is byte-identical to the same document without the `<image>`.
+    DATA_URI = /\A\s*data:/i
 
     ATTR_FEATURES = { "clip-path" => :clip_path }.freeze
 
@@ -401,6 +408,13 @@ module Claricle
       # A default namespace can be rebound on any descendant, so this is
       # checked on every element rather than only on the root. Value-sensitive:
       # a redundant redeclaration of the SVG namespace is harmless.
+      # SVG 2 `href` wins over `xlink:href` when both are present.
+      def raster_feature(feature, attributes)
+        return feature unless feature == :linked_raster
+
+        DATA_URI.match?(attributes["href"] || attributes["xlink:href"] || "") ? :embedded_raster : feature
+      end
+
       def namespace(value)
         value == SVG_NAMESPACE ? nil : :unclassified
       end
@@ -786,7 +800,7 @@ module Claricle
         visit_root(prefix, name, event[1]) if root
         @depth += 1
         visit_attributes(event[1])
-        feature = element_feature(prefix, name, root)
+        feature = element_feature(prefix, name, root, event[1])
         note(feature) if feature
       end
 
@@ -822,11 +836,11 @@ module Claricle
       # measured, ignoring it by name classified such a document `lossless`
       # while everything inside the inner viewport went uncounted. So IGNORED
       # membership is positional, not nominal.
-      def element_feature(prefix, name, root)
+      def element_feature(prefix, name, root, attributes)
         return :unclassified if prefix && IGNORED.include?(name)
         return structural_feature(name, root) if IGNORED.include?(name)
 
-        content_feature(prefix, name)
+        content_feature(prefix, name, attributes)
       end
 
       def structural_feature(name, root)
@@ -835,8 +849,8 @@ module Claricle
         :unclassified
       end
 
-      def content_feature(prefix, name)
-        feature = ELEMENTS.fetch(name, :unclassified)
+      def content_feature(prefix, name, attributes)
+        feature = AttributeRules.raster_feature(ELEMENTS.fetch(name, :unclassified), attributes)
         prefix && @kept.include?(feature) ? :unclassified : feature
       end
 
