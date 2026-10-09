@@ -913,8 +913,11 @@ RSpec.describe "Claricle SVG handler" do
     end
 
     it "allows foreign namespace elements under an SVG root in the base profile" do
-      source = %(<svg xmlns="#{svg_ns}" viewBox="0 0 1 1">) +
-        %(<meta:data xmlns:meta="https://example.test/metadata"/></svg>)
+      source = <<~SVG
+        <svg xmlns="#{svg_ns}" viewBox="0 0 1 1">
+          <meta:data xmlns:meta="https://example.test/metadata"/>
+        </svg>
+      SVG
       image = Claricle::Image.from_content(source, format: :svg)
 
       expect(handler.conformance_report(image).issues).to be_empty

@@ -268,8 +268,8 @@ module Claricle
 
         def self.issues_from(result, profile:)
           BUCKETS.flat_map { |bucket| result.public_send(bucket).to_a }
-            .reject { |raw| base_foreign_namespace_issue?(raw, profile) }
-            .map { |raw| issue_from(raw) }
+                 .reject { |raw| base_foreign_namespace_issue?(raw, profile) }
+                 .map { |raw| issue_from(raw) }
         end
 
         # SVG 1.1 permits foreign-namespace elements. svg_conform's base
