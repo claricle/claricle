@@ -11,6 +11,16 @@ RSpec.describe "Convert edges in a fresh process" do
   root = File.expand_path("../../..", __dir__)
   fixtures = File.join(root, "spec", "fixtures", "convert")
 
+  it "does not load conversion delegates when claricle is required" do
+    output, status = Open3.capture2(
+      RbConfig.ruby, "-I#{File.join(root, "lib")}", "-e",
+      'require "claricle"; puts [defined?(Vectory), defined?(Postsvg)].inspect'
+    )
+
+    expect(status).to be_success
+    expect(output).to eq("[nil, nil]\n")
+  end
+
   # What each target's output must start with (EMF: record type 1, then the
   # " EMF" signature at offset 40).
   signatures = {

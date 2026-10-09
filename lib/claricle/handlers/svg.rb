@@ -1,11 +1,10 @@
 # frozen_string_literal: true
 
 require "rexml/document"
-require "vectory"
-require "postsvg"
 require "rexml/parsers/baseparser"
 
 require_relative "base"
+require_relative "../conversion_engine"
 require_relative "../detector"
 require_relative "../emf_header"
 require_relative "../models/inspection"
@@ -15,22 +14,6 @@ require_relative "../models/report"
 require_relative "../models/conversion"
 require_relative "../lossiness"
 require_relative "../postscript_fidelity"
-
-# `Postsvg::Model::UnknownOperator` (postsvg-0.3.0, model/operators.rb:59) is
-# declared via a WRONG-FILE autoload -- model.rb:13 points at the singular
-# model/operator.rb, where the class does not live. Measured: a genuinely
-# fresh process raises `NameError` converting any SVG whose rendered output
-# needs it (embedded_raster.svg, both to_eps and to_ps), and it stops
-# reproducing forever once anything else in the process has gone through the
-# same path first -- an ordinary autoload race, not input-dependent.
-# `Operators.load_all!` (model/operators.rb:49-53, public, documented "force-
-# load every operator category... call this once") forces the whole registry
-# to populate up front, closing the race. Every real CLI invocation is cold,
-# so this runs once, here, at require time -- not lazily inside `#convert`,
-# and not left to warm by accident the way metafile.rb's identical exposure
-# is (that file's own scope, not fixed here). Costs ~0.008s, measured
-# idempotent.
-Postsvg::Model::Operators.load_all!
 
 module Claricle
   module Handlers
@@ -318,6 +301,7 @@ module Claricle
         raise UnsupportedFormat.new(image.format, :convert, target: to) unless self.class.convert_targets.include?(to)
 
         content = bounded_content(image)
+        ConversionEngine.load!
         converted = convert_content(content, to)
         build_conversion(image, to, content, converted)
       end
@@ -709,7 +693,7 @@ module Claricle
       # `utf16_gradient.svg` is a real, permanent input-shape failure
       # (Vectory::ParsingError) with no equivalent fix; the cold-process
       # `Postsvg::Model::UnknownOperator` NameError this same rescue used to
-      # exist for is fixed outright above, at file-load time.
+      # exist for is fixed by ConversionEngine immediately before this call.
       def convert_content(content, to)
         PostscriptFidelity.convert(content, to) do |svg|
           EmfHeader.seal(to, ::Vectory::Svg.from_content(svg).public_send(CONVERT_TARGET_METHODS.fetch(to)).content)
