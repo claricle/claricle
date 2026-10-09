@@ -52,6 +52,14 @@ RSpec.describe "Claricle conformance API" do
       end
     end
 
+    it "answers true for a real conformant EMF and a real conformant SVG" do
+      emf = File.join(fixtures, "distinct_device.emf")
+      svg = File.expand_path("../../fixtures/conform/valid.svg", __dir__)
+      workspace(["a.emf", emf], ["a.svg", svg]) do
+        expect([Claricle.conform?("a.emf"), Claricle.conform?("a.svg")]).to eq([true, true])
+      end
+    end
+
     # Mixed with a real success on purpose: a.pdf now conforms, so this
     # proves the raise survives even when it is not the only outcome.
     it "raises out of the batch shape too" do

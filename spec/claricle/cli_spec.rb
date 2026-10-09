@@ -799,6 +799,16 @@ RSpec.describe Claricle::Cli::Runner do
       end
     end
 
+    # A real EMF whose record chain is cut short: the emf handler's own
+    # error code has to reach stdout with exit 1.
+    it "exits 1 for a nonconformant EMF, with an error line on stdout" do
+      workspace.call(["a.emf", "broken_suffix.emf"]) do
+        expect(described_class.run(%w[conform a.emf], output: StringIO.new)).to eq(1)
+        expect { described_class.run(%w[conform a.emf], output: StringIO.new) }
+          .to output(/\Aa\.emf: no\n {2}error \[emf\.record_framing\]/).to_stdout
+      end
+    end
+
     it "exits 2 for a pattern that matched nothing" do
       workspace.call do
         expect(described_class.run(["conform", "--pattern", "none-*.png"], output: StringIO.new))
