@@ -141,7 +141,7 @@ A delegate version bump invalidates this section until it is re-run.
 | PNG / PDF / EPS / PS signatures | `89504e470d0a1a0a`, `%PDF-1.4`, `%!PS-Adobe-3.0 EPSF-3.0`, `%!PS-Adobe-3.0` — the EPSF token on line 1 is the only eps/ps discriminator |
 | `Emf.detect_format` | `:emf` for valid **and truncated** EMF; `:wmf` for both the standard (`0100 0900`) and placeable (`d7cdc69a`) headers; **raises `Emf::FormatError` for all six other fixtures** |
 
-**Models — lutaml-model 0.8.19**
+**Models — lutaml-model `~> 0.8.32` (currently resolved to 0.8.97)**
 
 | Contract | Measured |
 |---|---|
@@ -157,7 +157,7 @@ A delegate version bump invalidates this section until it is re-run.
 |---|---|
 | png_conform | `Readers::FullLoadReader` exposes `each_chunk`, `signature`, `png`, `file_size` — the metadata path, separate from validation |
 | vectory SVG | `100x50` with width/height, `10x10` from viewBox alone. `#width` raises `Vectory::NotImplementedError` when **no** dimension source exists — including on a perfectly valid SVG — while a malformed SVG carrying `width="7"` returns 7. The error means "no dimensions", not "parse failed" |
-| emf | `Emf.parse` → `Model::Metafile` with `ok?`, `errors`, `errors?`, `emf_plus`, `header`, `records`. Truncated input raises **`IOError`**, not `Emf::FormatError` |
+| emf | `Emf.parse` → `Model::Metafile` with `ok?`, `errors`, `errors?`, `emf_plus`, `header`, `records`. Truncation does not have one exception contract: the current fixture matrix raises `Emf::FormatError`, `IOError`, or `EOFError` at different cut points |
 | vectory EPS/PS | `100.0x50.0` — floats, not integers |
 | pdfrb | `Document.open` → version `1.4`, 1 page. **Opens the broken PDF without complaint** — `open` does not validate |
 
@@ -171,14 +171,14 @@ A delegate version bump invalidates this section until it is re-run.
 | postscript | **No conformance basis.** `Postscript.parse` accepted an unmatched `}`, an undefined operator, a missing operand, and raw binary. Only an unterminated string raised |
 | pdfrb structural | `Validator.validate` → `[]` on a valid doc. Failure modes are **not uniform**: a catalog-less document raises `Pdfrb::Error`, a `/Pages` pointing at a missing object raises `NoMethodError: undefined method '[]' for nil`, and a dangling unrelated reference returns an error *string*. So the allowlist cannot be a single class |
 | vectory 0.12.0 re-verified | Re-measured 2026-08-18 on the installed line. All edges tried work (`svg→emf/eps/ps`, `emf→svg`, `eps→svg`); same-format conversion raises `NoMethodError`; `Emf.from_content` accepts SVG bytes and constructs happily. **D23's evidence reproduces exactly**: a linear gradient raises `Emfsvg::FormatError: unsupported SVG color: "url(#g)"` on `svg→emf`, and on `svg→eps` succeeds with the gradient simply absent — the same feature, loud on one edge and silent on the other. That is why lossiness is per-conversion-from-content, not a per-edge label |
-| svg_conform 0.2.1 result API | `SvgConform.validate_file(path, profile:)` returns a `ValidationResult` exposing `valid?`, `errors`, `warnings`, `error_count`, `warning_count`, `issue_count` and `profile`. There is **no `issues` method** — reading one raises `NoMethodError`. Each entry is a `SvgConform::Errors::ValidationIssue` with `message`, `element_name`, `line`, `column`, `fixable?`, `remediation`. Measured: `line` and `column` are **nil** on every issue, so SVG issues carry no position |
-| svg_conform default profile (D21) | Re-confirmed on **0.2.1**: an ordinary red stroke fails the default profile with `"Color 'red' in attribute 'stroke' is not allowed in this profile"`, and passes under `base`. The same document with no stroke colour passes both |
-| svg_conform wants a viewBox | Measured on 0.2.1: a valid SVG with `width`/`height` but no `viewBox` fails **both** the default and `base` profiles with `"SVG root element must have a viewBox attribute"`. Worth stating in the README — plenty of legitimate SVGs omit it, and `conform` will call them nonconformant |
+| svg_conform 0.2.2 result API | `SvgConform.validate_file(path, profile:)` returns a `ValidationResult` exposing `valid?`, `errors`, `warnings`, `error_count`, `warning_count`, `issue_count` and `profile`. There is **no `issues` method** — reading one raises `NoMethodError`. Each entry is a `SvgConform::Errors::ValidationIssue` with `message`, `element_name`, `line`, `column`, `fixable?`, `remediation`. Measured: `line` and `column` are **nil** on every issue, so SVG issues carry no position |
+| svg_conform default profile (D21) | Re-confirmed on **0.2.2**: an ordinary red stroke fails the default profile with `"Color 'red' in attribute 'stroke' is not allowed in this profile"`, and passes under `base`. The same document with no stroke colour passes both |
+| svg_conform wants a viewBox | Measured on 0.2.2: a valid SVG with `width`/`height` but no `viewBox` fails **both** the default and `base` profiles with `"SVG root element must have a viewBox attribute"`. Worth stating in the README — plenty of legitimate SVGs omit it, and `conform` will call them nonconformant |
 | png_conform readers | `Services::ValidationService.new(reader, path)` needs a **`Readers::FullLoadReader.new(path)`**. Measured on 0.1.4: `FullLoadReader.new` takes a filepath **or IO**, so handing it raw bytes raises `ArgumentError: path name contains null byte`. `StreamingReader` fails on every input shape tried — `Errno::EINVAL` for a File in `"rb"`, `IOError` for a `StringIO`, `NoMethodError` for a path |
 | **png_conform leaves a false verdict behind after a failed `validate`** | In all three `StreamingReader` cases above, `validate` raised **and** `context.all_errors` was left holding `{chunk_type: "SIGNATURE", message: "Invalid PNG signature"}` for a byte-perfect valid PNG. A handler that rescues the exception and reads the context gets a confident wrong answer rather than an error. Rescue must not fall through to reading the context |
 | pdfrb profiles | `Conformance::PdfA.validate(doc, level: :a1b)` → `ValidationResult`. Read violations through **`.violations`** (or `.errors`/`.warnings`/`.infos`/`.violation_count`/`.passed?`), never by enumerating the result — see the trap below. Each is a `Violation` struct `{rule_id, message, object, severity, spec_clause}` plus `error?`/`warning?`, e.g. `6.1-2 "PDF/A requires /Catalog/Metadata XMP stream"`, severity `:error`. `PdfUA.validate(doc)` takes no level. Fully usable |
-| **`ValidationResult` is Enumerable over its struct members, not its violations** | Measured on both 0.7.10 and 0.7.23: it is a keyword-init `Struct` including `Enumerable` with members `profile` and `violations`, so `result.size` is **2**, `result.first` is the String `"PDF/A-1"`, and `result.map(&:class)` is `[String, Array]`. On the fixture used, `size` happened to equal `violation_count`, so a naive `.size` looks right and is wrong everywhere else. Use `.violations` |
-| pdfrb version drift | The contracts above were first measured on **0.7.10**; a clean `bundle install` under `~> 0.7.x` now resolves **0.7.23**. Re-measured on 0.7.23: `Document.open`, `Validator.validate` → `[]`, the catalog-less `Pdfrb::Error`, the `Violation` shape, and the silent fallback on an invalid `level:` all still hold. Two changes: the standards list gained `PdfA4Deep`, `PdfUA2Deep`, `PdfUATaggingDeep` and `StructureElements`, and **`Pades` now takes `level:`** as well as `PdfA`/`PdfX`/`PdfVT`. `VeraPdfBridge.validate` takes `(pdf_bytes, profile:)` — bytes, not a document. Ruby floor is still `>= 3.2.0` |
+| **`ValidationResult` is Enumerable over its struct members, not its violations** | Measured on the original 0.7.10 line and the current 0.7.49 resolution: it is a keyword-init `Struct` including `Enumerable` with members `profile` and `violations`, so `result.size` is **2**, `result.first` is the String `"PDF/A-1"`, and `result.map(&:class)` is `[String, Array]`. On the fixture used, `size` happened to equal `violation_count`, so a naive `.size` looks right and is wrong everywhere else. Use `.violations` |
+| pdfrb version drift | The contracts above were first measured on **0.7.10**; the gemspec now constrains `~> 0.7.23` and the current bundle resolves **0.7.49**. The focused PDF specs exercise `Document.open`, structural validation, mapped `Violation` objects, named profiles and their levels against that resolution. `VeraPdfBridge.validate` takes `(pdf_bytes, profile:)` — bytes, not a document. Ruby floor is still `>= 3.2.0` |
 | pdfrb Arlington | `Arlington::Loader` offers only `list_object_names`, `object_definition`, `clear_cache!`. No upstream document runner or `Conformance` profile references it; Claricle now supplies the document walk described by D16 |
 
 **What the delegates' conformance checks actually catch**
@@ -202,11 +202,10 @@ set X", having already assumed it is a document. Claricle promised
 users "is this file conformant", which is a different and stronger
 question.
 
-So `conform` cannot be a thin delegation. Either Claricle owns a
-structural well-formedness layer per format ahead of the delegate, or
-it documents precisely and per-format what `conform` does and does not
-check. That is decision **D23**, and it is the largest open question in
-the plan.
+So `conform` could not be a thin delegation. Claricle now owns a
+structural well-formedness layer per format ahead of the delegate and
+documents precisely what each check covers. Decision **D23** settled
+that design, and the SVG, PNG and EMF structural pre-passes are delivered.
 
 **Lossiness is per-feature, not per-edge — D10 as written cannot work**
 
@@ -227,8 +226,8 @@ content with no error and no warning, which is exactly what it forbids.
 A per-edge table would label SVG→EPS `:lossless` on the strength of a
 rect and then silently discard a gradient. So lossiness has to be
 decided per conversion by inspecting what the source actually contains,
-or the edge label has to be pessimistic enough to be useless. That is
-part of **D23**'s scope.
+or the edge label has to be pessimistic enough to be useless. **D23**
+settled this with per-content feature-loss classification.
 
 **Round-trip idempotence does not generalise**
 
@@ -300,8 +299,10 @@ installed and inspected. Findings:
   `SyntaxError`, `UndefinedOperatorError`, `StackUnderflowError`,
   `RecursionLimitError`, `SizeLimitError`. The exception-only reporting
   the plan assumed is real.
-- **`pdfrb` 0.7.10**, Ruby `>= 3.2` — the highest delegate minimum;
-  Claricle's deliberate project floor is 3.3.
+- **`pdfrb` 0.7.10** was the originally verified release; the gemspec now
+  constrains `~> 0.7.23` and the current bundle resolves **0.7.49**. Its
+  Ruby floor remains `>= 3.2`, the highest delegate minimum; Claricle's
+  deliberate project floor is 3.3.
   `Pdfrb::Document.open` exists as assumed. `Validator.validate` /
   `validate!` are class methods and perform structural checks.
   `Conformance` ships named standards: `PdfA` (A1–A4), `PdfUA`, `PdfX`,
@@ -354,8 +355,8 @@ D10 folded into D23.
 | D1 | Four vertical-slice items; every item documents the commands and API it ships in README.adoc. **Amended 2026-08-18: an item may be split across several stacked PRs** — item 01 reached ~3,100 lines, which reviews as a skim rather than a review, so the author chose reviewability over one-PR-per-item. The constraint that survives: any PR that removes a documented command must carry the README correction with it, so no PR lands describing something it just deleted. 04 still does the full rewrite | settled — amended |
 | D2 | `Image#inspect` → `Image#inspection` (`Object#inspect` stays Ruby's debugging protocol; no module-level facade — it would shadow `Module#inspect`) | settled — report: renames an API the issue named |
 | D3 | Plain handler subclasses + `formats` declaration macro; frozen derived registry, no runtime mutation, no self-registration | settled |
-| D4 | All unified models are lutaml-model classes. The constraint is **three-segment on the reviewed line (0.8.19)** — `~> 0.8` would admit 0.9 through 0.99 and contradict D13. Model invariants (severity enum, non-nil message) are enforced at construction **and** deserialization — lutaml-model 0.8.19 accepts a bogus enum until `validate!` runs. `Report#valid` is derived, not stored, so appending an issue can't leave it stale | settled |
-| D5 | Hard deps on all delegates; Claricle's deliberate Ruby floor is **3.3**. `pdfrb` 0.7.10 has the highest delegate minimum at 3.2, verified 2026-08-13 (everything else tops out at 3.1). No **direct** `libpng` dependency — it is already in the tree via `vectory → emfsvg` and emfsvg uses it for embedded images, so a direct dep would be redundant, not an exclusion. Heavy gems required lazily inside handlers; `emf` (bindata-only, powers the detector) is the sole eager require | settled — no sign-off needed |
+| D4 | All unified models are lutaml-model classes. The three-segment constraint is **`~> 0.8.32`**, currently resolved to **0.8.97** — `~> 0.8` would admit 0.9 through 0.99 and contradict D13. Model invariants (severity enum, non-nil message) are enforced at construction **and** deserialization. `Report#valid` is derived, not stored, so appending an issue can't leave it stale | settled |
+| D5 | Hard deps on all delegates; Claricle's deliberate Ruby floor is **3.3**. The current pdfrb resolution is **0.7.49** and retains the highest delegate minimum at 3.2 (everything else tops out at 3.1). No **direct** `libpng` dependency — it is already in the tree via `vectory → emfsvg` and emfsvg uses it for embedded images, so a direct dep would be redundant, not an exclusion. Heavy gems required lazily inside handlers; `emf` (bindata-only, powers the detector) is the sole eager require | settled — no sign-off needed |
 | D6 | Keep Thor at `>= 1.2, < 2`; 1.0 and 1.1 fail to load on supported Ruby 3.4 because they reference the removed `DidYouMean::SPELL_CHECKERS`. `Runner` dispatches directly so operation errors reach the exit-code map. The CLI treats EPIPE as success only around actual `help` and `version` output | settled |
 | D7 | Hand-rolled detector (no marcel): PNG signature, `%PDF-`, `%!PS` + `EPSF` first-line split, `Emf.detect_format` **wrapped in a `rescue Emf::FormatError`** so an unrecognised file continues to the next probe, and encoding-aware XML root detection for SVG — decode the BOM/declaration, resolve the root QName, require the SVG namespace, and disable external entity and DTD expansion (XXE). The 4096-byte binary regex is dropped as proven insufficient | settled |
 | D8 | Tri-state `valid`, decided in order: any `error` → `no`; else any `warning` → `suspicious`; else (`info` only, or no issues at all) → `yes`. `info` never downgrades validity. Non-strict `conform?` passes `yes` AND `suspicious`; `--strict`/`strict:` requires `yes` | settled |
@@ -445,9 +446,9 @@ operations land.
 - [x] `Claricle.conform?` delegates for png, svg, emf, pdf → 03; eps/ps refused per D22
 - [x] `Claricle.convert` covers EMF↔SVG, PS/EPS↔SVG, SVG→EPS → 04
 - [x] CLI inspect/conform/convert, human + JSON → 02/03/04
-- [x] `claricle formats` support matrix → 02 (command, inspect only), grows in 03 and 04, complete at 04 (complete: `cli_spec.rb:596-630`)
-- [x] Handler registry documented; adding a format costs ONE handler class in `handlers/` (`registry.rb:8` globs the directory, `:14` derives `HANDLER_CLASSES`; README "Adding a format"; `one_class_per_format_spec.rb`). → 01 (code), 01 step 7b (README)
-- [x] Exit codes match the matrix → 01 (runner, all rows incl. 4), verified per command in 02/03/04; 03 reaches 4 end-to-end through a real faulting handler (`cli_spec.rb:765`, `spec/fixtures/faulting_handler/boom.rb`, #63)
+- [x] `claricle formats` support matrix → 02 (command, inspect only), grows in 03 and 04, complete at 04 (`spec/claricle/cli_spec.rb`, examples "prints what png can actually do", "claims conform and convert only where a handler implements them", and "emits a fixed row shape under --json")
+- [x] Handler registry documented; adding a format costs ONE handler class in `handlers/` (`lib/claricle/registry.rb` loads that directory and derives `HANDLER_CLASSES`; README "Adding a format"; `spec/claricle/one_class_per_format_spec.rb`, example "picks up a dropped-in handler class for detect, dispatch, formats and convert"). → 01 (code), 01 step 7b (README)
+- [x] Exit codes match the matrix → 01 (runner, all rows incl. 4), verified per command in 02/03/04; conform and convert each reach 4 through `spec/fixtures/faulting_handler/boom.rb` (`spec/claricle/cli_spec.rb`, examples "exits 4 when the handler raises outside its allowlist, and says what"), #63
 - [x] Conformance specs on canonical fixtures → 03 (`spec/fixtures/canonical/**`, `canonical_fixtures_spec.rb`, #64); round-trip specs per D11 → 04 are done (`determinism_spec.rb`, `emf_identity_spec.rb`)
 - [x] `compress` stub removed → 01
 - [x] README.adoc and gemspec truthful → 01 (full baseline), extended per item, final rewrite 04 (`documentation_spec.rb`)
@@ -461,7 +462,8 @@ Two promises the plan must own rather than escalate:
 - The byte **range** the issue asks for is delivered by `Location`'s
   `byte_offset + byte_length` half-open pair (01). Done: measured on
   main, `lib/claricle/models/location.rb` carries both, each refused if
-  negative or non-integer (`models_spec.rb:794`, `:850`, `:866`).
+  negative or non-integer (`spec/claricle/models_spec.rb`, examples
+  "refuses a negative byte range at both doors" and "refuses a non-Integer range").
 
 Promises narrowed by a signed-off decision, and traceable to it: WMF
 support (D14), EMF+ payload conformance (D18), EPS/PS conformance (D22)
@@ -487,7 +489,8 @@ PNG locations are **not** in this list
 - Real specs, no `double()`; fixtures from the delegates' canonical corpora.
   Met: `grep -rn "double(\|instance_double\|class_double" spec/` finds only a
   comment (#63); canonical fixtures landed in #64. `allow(...).to receive`
-  partial stubs remain in `cli_spec.rb` (the EPIPE specs, e.g. `:223`); they
+  partial stubs remain in `cli_spec.rb` (the EPIPE examples such as
+  "maps an inspect operation's broken pipe to 4"); they
   are not `double()`.
 - Commit subjects: one line, under 10 words. A forward rule only: 38 of
   268 commits already on main break it, and pushed history is not rewritten.
