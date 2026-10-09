@@ -26,10 +26,22 @@ module Claricle
     # it reaches a String attribute that Models::Base refuses because JSON
     # cannot render it, so reporting the failure would become the failure.
     def message(error)
-      error.message.encode(Encoding::UTF_8, invalid: :replace)
-    rescue EncodingError
-      error.message.b.encode(Encoding::UTF_8, undef: :replace)
+      raw_message(error).encode(Encoding::UTF_8, invalid: :replace, undef: :replace)
     end
+
+    # Exception subclasses can override #message, including with a non-String
+    # result or another exception. Reporting must not replace the original
+    # failure with a failure from its diagnostic path. Copy a real String into
+    # the core class so an overridden #encode cannot do the same thing later.
+    def raw_message(error)
+      value = error.message
+      return ::String.new(value) if ::String === value # rubocop:disable Style/CaseEquality
+
+      error.class.to_s
+    rescue StandardError
+      error.class.to_s
+    end
+    private_class_method :raw_message
   end
 
   private_constant :Fault

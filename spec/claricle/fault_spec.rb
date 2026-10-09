@@ -9,4 +9,24 @@ RSpec.describe "Claricle::Fault" do
 
     expect(fault.exit_code(error)).to eq(2)
   end
+
+  it "falls back to the exception class when message is not text" do
+    stub_const("NonTextMessageError", Class.new(StandardError) do
+      def message = nil
+    end)
+
+    expect(fault.message(NonTextMessageError.new)).to eq("NonTextMessageError")
+  end
+
+  it "falls back to the exception class when reading message fails" do
+    stub_const("BrokenMessageError", Class.new(StandardError) do
+      def message = raise("broken message")
+    end)
+
+    expect(fault.message(BrokenMessageError.new)).to eq("BrokenMessageError")
+  end
+
+  it "still replaces invalid bytes in a normal exception message" do
+    expect(fault.message(StandardError.new("bad \xFF".b))).to eq("bad \uFFFD")
+  end
 end
