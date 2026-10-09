@@ -500,8 +500,7 @@ RSpec.describe "conversion lossiness" do
       end
     end
 
-    # Follow-up #11 (claricle-open-followups.md). Pinned as an ACCEPTED,
-    # documented gap -- not a bug this example is waiting to see fixed -- see
+    # Accepted API boundary, not a bug this example is waiting to see fixed -- see
     # the CALLER CONTRACT comment on `Lossiness.classify`. `classify` sees
     # only the bytes it is handed, so nothing here can answer "lossless" for
     # one and "unknown" for the other -- they are not two inputs, they are
@@ -1359,12 +1358,11 @@ RSpec.describe "conversion lossiness" do
   # this walks ONE call path, so it catches a missing require on that path
   # and nothing else. Measured -- a second unmet dependency injected into
   # `Lossiness.classify`, which this path never reaches, leaves the example
-  # GREEN while the file is genuinely broken standalone. Closing that needs
-  # a check derived from the constants the file NAMES rather than a path
-  # someone picked; that is real machinery and it is tracked as follow-up
-  # #15, not smuggled in here. A Ripper walk of all 44 constant references
+  # GREEN while the file is genuinely broken standalone. A broader proof
+  # would need a check derived from the constants the file NAMES rather than
+  # a path someone picked. A Ripper walk of all 44 constant references
   # confirms `AttributeReferences` is currently the only one defined outside
-  # lossiness.rb, errors.rb and rexml, so there is no gap today.
+  # lossiness.rb, errors.rb and rexml, so there is no known gap today.
   describe "loading lossiness.rb on its own" do
     lib = File.join(root, "lib")
 

@@ -1,7 +1,7 @@
 # 04 — Convert: vectory routing, lossiness, README rewrite
 
 Can start: after 03 (reuses its batch helper). D11 (round-trip
-assertions) and D23 (lossiness classification) settle what it asserts.
+assertions) and D23 (lossiness classification) settled what it asserts.
 
 ## Problem
 
@@ -131,18 +131,18 @@ svg/emf/eps/ps were measured working, so v1 ships the full matrix.
 - **There is no general round-trip invariant, and that is measured
   (D11).** Byte identity against the original never held — the first
   pass always rewrites. Idempotence held for a rect-and-line fixture
-  and then failed outright once the document contained a single
-  `<text>` element: three cycles gave three different hashes on both
-  the EMF and EPS chains, with a text baseline drifting 24.4 → 23.4 →
-  22.4 and an EPS viewBox growing `0 0 100 50` → `0 -25 100 75` →
-  `0 -25 100 100`. So do **not** write a general `cycle N == cycle N+1`
-  spec; it passes only because the fixture is trivial, and that is how
-  this claim survived two review rounds.
+  across the measured routes. With a single `<text>` element, the EMF
+  chain also stabilises after the first rewrite, but the EPS chain does
+  not: its viewBox grows `0 0 100 50` → `0 0 100 90` →
+  `0 0 100 180`, and its text y coordinate moves `-40` → `-90` →
+  `-180`. So do **not** write a general `cycle N == cycle N+1` spec:
+  one stable route does not establish the property across the supported
+  matrix.
   What can honestly be asserted: conversion is **deterministic** (same
   input, identical bytes — measured true); same-format parse→serialize
   identity for EMF; and per-feature semantic properties over a fixture
-  corpus, each naming the property it checks. Pending D11 sign-off on
-  what replaces the issue's stated backbone.
+  corpus, each naming the property it checks. These are D11's replacement
+  for the issue's stated general backbone.
   Also note "dimension preservation" is not assertable until D15
   settles units — the same SVG reports `3×1` through vectory and
   `96×48` as EPS, so an equality check would be testing a coincidence.
@@ -182,7 +182,7 @@ Plumbing first again, then one edge family per commit.
    fixtures, override `convert`, declare only that handler's target-list
    data, and update the `formats` expected output together.
 5. Semantic spec suite over the fixture corpus, each spec naming the
-   property it checks (D11 leaves the overall invariant open, so do not
+   property it checks (D11 rejects a general invariant, so do not
    write a general round-trip assertion). Add a feature-loss rule only
    when a fixture demonstrates the loss.
 6. `formats` full-matrix spec once the last edge lands.
