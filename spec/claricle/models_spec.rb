@@ -1704,6 +1704,15 @@ RSpec.describe Claricle::Models do
       end
     end
 
+    it "refuses an unsupported result rather than dropping it" do
+      expect do
+        models::BatchItem.new(path: "a.png", exit_code: 0, result: Object.new)
+      end.to raise_error(
+        Lutaml::Model::ValidationError,
+        /result expects a Report or Conversion, got Object/
+      )
+    end
+
     it "carries a nested report through a round trip" do
       item = models::BatchItem.new(path: "a.png", exit_code: 1,
                                    result: report.call(issues: [issue["error"]]))
