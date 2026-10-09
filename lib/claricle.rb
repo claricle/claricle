@@ -85,19 +85,22 @@ module Claricle
   # Both shapes reach the same expansion, so a positional means here exactly
   # what it means on the command line: a literal path when it names a file,
   # and a glob otherwise.
-  def self.conform?(path = nil, pattern: nil, strict: false, profile: nil)
+  def self.conform?(path = nil, pattern: nil, strict: false, profile: nil, level: nil)
     raise InvocationError, "give exactly one of a path or pattern" unless path.nil? ^ pattern.nil?
 
+    profile = checked_profile(profile)
+    level = checked_level(profile, level)
     result = conformance_batch(*[path].compact, pattern: pattern,
-                                                strict: strict, profile: profile)
+                                                strict: strict, profile: profile, level: level)
     raise result.highest_error if result.highest_error
 
     result.exit_code.zero?
   end
 
-  def self.conformance_report(path, profile: nil)
-    checked_profile(profile)
-    Image.from_path(path).conformance_report(profile: profile)
+  def self.conformance_report(path, profile: nil, level: nil)
+    profile = checked_profile(profile)
+    level = checked_level(profile, level)
+    Image.from_path(path).conformance_report(profile: profile, level: level)
   end
 
   # A batch predicate loses information, so a caller can have the whole
@@ -105,15 +108,16 @@ module Claricle
   # which is what the command prints. Takes the command's own argument
   # shape -- files, a pattern, or both -- so the two cannot drift about
   # what conformance means.
-  def self.conformance_batch(*paths, pattern: nil, strict: false, profile: nil)
+  def self.conformance_batch(*paths, pattern: nil, strict: false, profile: nil, level: nil)
     # Checked eagerly here, before the batch runs, so a profile no format
     # defines is one invocation error about the call and never a row in a
     # report -- `conformance_report` checks it again per file, but only as a
     # no-op once this call has already passed.
-    checked_profile(profile)
+    profile = checked_profile(profile)
+    level = checked_level(profile, level)
     Batch.run(paths, pattern: pattern,
                      classify: ->(report) { conformant?(report, strict: strict) ? 0 : 1 }) do |file|
-      conformance_report(file, profile: profile)
+      conformance_report(file, profile: profile, level: level)
     end
   end
 
@@ -136,9 +140,23 @@ module Claricle
     return if profile.nil?
 
     known = Registry.profiles
-    return if known.include?(profile.to_sym)
+    return profile.to_sym if known.include?(profile.to_sym)
 
     raise InvocationError, "no format defines a profile named #{profile.inspect}"
+  end
+
+  def self.checked_level(profile, level)
+    return if level.nil?
+    raise InvocationError, "level requires a profile" if profile.nil?
+
+    accepted = Registry.levels_for_profile(profile)
+    raise InvocationError, "profile #{profile} does not take a level" unless accepted
+
+    normalized = level.to_s.downcase.to_sym
+    return normalized if accepted.include?(normalized)
+
+    raise InvocationError,
+          "profile #{profile} does not define level #{level.inspect}; choose #{accepted.join(', ')}"
   end
 
   # A batch predicate loses information, so a caller can have the whole
@@ -261,7 +279,7 @@ module Claricle
     File.join(File.dirname(file), "#{File.basename(file, ".*")}.#{target}")
   end
 
-  private_class_method :accumulate, :conclusive?, :conformant?, :checked_profile,
+  private_class_method :accumulate, :conclusive?, :conformant?, :checked_profile, :checked_level,
                        :convert_one, :resolved_convert_target, :resolved_to_target,
                        :check_to_output_conflict, :convert_extension_format, :convert_destination
 end

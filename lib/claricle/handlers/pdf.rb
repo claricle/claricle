@@ -5,6 +5,7 @@ require "timeout"
 require_relative "base"
 require_relative "../models/inspection"
 require_relative "../models/issue"
+require_relative "../models/location"
 require_relative "../models/report"
 require_relative "pdf_arlington"
 
@@ -34,11 +35,42 @@ module Claricle
     class Pdf < Base
       formats :pdf
 
+      PROFILE_LEVELS = {
+        pdf_a: %i[a1b a1a a2b a2a a3b a3a a4].freeze,
+        pdf_ua: nil,
+        pdf_x: %i[x1a x3 x4 x6].freeze,
+        pdf_vt: %i[vt1 vt2].freeze,
+        pades: %i[b-b b-t b-lt b-lta].freeze,
+        ltv: nil,
+        pdf_2_af: nil,
+        tagged_pdf: nil
+      }.freeze
+      profiles(*PROFILE_LEVELS.keys)
+      private_constant :PROFILE_LEVELS
+
+      def self.levels_for(profile)
+        PROFILE_LEVELS.fetch(profile)
+      end
+
       # Builds the `Report` a conform operation returns. A sibling class
       # rather than instance methods, matching `Handlers::Png`'s own
       # `ConformanceMapper` -- the mapping owes nothing to any metadata
       # interpretation this handler might grow later.
       class ConformanceMapper
+        PROFILE_VALIDATORS = {
+          pdf_a: :PdfA,
+          pdf_ua: :PdfUA,
+          pdf_x: :PdfX,
+          pdf_vt: :PdfVT,
+          pades: :Pades,
+          ltv: :Ltv,
+          pdf_2_af: :Pdf2AF,
+          tagged_pdf: :TaggedPdf
+        }.freeze
+        PADES_LEVELS = {
+          :"b-b" => :"B-B", :"b-t" => :"B-T",
+          :"b-lt" => :"B-LT", :"b-lta" => :"B-LTA"
+        }.freeze
         # Measured against the installed pdfrb gem (0.7.49, resolved from
         # claricle.gemspec's `~> 0.7.23`) rather than assumed --
         # 03-conform.md's own summary is a starting point, not a source,
@@ -136,14 +168,21 @@ module Claricle
         UNREADABLE_CODE = "PDF_STRUCTURE_UNREADABLE"
         UNREADABLE_MESSAGE = "PDF structure could not be validated"
 
-        def self.report(image)
+        def self.report(image, profile: nil, level: nil)
           # `image.with_path`, not `image.with_source`: `Document.open`
           # takes a path (or an IO through its block form).
-          report_for(image, image.with_path { |path| issues_for(path) })
+          issues = image.with_path { |path| issues_for(path, profile: profile, level: level) }
+          report_for(image, issues, profile: profile)
         end
 
-        def self.report_for(image, issues)
-          Models::Report.new(source_path: image.path, format: image.format.to_s, issues: issues)
+        def self.report_for(image, issues, profile:)
+          Models::Report.new(
+            source_path: image.path,
+            format: image.format.to_s,
+            issues: issues,
+            profile: profile&.to_s,
+            validator_version: profile ? ::Pdfrb::VERSION : nil
+          )
         end
 
         # The two pdfrb calls the structural check makes, each with its own
@@ -170,14 +209,37 @@ module Claricle
         # which would hide the very key the walk reports. It also runs when
         # the structural check raises -- a Catalog with no /Pages makes it
         # raise -- because the Arlington issue is what names the key.
-        def self.issues_for(path)
+        def self.issues_for(path, profile:, level:)
           document = open_document(path)
           return [unreadable_issue] unless document
 
           arlington = PdfArlington.issues(document)
           errors = structure_errors(document)
           structural = errors == :malformed ? [unreadable_issue] : errors.map { |message| issue_from(message) }
-          structural + arlington
+          structural.concat(arlington)
+          return structural if profile.nil? || structural.any?
+
+          profile_issues(document, profile, level)
+        end
+
+        def self.profile_issues(document, profile, level)
+          validator = ::Pdfrb::Conformance.const_get(PROFILE_VALIDATORS.fetch(profile))
+          arguments = level ? { level: delegate_level(profile, level) } : {}
+          validator.validate(document, **arguments).violations.map { |violation| violation_issue(violation) }
+        end
+
+        def self.delegate_level(profile, level)
+          profile == :pades ? PADES_LEVELS.fetch(level) : level
+        end
+
+        def self.violation_issue(violation)
+          location = violation.object && Models::Location.new(node_path: violation.object.to_s)
+          Models::Issue.new(
+            severity: violation.severity.to_s,
+            code: violation.rule_id.to_s,
+            message: violation.message,
+            location: location
+          )
         end
 
         def self.issue_from(message)
@@ -189,15 +251,17 @@ module Claricle
                             message: UNREADABLE_MESSAGE, location: nil)
         end
 
-        private_class_method :report_for, :open_document, :structure_errors, :issues_for, :issue_from, :unreadable_issue
+        private_class_method :report_for, :open_document, :structure_errors, :issues_for,
+                             :profile_issues, :delegate_level, :violation_issue,
+                             :issue_from, :unreadable_issue
       end
 
       private_constant :ConformanceMapper
 
-      def conformance_report(image)
+      def conformance_report(image, profile: nil, level: nil)
         require "pdfrb"
 
-        ConformanceMapper.report(image)
+        ConformanceMapper.report(image, profile: profile, level: level)
       end
 
       # A PDF header line longer than a kilobyte is not a header. The

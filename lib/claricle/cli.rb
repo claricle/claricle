@@ -96,10 +96,12 @@ module Claricle
                     desc: "Require a clean verdict, not merely the absence of errors"
     option :profile, type: :string,
                      desc: "Require conformance to a named profile the format defines"
+    option :level, type: :string, desc: "Select a level within a PDF profile"
     def conform(*files)
       result = Claricle.conformance_batch(*files, pattern: options[:pattern],
                                                   strict: options[:strict],
-                                                  profile: options[:profile])
+                                                  profile: options[:profile],
+                                                  level: options[:level])
       # The status is settled before anything is written. `tolerate_closed_output`
       # answers 0, which is right for a command that can only succeed and
       # would silently turn a nonconformant batch into a passing one here.

@@ -838,21 +838,35 @@ RSpec.describe Claricle::Cli::Runner do
       end
     end
 
-    # Three profile outcomes, and they are three DIFFERENT exit codes,
-    # which is the whole reason the two error classes are separate:
+    # Profile and level mistakes are invocation errors. A conformance
+    # failure under a recognised profile remains an ordinary exit 1.
     #
     #   a name no format defines        2   a typo in the invocation
-    #   a name THIS format lacks        3   the format is fine, the pair is not
+    #   a name THIS format lacks        2   the requested pairing is invalid
     #   a name the format defines       0   or 1, on the file's own merits
     #
     # Every one goes through the real Runner, not a stub, because the exit
     # code is the only part of this a user ever sees.
-    it "exits 3 for a profile another format defines but this one does not" do
+    it "exits 2 for a profile another format defines but this one does not" do
       workspace.call(["a.png", "valid.png"]) do
         expect(described_class.run(%w[conform a.png --profile base], output: StringIO.new))
-          .to eq(3)
+          .to eq(2)
         expect { described_class.run(%w[conform a.png --profile base], output: $stderr) }
           .to output(/:png does not define profile "base"; it defines none/).to_stderr
+      end
+    end
+
+    it "runs a PDF profile at the requested level" do
+      pdf_workspace.call(["a.pdf", PdfBuilder.path(name: "profile-cli")]) do
+        expect(described_class.run(%w[conform a.pdf --profile pdf_a --level a1b], output: StringIO.new))
+          .to eq(1)
+      end
+    end
+
+    it "exits 2 for an invalid PDF profile level" do
+      pdf_workspace.call(["a.pdf", PdfBuilder.path(name: "profile-cli")]) do
+        expect(described_class.run(%w[conform a.pdf --profile pdf_a --level nonsense], output: StringIO.new))
+          .to eq(2)
       end
     end
 

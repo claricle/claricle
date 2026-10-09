@@ -21,7 +21,7 @@ module Claricle
   # because the format IS supported -- it is the pairing that is wrong,
   # and a caller fixes the two by different means. Names what the format
   # does accept, because a refusal that does not is a second question.
-  class UnsupportedProfile < Error
+  class UnsupportedProfile < InvocationError
     def initialize(format, profile, accepted)
       super(build_message(format, profile, accepted))
     end
@@ -29,7 +29,7 @@ module Claricle
     private
 
     def build_message(format, profile, accepted)
-      message = "format #{format.inspect} does not define profile #{profile.inspect}"
+      message = "format #{format.inspect} does not define profile #{profile.to_s.inspect}"
       return "#{message}; it defines none" if accepted.empty?
 
       "#{message}; it defines #{accepted.map(&:inspect).join(", ")}"
