@@ -35,22 +35,9 @@ module Claricle
     class Pdf < Base
       formats :pdf
 
-      PROFILE_LEVELS = {
-        pdf_a: %i[a1b a1a a2b a2a a3b a3a a4].freeze,
-        pdf_ua: nil,
-        pdf_x: %i[x1a x3 x4 x6].freeze,
-        pdf_vt: %i[vt1 vt2].freeze,
-        pades: %i[b-b b-t b-lt b-lta].freeze,
-        ltv: nil,
-        pdf_2_af: nil,
-        tagged_pdf: nil
-      }.freeze
-      profiles(*PROFILE_LEVELS.keys)
-      private_constant :PROFILE_LEVELS
+      profiles(*PdfProfiles.profiles)
 
-      def self.levels_for(profile)
-        PROFILE_LEVELS.fetch(profile)
-      end
+      def self.levels_for(profile) = PdfProfiles.levels_for(profile)
 
       # Builds the `Report` a conform operation returns. A sibling class
       # rather than instance methods, matching `Handlers::Png`'s own
