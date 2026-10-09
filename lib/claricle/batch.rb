@@ -81,6 +81,9 @@ module Claricle
     MAX_GLOB_COMBINATIONS = 1024
     private_constant :MAX_GLOB_COMBINATIONS
 
+    GLOB_METACHARACTERS = /[*?\[{]/
+    private_constant :GLOB_METACHARACTERS
+
     class << self
       def run(arguments, classify:, pattern: nil, &operation)
         run_files(expand(arguments, pattern), classify: classify, &operation)
@@ -126,13 +129,25 @@ module Claricle
 
       def matched_files(arguments, pattern)
         found = arguments.flat_map do |argument|
-          File.file?(argument) ? [argument] : glob(argument)
+          next [argument] if File.file?(argument)
+
+          require_existing_literal(argument)
+          glob(argument)
         end
         found.concat(glob(pattern)) if pattern
         found.select { |path| File.file?(path) }
              .sort.uniq { |path| File.realpath(path) }
       rescue ArgumentError => e
         raise InvocationError, "invalid path: #{e.message}"
+      end
+
+      # Without a glob metacharacter an argument can only be a literal path,
+      # so one that names nothing is a typo, not a pattern that matched none.
+      # A directory exists, so it still reaches `nothing_matched`'s wording.
+      def require_existing_literal(argument)
+        return if argument.match?(GLOB_METACHARACTERS) || File.exist?(argument)
+
+        raise InvocationError, "No such file or directory - #{argument}"
       end
 
       def outcome(path, classify)
