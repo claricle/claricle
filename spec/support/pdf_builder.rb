@@ -34,11 +34,14 @@ module PdfBuilder
   CATALOG = "<< /Type /Catalog /Pages 2 0 R >>"
   PAGES = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
   PAGE = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"
+  # The conformant baseline: the Arlington walker requires /Resources on a
+  # page, and the object-stream fixtures size their payloads off `PAGE`.
+  RESOURCED_PAGE = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>"
 
   # oid, generation, body. Generation travels with the object because the
   # xref row and the `N G obj` line have to agree, and the generation
   # fixtures move both together.
-  OBJECTS = [[1, 0, CATALOG], [2, 0, PAGES], [3, 0, PAGE]].freeze
+  OBJECTS = [[1, 0, CATALOG], [2, 0, PAGES], [3, 0, RESOURCED_PAGE]].freeze
 
   TRAILER = "<< /Size 4 /Root 1 0 R >>"
 
