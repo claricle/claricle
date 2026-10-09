@@ -63,9 +63,14 @@ dependency where marked ⚙):
   profile returns no errors for raw binary, and vectory raises on a
   *valid* dimensionless SVG. "The delegate didn't complain" is not
   evidence the file parsed.
-- **Detector** (`lib/claricle/detector.rb`): `detect(bytes)` /
-  `detect_path(path)` → `:png :svg :emf :wmf :eps :ps :pdf` or raise
-  `UnknownFormat`. Load-bearing details, each corrected by execution on
+- **Detector** (`lib/claricle/detector.rb`): internal --
+  `Claricle::Detector` is a `private_constant`
+  (`detector.rb:694`), so `Claricle::Detector` raises `NameError` from
+  outside the gem. `Detector.detect(bytes)` / `Detector.detect_path(path)`
+  are reached through the public `Claricle.detect(source)` (a String or
+  an IO) and `Image.from_path` / `Image.from_content`;
+  `Claricle.detect_path` does not exist. Result: `:png :svg :emf :wmf
+  :eps :ps :pdf` or raise `UnknownFormat`. Load-bearing details, each corrected by execution on
   2026-08-12 — do not trust the earlier wording, it was wrong:
   - Normalize `bytes.to_s.b` first (callers hand UTF-8 strings;
     comparisons must be binary).
@@ -90,9 +95,11 @@ dependency where marked ⚙):
   - `:wmf` is still detected even though nothing handles it (D14), so
     the user gets `UnsupportedFormat`/3 rather than a misleading
     "unknown format".
-- **Registry** (`lib/claricle/registry.rb`): `HANDLER_CLASSES` (one
-  list, empty here) → `HANDLERS` frozen map derived via each class's
-  `supported_formats`; `handler_for(format)` fetches or raises
+- **Registry** (`lib/claricle/registry.rb`): internal
+  (`private_constant :Registry`, `registry.rb:124`); reached through
+  `Image` operations and the `formats` command. `HANDLER_CLASSES` (one
+  list, empty when 01 shipped) → `HANDLERS` frozen map derived via each
+  class's `supported_formats`; `handler_for(format)` fetches or raises
   `UnsupportedFormat`; `formats -> [Symbol]` (sorted; feeds 02's
   `formats` command); no runtime mutation, no test-only APIs.
 - **Handler metadata carries what the registry derives.** The advertised
@@ -117,7 +124,10 @@ dependency where marked ⚙):
   matches, a delegate call, an XML parse) and their order is
   load-bearing. That is the central table the README has to be honest
   about rather than pretend away.
-- **Handlers::Base** (`lib/claricle/handlers/base.rb`): `formats(*syms)`
+- **Handlers::Base** (`lib/claricle/handlers/base.rb`): internal
+  (`private_constant :Handlers`, `base.rb:168`) -- a handler is a
+  subclass of it, never called by name from outside the gem.
+  `formats(*syms)`
   class macro is pure declaration; instance `inspection(image)`,
   `conformance_report(image)`, `convert(image, to:)` all raise
   `UnsupportedFormat` (interpolate `to` into the message — unused-arg
@@ -248,8 +258,9 @@ subjects in quotes):
   exercises 4 end-to-end through a deliberately faulting handler
   raising an off-allowlist exception. A real crashing delegate is the
   wrong probe — once the allowlists exist, a corrupt fixture is
-  nonconformance and exits 1. (Matrix covered: `cli_spec.rb:10-45`. End-to-end exit 4:
-  `cli_spec.rb:765` through `spec/fixtures/faulting_handler/boom.rb`, #63.)
+  nonconformance and exits 1. (Matrix covered across `cli_spec.rb`: exit 2 at `:524`, 3 at `:540`
+  and `:551`, 1 at `:709`. End-to-end exit 4: `:765` (conform) and
+  `:1330` (convert), through `spec/fixtures/faulting_handler/boom.rb`, #63.)
 - [x] `Report#valid` spec covers info-only and warning-plus-info inputs,
   proves the frozen issue collection refuses mutation rather than
   silently accepting it, and proves the verdict is correct after a
@@ -262,7 +273,7 @@ subjects in quotes):
   ever resolved. Both bounds are real divergences from a permissive XML
   reader, not formalities ⚙: REXML parses a valid SVG behind a
   comment longer than `SVG_PROLOG_BYTES` (8192; pinned either side at
-  `detector_spec.rb:1063-1078`), and behind no comment at all with the namespace
+  `detector_spec.rb:1064-1078`), and behind no comment at all with the namespace
   dropped, that `Claricle.detect` refuses in both cases.
 - [x] (one-time check, now complete) Execution-diff vs main shows ONLY: stubs gone, version unchanged,
   README and gemspec truthful.
