@@ -29,6 +29,25 @@ module DocumentationExamples
     pattern = /#{sentence.split.map { |word| Regexp.escape(word) }.join('\s+')}/
     expect(readme).to match(pattern), "README no longer claims: #{sentence}"
   end
+
+  # The lines the README prints under `$ <command>`, up to the next
+  # prompt, blank line or block delimiter.
+  def transcript(command)
+    lines = readme.lines(chomp: true)
+    start = lines.index("$ #{command}")
+    expect(start).not_to be_nil, "README no longer shows: $ #{command}"
+    lines[(start + 1)..].take_while { |line| !line.empty? && line != "----" && !line.start_with?("$ ") }
+  end
+
+  # The CLI's stdout lines and exit code for one in-process invocation.
+  def run_cli(*argv)
+    previous_stdout = $stdout
+    $stdout = StringIO.new
+    code = Claricle::Cli::Runner.run(argv, output: StringIO.new)
+    [$stdout.string.lines(chomp: true), code]
+  ensure
+    $stdout = previous_stdout
+  end
 end
 
 RSpec.describe "the documentation" do
@@ -125,6 +144,44 @@ RSpec.describe "the documentation" do
     end
   end
 
+  # The transcripts are pasted output, so nothing but running the command
+  # notices when a handler lands and the paste goes stale.
+  describe "the CLI transcripts" do
+    it "shows the formats matrix the CLI prints" do
+      expect(transcript("claricle formats")).to eq(run_cli("formats").first)
+      expect(transcript("claricle formats --json")).to eq(run_cli("formats", "--json").first)
+    end
+
+    it "shows the conversion summary the CLI prints, lossiness included" do
+      fixtures = File.join(root, "spec/fixtures/convert")
+
+      Dir.mktmpdir do |dir|
+        FileUtils.cp(File.join(fixtures, "rect_and_line.emf"), dir)
+        FileUtils.cp(File.join(fixtures, "gradient_linear.svg"), dir)
+        Dir.chdir(dir) do
+          expect(transcript("claricle convert rect_and_line.emf --to svg"))
+            .to eq(run_cli("convert", "rect_and_line.emf", "--to", "svg").first)
+          expect(transcript("claricle convert gradient_linear.svg --to emf"))
+            .to eq(run_cli("convert", "gradient_linear.svg", "--to", "emf").first)
+        end
+      end
+    end
+
+    it "shows the conformance verdicts and the exit code they produce" do
+      fixtures = File.join(root, "spec/fixtures/conform")
+
+      Dir.mktmpdir do |dir|
+        FileUtils.cp(File.join(fixtures, "valid.svg"), dir)
+        FileUtils.cp(File.join(fixtures, "no_viewbox.svg"), dir)
+        Dir.chdir(dir) do
+          lines, code = run_cli("conform", "valid.svg", "no_viewbox.svg")
+          shown = transcript('claricle conform valid.svg no_viewbox.svg; echo "exit: $?"')
+          expect(shown).to eq([*lines, "exit: #{code}"])
+        end
+      end
+    end
+  end
+
   describe "what the README claims" do
     # The verdict alone pins nothing here. A 70-byte PNG settles after
     # its 8-byte signature, so a spec that only checked the returned
@@ -179,18 +236,12 @@ RSpec.describe "the documentation" do
         .to raise_error(Claricle::UnknownFormat)
     end
 
-    # This is the passage most likely to go stale next: it names SVG
-    # specifically as the ONLY format with a handler, so the day a second
-    # format gets one, the sentence is still true about SVG and wrong
-    # about "every other format still answers 2 or 3". A `shows`/`claims`
-    # pin cannot see that kind of drift -- it only proves the sentence is
-    # still IN the README, not that it is still the whole truth. Running
-    # `conform` end to end against both a conformant and a nonconformant
-    # SVG is what a text match cannot give: proof the exit codes the
-    # sentence promises are the exit codes the CLI actually returns today.
-    it "reaches exit 0 and exit 1 through conform now that SVG has a handler" do
-      claims("SVG is the first format with a conformance handler, so 0")
-      claims("and 1 are now reachable end to end for an SVG file")
+    # A `claims` pin only proves the sentence is still IN the README.
+    # Running `conform` on a conformant and a nonconformant SVG proves the
+    # exit codes it promises are the ones the CLI returns.
+    it "reaches exit 0 and exit 1 through conform" do
+      claims("0 and 1 are reachable end to end for every format with a conformance handler")
+      shows("| 1 | The file is not conformant")
 
       conform_fixtures = File.join(root, "spec/fixtures/conform")
 
@@ -384,7 +435,7 @@ RSpec.describe "the documentation" do
       # the same.
       claims("The public surface is `Claricle.detect`, `Claricle.conform?`, " \
              "`Claricle.conformance_report`, `Claricle.conformance_batch`, " \
-             "`Claricle::Image`, " \
+             "`Claricle.convert_batch`, `Claricle::Image`, " \
              "`Claricle::BatchResult`, " \
              "`Claricle::Cli` (including `Cli::Runner` and " \
              "`Runner::Status`), `Claricle::VERSION`, the error classes, " \
