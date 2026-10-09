@@ -117,7 +117,8 @@ RSpec.describe "Claricle conformance API" do
               source_path: "a.png", format: "png",
               issues: list.map { |s| Claricle::Models::Issue.new(severity: s, message: "m") }
             )
-            image = instance_double(Claricle::Image, conformance_report: report)
+            image = Claricle::Image.from_path("a.png")
+            allow(image).to receive(:conformance_report).and_return(report)
             allow(Claricle::Image).to receive(:from_path).and_return(image)
 
             expect([Claricle.conform?("a.png"), Claricle.conform?("a.png", strict: true)])

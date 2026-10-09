@@ -13,6 +13,7 @@ require "rexml/security"
 require "fileutils"
 require "tempfile"
 require "stringio"
+require_relative "../../support/svg_conform_results"
 
 RSpec.describe "Claricle SVG handler" do
   let(:handler) { Claricle.const_get(:Handlers).const_get(:Svg).new }
@@ -776,6 +777,8 @@ RSpec.describe "Claricle SVG handler" do
   # `~> 0.2.2`, so a release that changes any of them fails here rather
   # than quietly changing what a report says.
   describe "conformance_report" do
+    include SvgConformResults
+
     let(:conform_fixtures) { File.join(__dir__, "..", "..", "fixtures", "conform") }
 
     # A `def`, not a `let`: `let` has no arity, so `let(:x) { |name| ... }`
@@ -784,25 +787,12 @@ RSpec.describe "Claricle SVG handler" do
       handler.conformance_report(Claricle::Image.from_path(File.join(conform_fixtures, "#{name}.svg")))
     end
 
-    def issue_double(type, id, severity: nil, line: nil, column: nil)
-      instance_double(
-        SvgConform::Errors::ValidationIssue,
-        severity: severity, type: type, requirement_id: id,
-        message: "#{id} said so", line: line, column: column
-      )
-    end
-
     # Stubs the class, not any instance: `Validator.new` is the only way
-    # the mapper reaches one, so replacing its return value is both
-    # narrower than `allow_any_instance_of` and a real verifying double.
+    # the mapper reaches one. The validator and everything it returns are
+    # real svg_conform objects (see spec/support/svg_conform_results.rb).
     def stub_validation(errors: [], warnings: [], validity_errors: [])
-      result = instance_double(
-        SvgConform::ValidationResult,
-        errors: errors, warnings: warnings, validity_errors: validity_errors
-      )
-      validator = instance_double(SvgConform::Validator)
-      allow(validator).to receive(:validate_file).and_return(result)
-      allow(SvgConform::Validator).to receive(:new).and_return(validator)
+      result = svg_result(errors: errors, warnings: warnings, validity_errors: validity_errors)
+      allow(SvgConform::Validator).to receive(:new).and_return(svg_validator_returning(result))
     end
 
     # svg_conform keeps XML parse failures in its SAX handler's own
@@ -1033,10 +1023,26 @@ RSpec.describe "Claricle SVG handler" do
     }.each do |raw, expected|
       it "maps severity #{raw[:severity].inspect} / type #{raw[:type].inspect} to #{expected}" do
         stub_validation(
-          errors: [issue_double(raw[:type], "some_requirement", severity: raw[:severity])]
+          errors: [svg_issue(raw[:type], "some_requirement", severity: raw[:severity])]
         )
 
         expect(conform("valid").issues.map(&:severity)).to eq([expected])
+      end
+    end
+
+    # The same mapping through the real validator, on the three
+    # (severity, type) shapes real input is measured to produce. Each
+    # fixture/profile pair is the one that produced it.
+    {
+      ["conform", "no_viewbox", :base, "viewbox_required"] => "error",
+      ["convert", "clip_path_attribute", :metanorma, "id_references"] => "error",
+      ["convert", "root_style_rect", :svg_1_2_rfc, "style_promotion"] => "info"
+    }.each do |(dir, name, profile, code), expected|
+      it "maps real #{code} (#{profile}) to #{expected}" do
+        path = File.join(__dir__, "..", "..", "fixtures", dir, "#{name}.svg")
+        issues = handler.conformance_report(Claricle::Image.from_path(path), profile: profile).issues
+
+        expect(issues.select { |issue| issue.code == code }.map(&:severity).uniq).to eq([expected])
       end
     end
 
@@ -1044,7 +1050,7 @@ RSpec.describe "Claricle SVG handler" do
     # as an error is the choice that cannot understate a finding; dropping
     # it is the one outcome a report must never have.
     it "reports an unknown issue type rather than dropping it" do
-      stub_validation(validity_errors: [issue_double(:something_new, "future_requirement")])
+      stub_validation(validity_errors: [svg_issue(:something_new, "future_requirement")])
 
       expect(conform("valid").issues.map { |issue| [issue.severity, issue.code] })
         .to eq([%w[error future_requirement]])
@@ -1055,9 +1061,9 @@ RSpec.describe "Claricle SVG handler" do
     # the three apart rather than merging them.
     it "collects errors, warnings and validity errors alike" do
       stub_validation(
-        errors: [issue_double(:error, "an_error")],
-        warnings: [issue_double(:warning, "a_warning")],
-        validity_errors: [issue_double(:error, "a_validity_error")]
+        errors: [svg_issue(:error, "an_error")],
+        warnings: [svg_issue(:warning, "a_warning")],
+        validity_errors: [svg_issue(:error, "a_validity_error")]
       )
 
       expect(conform("valid").issues.map(&:code))
@@ -1081,7 +1087,7 @@ RSpec.describe "Claricle SVG handler" do
       { line: nil, column: 11 }
     ].each do |position|
       it "carries a location when the issue reports #{position.compact.keys.join(" and ")}" do
-        stub_validation(errors: [issue_double(:error, "positioned", **position)])
+        stub_validation(errors: [svg_issue(:error, "positioned", **position)])
 
         expect(conform("valid").issues.first.location).to have_attributes(**position)
       end
