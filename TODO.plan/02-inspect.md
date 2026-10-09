@@ -137,16 +137,20 @@ it, and after that every handler arrives as a complete slice.
 - [x] `Claricle::Image.from_path(f).inspection` returns a populated
   `Inspection` for a real PNG, SVG, EMF, EPS, PS, and PDF fixture --
   the PDF one generated rather than committed, per the amendment above.
-  `PdfBuilder`-generated PDFs (`cli_spec.rb:393`); the two committed
-  PDFs are gone and `spec/support/inspect_fixture.rb` builds them at spec
-  time (#67).
-- [x] A real WMF fixture is detected as `:wmf` and refused with exit 3 (D14; `cli_spec.rb:545-550`).
+  `PdfBuilder`-generated PDFs (`spec/claricle/cli_spec.rb`, example
+  `inspects a PDF through the real detector`); the two committed PDFs are
+  gone and `spec/support/inspect_fixture.rb` builds them at spec time (#67).
+- [x] A real WMF fixture is detected as `:wmf` and refused with exit 3
+  (D14; `spec/claricle/cli_spec.rb`, example
+  `exits 3 for a detected format with no handler`).
 - [x] `claricle inspect`/`claricle formats` work in human and JSON modes;
   exit codes verified (0 / 2 missing file / 3 unknown format).
 - [x] `formats` reports each format's true operations. Originally
   "`inspect` only"; once 03 and 04 shipped that was no longer true, and
-  `cli_spec.rb:608-628` asserts the per-format truth (D22: eps/ps have
-  `convert` but not `conform`).
+  `spec/claricle/cli_spec.rb`, example
+  `claims conform and convert only where a handler implements them`,
+  asserts the per-format truth (D22: eps/ps have `convert` but not
+  `conform`).
 - ~~Full Pre-Push Review Chain passed.~~ Superseded: Hassan 2026-10-09 requires TDD, only changed specs, and green GHA; no extra review chain.
 
 ## Files
