@@ -135,4 +135,6 @@ module Claricle
     private_class_method :svg_elements, :repaired?, :rewrite, :removed_unstroked_line?, :stroke_free?, :number,
                          :reflect, :viewport_sum, :view_box_height
   end
+
+  private_constant :PostscriptFidelity
 end

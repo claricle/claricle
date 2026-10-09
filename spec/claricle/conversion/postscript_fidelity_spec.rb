@@ -13,7 +13,7 @@ RSpec.describe "svg -> eps/ps fidelity repairs" do
 
   def shapes(source) = ConvertSemantics.painted_shapes(postscript(source))
 
-  let(:repair) { Claricle::PostscriptFidelity.method(:repair) }
+  let(:repair) { Claricle.const_get(:PostscriptFidelity).method(:repair) }
 
   describe "lengths postsvg reads as 0" do
     {
