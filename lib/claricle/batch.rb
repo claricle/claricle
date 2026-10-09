@@ -128,15 +128,18 @@ module Claricle
       private
 
       def matched_files(arguments, pattern)
+        missing = []
         found = arguments.flat_map do |argument|
           next [argument] if File.file?(argument)
 
-          require_existing_literal(argument)
+          missing << argument if missing_literal?(argument)
           glob(argument)
         end
         found.concat(glob(pattern)) if pattern
-        found.select { |path| File.file?(path) }
-             .sort.uniq { |path| File.realpath(path) }
+        files = found.select { |path| File.file?(path) }
+                     .sort.uniq { |path| File.realpath(path) }
+        reject_missing_literal(missing.first) unless files.empty?
+        files
       rescue ArgumentError => e
         raise InvocationError, "invalid path: #{e.message}"
       end
@@ -144,10 +147,15 @@ module Claricle
       # Without a glob metacharacter an argument can only be a literal path,
       # so one that names nothing is a typo, not a pattern that matched none.
       # A directory exists, so it still reaches `nothing_matched`'s wording.
-      def require_existing_literal(argument)
-        return if argument.match?(GLOB_METACHARACTERS) || File.exist?(argument)
+      def missing_literal?(argument)
+        !argument.match?(GLOB_METACHARACTERS) && !File.exist?(argument)
+      end
 
-        raise InvocationError, "No such file or directory - #{argument}"
+      # Only raised once something else matched: that is the case where
+      # dropping the typo would be silent. When nothing matched at all,
+      # `nothing_matched`'s "no files matched" is the error.
+      def reject_missing_literal(argument)
+        raise InvocationError, "No such file or directory - #{argument}" if argument
       end
 
       def outcome(path, classify)
