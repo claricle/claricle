@@ -537,6 +537,14 @@ RSpec.describe Claricle::Cli::Runner do
       expect(stream.string).not_to include("Errno")
     end
 
+    it "escapes control characters in a diagnostic" do
+      stream = StringIO.new
+
+      expect(described_class.run(["inspect", "missing\nerror: forged\e[31m"], output: stream)).to eq(2)
+      expect(stream.string.lines.size).to eq(1)
+      expect(stream.string).to include('missing\\x0Aerror: forged\\x1B[31m')
+    end
+
     it "exits 2 when conform is given a missing file beside a real one" do
       Tempfile.create(["real", ".png"]) do |file|
         stream = StringIO.new
