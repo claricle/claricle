@@ -95,7 +95,8 @@ RSpec.describe "Claricle conformance API" do
     end
 
     # D8: non-strict passes yes AND suspicious; strict requires yes.
-    # Driven against real Reports, because no handler produces one yet.
+    # Driven against real Reports and a real Image, because no handler
+    # produces every verdict shape yet.
     describe "the tri-state verdict" do
       severities = {
         "a clean file" => [],
@@ -117,7 +118,8 @@ RSpec.describe "Claricle conformance API" do
               source_path: "a.png", format: "png",
               issues: list.map { |s| Claricle::Models::Issue.new(severity: s, message: "m") }
             )
-            image = instance_double(Claricle::Image, conformance_report: report)
+            image = Claricle::Image.from_content(File.binread(png), format: :png)
+            allow(image).to receive(:conformance_report).and_return(report)
             allow(Claricle::Image).to receive(:from_path).and_return(image)
 
             expect([Claricle.conform?("a.png"), Claricle.conform?("a.png", strict: true)])
