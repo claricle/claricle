@@ -3,9 +3,10 @@
 require "rexml/document"
 require_relative "detector"
 require_relative "postscript_fidelity/view_box"
+require_relative "postscript_fidelity/verdict"
 
 module Claricle
-  # Closes six silent losses in postsvg-0.3.0's SVG -> PS/EPS writer, so the
+  # Closes seven silent losses in postsvg-0.3.0's SVG -> PS/EPS writer, so the
   # `:lossless` verdict for the shapes Lossiness proves kept is true.
   # `repair` rewrites the SVG before the writer sees it; `orient` fixes the
   # PostScript it returns. Both pass their input through untouched when they
@@ -18,6 +19,8 @@ module Claricle
   #                         `translate` + `scale`, not `concat`: Postsvg.to_svg ignores concat.
   #   svg/parser.rb:27-33     viewBox is read as [llx lly urx ury], so a non-zero origin is
   #                         misplaced: `repair` rewrites it to origin 0 0, `orient` shifts by it.
+  #   (no code)               width/height are ignored when a viewBox is present: `orient` fits the
+  #                         viewBox into them (xMidYMid meet) and sizes the page to them.
   #   (no code)               the flip mirrors `show` text: each is counter-flipped about its origin.
   #                         (`<image>` is emitted as a bare `image` operator with no data: nothing to flip.)
   module PostscriptFidelity
@@ -64,13 +67,29 @@ module Claricle
       box = match.captures.map { |text| Float(text, exception: false) }
       return postscript unless box.all?
 
+      fit = ViewBox.fit(svg)
+      return upright(scaled(postscript, fit, origin)) if fit
+
       upright(reflect(postscript, box, ViewBox.viewport_sum(svg) || (box[1] + box[3]), origin))
+    end
+
+    # width/height differ from the viewBox: postsvg sized the page to the viewBox and applied no scale.
+    def scaled(postscript, fit, origin)
+      width, height, scale, dx, dy = fit
+      shift = origin_shift(origin)
+      steps = "#{number(dx)} #{number(dy)} translate\n#{number(scale)} #{number(scale)} scale\n"
+      postscript.sub(BBOX) { "%%BoundingBox: 0 0 #{number(width)} #{number(height)}" }
+                .sub("%%EndComments\n") { "%%EndComments\n0 #{number(height)} translate\n1 -1 scale\n#{steps}#{shift}" }
+    end
+
+    def origin_shift(origin)
+      origin.all?(&:zero?) ? "" : "#{origin.map { |value| number(-value) }.join(" ")} translate\n"
     end
 
     def reflect(postscript, box, sum, origin)
       llx, lly, urx, ury = box
       bbox = [llx, sum - ury, urx, sum - lly].map { |value| number(value) }.join(" ")
-      shift = origin.all?(&:zero?) ? "" : "#{origin.map { |value| number(-value) }.join(" ")} translate\n"
+      shift = origin_shift(origin)
       postscript.sub(BBOX) { "%%BoundingBox: #{bbox}" }
                 .sub("%%EndComments\n") { "%%EndComments\n0 #{number(sum)} translate\n1 -1 scale\n#{shift}" }
     end
@@ -134,7 +153,7 @@ module Claricle
     end
 
     private_class_method :svg_elements, :repaired?, :rewrite, :removed_unstroked_line?, :stroke_free?, :number,
-                         :reflect, :upright
+                         :reflect, :upright, :scaled, :origin_shift
   end
 
   private_constant :PostscriptFidelity

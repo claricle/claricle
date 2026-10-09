@@ -713,7 +713,7 @@ module Claricle
           source_path: image.path,
           source_format: image.format.to_s,
           target_format: to.to_s,
-          lossiness: Lossiness.classify(source_format: image.format, target_format: to, source: content),
+          lossiness: PostscriptFidelity::Verdict.classify(image.format, to, content),
           content: converted
         )
       end
