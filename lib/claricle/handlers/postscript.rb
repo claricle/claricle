@@ -619,8 +619,18 @@ module Claricle
           next if key.nil? || seen.key?(key)
 
           seen[key] = true
-          kept << line
+          kept << delegate_line(line)
         end
+      end
+
+      # postscript 0.2.0 recognises LF and CRLF but not DSC's third line
+      # ending, a bare CR. Normalise only that terminator in the small,
+      # filtered copy sent to the delegate; the original bytes still
+      # govern declaration order and validation everywhere else.
+      def self.delegate_line(line)
+        return line unless line.end_with?("\r")
+
+        "#{line.delete_suffix("\r")}\n"
       end
 
       # What `line` would occupy in the filtered header, or nil for a
@@ -642,6 +652,11 @@ module Claricle
         text = first_text(source, name)
         return nil unless text
 
+        parsed_declaration(text, name)
+      end
+
+      def self.parsed_declaration(text, name)
+
         operands = DscNumbers::GRAMMARS.fetch(name).match(text)
         return nil unless operands
 
@@ -649,7 +664,193 @@ module Claricle
       end
     end
 
-    private_constant :Dsc, :DscHeader, :DscKeywords, :DscNumbers, :HeaderScanner
+    # A bounded-memory reader for DSC's CR, LF and CRLF-delimited lines.
+    # It also exposes exact byte/line skips for DSC data sections, whose
+    # payload may contain arbitrary bytes that resemble structuring comments.
+    class DscStream
+      # DSC comments top out at 255 characters. Extra room tolerates a
+      # non-DSC body line without letting one unterminated line grow with
+      # the file.
+      MAX_LINE_BYTES = 1024
+
+      def initialize(source, offset:, length:, chunk_bytes:)
+        @source = source
+        @cursor = offset
+        @remaining = length
+        @chunk_bytes = chunk_bytes
+        @buffer = +"".b
+        @discarding = false
+        @source.seek(offset) if @source.respond_to?(:read)
+      end
+
+      def next_line
+        loop do
+          if (ending = @buffer.index(Dsc::LINE_BREAK))
+            fill if pending_cr?(ending)
+            line = @buffer.slice!(0, line_end(ending))
+            if @discarding
+              @discarding = false
+              return +"".b
+            end
+            return line
+          end
+
+          return final_line unless fill
+
+          discard_long_line if @buffer.bytesize > MAX_LINE_BYTES
+        end
+      end
+
+      def skip_bytes(count)
+        buffered = [count, @buffer.bytesize].min
+        @buffer.slice!(0, buffered)
+        skip_source(count - buffered)
+      end
+
+      def skip_lines(count)
+        count.times { break unless next_line }
+      end
+
+      private
+
+      def fill
+        return false if @remaining.zero?
+
+        amount = [@chunk_bytes, @remaining].min
+        bytes = if @source.respond_to?(:read)
+                  @source.read(amount)
+                else
+                  @source.byteslice(@cursor, amount)
+                end
+        if bytes.nil? || bytes.empty?
+          @remaining = 0
+          return false
+        end
+
+        @cursor += bytes.bytesize
+        @remaining -= bytes.bytesize
+        @buffer << bytes
+        true
+      end
+
+      def pending_cr?(ending)
+        @buffer.getbyte(ending) == 13 && ending + 1 == @buffer.bytesize && @remaining.positive?
+      end
+
+      def line_end(ending)
+        crlf = @buffer.getbyte(ending) == 13 && @buffer.getbyte(ending + 1) == 10
+        ending + (crlf ? 2 : 1)
+      end
+
+      def final_line
+        if @discarding
+          @buffer.clear
+          @discarding = false
+          return +"".b
+        end
+        return nil if @buffer.empty?
+
+        @buffer.slice!(0, @buffer.bytesize)
+      end
+
+      def discard_long_line
+        @buffer.clear
+        @discarding = true
+      end
+
+      def skip_source(count)
+        amount = [count, @remaining].min
+        if @source.respond_to?(:read)
+          @source.seek(amount, IO::SEEK_CUR)
+        else
+          @cursor += amount
+        end
+        @remaining -= amount
+      end
+    end
+
+    # Resolves box comments deferred with `(atend)` from the outer
+    # document trailer. Nested documents and declared data payloads are
+    # opaque, so comment-shaped bytes inside them never become metadata.
+    module DscTrailer
+      TRAILER = /\A%%Trailer[ \t]*(?:\r\n|\r|\n|\z)/
+      EOF_COMMENT = /\A%%EOF[ \t]*(?:\r\n|\r|\n|\z)/
+      BEGIN_DOCUMENT = /\A%%BeginDocument:/
+      END_DOCUMENT = /\A%%EndDocument[ \t]*(?:\r\n|\r|\n|\z)/
+      BEGIN_BINARY = /\A%%BeginBinary:[ \t]*(\d+)[ \t]*(?:\r\n|\r|\n|\z)/
+      BEGIN_DATA = /\A%%BeginData:[ \t]*(\d+)(?:[ \t]+(?:Binary|ASCII|Hex))?[ \t]+(Bytes|Lines)[ \t]*(?:\r\n|\r|\n|\z)/
+
+      def self.boxes(raw, signature, chunk_bytes)
+        range = postscript_range(raw, signature)
+        return {} unless range
+
+        stream = DscStream.new(raw, offset: range.first, length: range.last, chunk_bytes: chunk_bytes)
+        declarations = scan(stream)
+        declarations.to_h do |name, values|
+          unique = values.uniq
+          [name, unique.one? ? Dsc.parsed_declaration(unique.first, name) : nil]
+        end.compact
+      end
+
+      def self.postscript_range(raw, signature)
+        size = raw.respond_to?(:read) ? raw.size : raw.bytesize
+        first = if raw.respond_to?(:read)
+                  raw.seek(0)
+                  raw.read([30, size].min) || "".b
+                else
+                  raw.byteslice(0, [30, size].min)
+                end
+        return [0, size] if first.start_with?(signature)
+
+        EpsBinary.postscript_range(first, size)
+      end
+
+      def self.scan(stream)
+        declarations = Hash.new { |hash, key| hash[key] = [] }
+        depth = 0
+        trailer = false
+        while (line = stream.next_line)
+          if skip_payload(stream, line)
+            next
+          elsif BEGIN_DOCUMENT.match?(line)
+            depth += 1
+            next
+          elsif END_DOCUMENT.match?(line) && depth.positive?
+            depth -= 1
+            next
+          end
+          next if depth.positive?
+
+          trailer = true if TRAILER.match?(line)
+          break if trailer && EOF_COMMENT.match?(line)
+          collect(declarations, line) if trailer
+        end
+        declarations
+      end
+
+      def self.skip_payload(stream, line)
+        if (match = BEGIN_BINARY.match(line))
+          stream.skip_bytes(Integer(match[1], 10))
+        elsif (match = BEGIN_DATA.match(line))
+          count = Integer(match[1], 10)
+          match[2] == "Bytes" ? stream.skip_bytes(count) : stream.skip_lines(count)
+        else
+          return false
+        end
+        true
+      end
+
+      def self.collect(declarations, line)
+        %w[BoundingBox HiResBoundingBox].each do |name|
+          next unless Dsc.declares?(line, name)
+
+          declarations[name] << Dsc.trim(line.delete_prefix("%%#{name}:"))
+        end
+      end
+    end
+
+    private_constant :Dsc, :DscHeader, :DscKeywords, :DscNumbers, :DscStream, :DscTrailer,
+                     :HeaderScanner
 
     # The conversion path's own pieces, kept out of Postscript's body for
     # the same reason Handlers::Metafile's own MetafileConvert is: that
@@ -871,8 +1072,17 @@ module Claricle
       # `with_source` instead, the same reader `Handlers::Svg` uses for
       # the same reason.
       def inspection(image)
-        source, truncated = image.with_source do |raw|
-          DscHeader.signed_header(raw, SIGNATURE, HEADER_PROBE_BYTES, HEADER_LIMIT_BYTES)
+        source, truncated, trailer_boxes = image.with_source do |raw|
+          header = DscHeader.signed_header(raw, SIGNATURE, HEADER_PROBE_BYTES, HEADER_LIMIT_BYTES)
+          next [nil, nil, {}] unless header
+
+          bytes, cut_short = header
+          trailers = if !cut_short && deferred_box?(bytes)
+                       DscTrailer.boxes(raw, SIGNATURE, HEADER_PROBE_BYTES)
+                     else
+                       {}
+                     end
+          [bytes, cut_short, trailers]
         end
         # A truncated header has only been seen as a PREFIX -- see
         # HeaderScanner#truncated? -- so `settled?`/`disputed?`/`continued?`
@@ -882,7 +1092,7 @@ module Claricle
         header = read_header(source)
         return unreadable(image) unless header
 
-        readable(image, header, source)
+        readable(image, header, source, trailer_boxes)
       end
 
       # The target guard, the delegate call and the `Models::Conversion`
@@ -903,8 +1113,10 @@ module Claricle
         end
       end
 
-      def readable(image, header, source)
-        boxes = BOX_COMMENTS.to_h { |key, name| [key, box(header, source, key, name)] }
+      def readable(image, header, source, trailer_boxes)
+        boxes = BOX_COMMENTS.to_h do |key, name|
+          [key, box(header, source, key, name, trailer_boxes[name])]
+        end
         spans = usable_spans(boxes)
 
         Models::Inspection.new(
@@ -959,13 +1171,15 @@ module Claricle
       # last-wins value disagreeing -- but that held only for repeats
       # 0.2.0 recognises, and it cost the delegate every repeated line.
       #
-      # `%%BoundingBox: (atend)` defers to the trailer. It is valid, so
-      # it is simply unresolved here -- a concrete `%%HiResBoundingBox`
-      # beside it still supplies the dimensions, and with no concrete box
-      # at all they are nil while the header is still `"ok"`. Searching
-      # the trailer would need the nested-document and data-section
-      # handling this slice exists to avoid.
-      def box(header, source, key, name)
+      # `%%BoundingBox: (atend)` resolves from the outer trailer. A
+      # concrete `%%HiResBoundingBox` beside it still takes precedence.
+      def box(header, source, key, name, trailer_box)
+        if Dsc.first_text(source, name) == "(atend)"
+          return trailer_box if Dsc.settled?(source, name)
+
+          return nil
+        end
+
         declared = header.public_send(key)
         return nil unless declared.is_a?(Array)
         # DSC allows `%%+` after ANY structuring comment, boxes included,
@@ -978,6 +1192,10 @@ module Claricle
         return nil unless operands == declared
 
         declared
+      end
+
+      def deferred_box?(source)
+        BOX_COMMENTS.values.any? { |name| Dsc.first_text(source, name) == "(atend)" }
       end
 
       # `[width, height]`, or nil when either cannot be computed.

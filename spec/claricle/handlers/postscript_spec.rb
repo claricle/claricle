@@ -857,9 +857,6 @@ RSpec.describe "Claricle PostScript handler" do
     end
   end
 
-  # (atend) defers the value to the trailer. It is valid, so it is
-  # unresolved rather than malformed. Searching the trailer would need
-  # the nested-document and data-section handling this slice avoids.
   # The two box comments do not share a grammar.
   describe "coarse boxes take integers" do
     # DSC gives `%%BoundingBox` four INTEGERS; only `%%HiResBoundingBox`
@@ -928,16 +925,38 @@ RSpec.describe "Claricle PostScript handler" do
   end
 
   describe "a deferred bounding box" do
-    it "reports nil dimensions and stays ok" do
-      result = inspect_ps("atend_box.ps", format: :ps)
+    %i[content path].each do |origin|
+      it "resolves the dimensions from the trailer for a #{origin}-born image" do
+        image = if origin == :path
+                  Claricle::Image.from_path(fixture("atend_box.ps"))
+                else
+                  Claricle::Image.from_content(File.binread(fixture("atend_box.ps")), format: :ps)
+                end
+        result = handler.inspection(image)
 
-      expect(result).to have_attributes(width: nil, height: nil, parse_status: "ok")
-      expect(result.meta).not_to have_key("bounding_box")
+        expect(result).to have_attributes(width: 100.0, height: 50.0, parse_status: "ok")
+        expect(result.meta).to include("bounding_box" => [0.0, 0.0, 100.0, 50.0])
+      end
     end
 
     it "still uses a concrete hires box beside it" do
       expect(inspect_ps("atend_with_hires.ps", format: :ps))
         .to have_attributes(width: 100.5, height: 50.25, parse_status: "ok")
+    end
+
+    it "ignores boxes in nested documents and data sections" do
+      binary = "%%Trailer\n%%BoundingBox: 0 0 60 70\n"
+      source = "%!PS-Adobe-3.0\n%%BoundingBox: (atend)\n%%EndComments\n" \
+               "%%BeginDocument: child\n%!PS-Adobe-3.0\n%%Trailer\n" \
+               "%%BoundingBox: 0 0 10 20\n%%EndDocument\n" \
+               "%%BeginData: 2 ASCII Lines\n%%Trailer\n%%BoundingBox: 0 0 30 40\n%%EndData\n" \
+               "%%BeginData: #{binary.bytesize} Binary Bytes\n#{binary}%%EndData\n" \
+               "%%Trailer\n%%BoundingBox: 0 0 100 50\n%%EOF\n"
+
+      result = handler.inspection(Claricle::Image.from_content(source, format: :ps))
+
+      expect(result).to have_attributes(width: 100.0, height: 50.0, parse_status: "ok")
+      expect(result.meta).to include("bounding_box" => [0.0, 0.0, 100.0, 50.0])
     end
   end
 
@@ -1074,16 +1093,12 @@ RSpec.describe "Claricle PostScript handler" do
     end
   end
 
-  # A delegate limitation, recorded rather than worked around.
-  # Pre-normalising the bytes would make inspect report something the
-  # parser never saw, and the same file would inspect and conform
-  # differently. If 0.2.0 ever reads CR comments, this goes red.
-  it "reads no DSC comments from a CR-only file" do
+  it "reads DSC comments from a CR-only file" do
     expect(Postscript.parse(File.binread(fixture("cr_only.ps"))).header.bounding_box)
       .to be_nil
 
     expect(inspect_ps("cr_only.ps", format: :ps))
-      .to have_attributes(width: nil, height: nil, parse_status: "ok")
+      .to have_attributes(width: 10.0, height: 10.0, parse_status: "ok")
   end
 
   # The first-declaration check has to find lines the way DSC does, not
