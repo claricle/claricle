@@ -6,6 +6,7 @@ require_relative "base"
 require_relative "../models/inspection"
 require_relative "../models/issue"
 require_relative "../models/report"
+require_relative "pdf_arlington"
 
 module Claricle
   module Handlers
@@ -20,7 +21,9 @@ module Claricle
     #
     # PDF conformance is `pdfrb`'s pre-write structural check
     # (`Validator.validate`) -- catalog, pages, MediaBox, and reference
-    # resolution -- not ISO 32000 conformance (03-conform.md, D16). There
+    # resolution -- plus the Arlington walk in `PdfArlington` (the issue's
+    # "Arlington predicates"), not full ISO 32000 conformance
+    # (03-conform.md, D16). There
     # is no separate structural pre-pass for PDF the way PNG, SVG and EMF
     # have one (D23): the plan's own Design table names
     # `Validator.validate` as the whole structural check, so this handler
@@ -143,28 +146,38 @@ module Claricle
           Models::Report.new(source_path: image.path, format: image.format.to_s, issues: issues)
         end
 
-        # Both pdfrb calls this handler makes, in one rescue -- see the
-        # class comment above for why both need it. Nothing else is in
-        # this method: `issue_from` (Claricle's own `Models::Issue`
-        # construction) runs in `issues_for` below, OUTSIDE this rescue
-        # -- an earlier version built the issues inside this same
-        # method, which put `issue_from` inside the same rescue too
-        # (found in copilot-review). A `NoMethodError` from this
-        # handler's own code belongs on the same footing as one from
-        # `report_for`: it propagates, rather than reading as an
+        # The two pdfrb calls the structural check makes, each with its own
+        # rescue -- see the class comment above for why both need one.
+        # `issue_from` (Claricle's own `Models::Issue` construction) runs in
+        # `issues_for` below, OUTSIDE these rescues: a `NoMethodError` from
+        # this handler's own code propagates, rather than reading as an
         # ordinary nonconformant file.
-        def self.validate(path)
-          document = ::Pdfrb::Document.open(path)
+        def self.open_document(path)
+          ::Pdfrb::Document.open(path)
+        rescue ::Pdfrb::Error, NoMethodError, SystemStackError
+          nil
+        end
+
+        def self.structure_errors(document)
           ::Pdfrb::Validator.validate(document)
         rescue ::Pdfrb::Error, NoMethodError, SystemStackError
           :malformed
         end
 
+        # Both checks, structural issues first. The Arlington walk runs
+        # FIRST and on the untouched document: `Validator.validate` repairs
+        # what it inspects (measured: a Catalog with no /Pages gains one),
+        # which would hide the very key the walk reports. It also runs when
+        # the structural check raises -- a Catalog with no /Pages makes it
+        # raise -- because the Arlington issue is what names the key.
         def self.issues_for(path)
-          errors = validate(path)
-          return [unreadable_issue] if errors == :malformed
+          document = open_document(path)
+          return [unreadable_issue] unless document
 
-          errors.map { |message| issue_from(message) }
+          arlington = PdfArlington.issues(document)
+          errors = structure_errors(document)
+          structural = errors == :malformed ? [unreadable_issue] : errors.map { |message| issue_from(message) }
+          structural + arlington
         end
 
         def self.issue_from(message)
@@ -176,7 +189,7 @@ module Claricle
                             message: UNREADABLE_MESSAGE, location: nil)
         end
 
-        private_class_method :report_for, :validate, :issues_for, :issue_from, :unreadable_issue
+        private_class_method :report_for, :open_document, :structure_errors, :issues_for, :issue_from, :unreadable_issue
       end
 
       private_constant :ConformanceMapper
