@@ -751,6 +751,21 @@ RSpec.describe Claricle::Cli::Runner do
       end
     end
 
+    # Exit 4 is the defect code. A crashing delegate is the wrong probe --
+    # a corrupt fixture is nonconformance and exits 1 -- so the real PNG
+    # handler is made to raise something outside every allowlist.
+    it "exits 4 when the handler raises outside its allowlist, and says what" do
+      handler = Claricle.const_get(:Registry).handler_for(:png)
+      faulting = handler.new
+      allow(faulting).to receive(:conformance_report).and_raise(RuntimeError, "handler defect")
+      allow(handler).to receive(:new).and_return(faulting)
+
+      workspace.call(["a.png", "valid.png"]) do
+        expect { expect(described_class.run(%w[conform a.png], output: StringIO.new)).to eq(4) }
+          .to output(/a\.png: handler defect/).to_stderr
+      end
+    end
+
     # The first real conformance verdicts to reach the CLI end to end: pdf
     # implements conformance_report now, so 0 and 1 are reachable without a
     # stub.
@@ -1275,6 +1290,22 @@ RSpec.describe Claricle::Cli::Runner do
         expect(result).to eq(0)
         expect(File.size("out.svg")).to be > 0
         expect(stdout).to eq("rect_and_line.emf -> svg: out.svg (unknown)\n")
+      end
+    end
+
+    # The convert half of the defect code, through the same real handler
+    # that produced the line above.
+    it "exits 4 when the handler raises outside its allowlist, and says what" do
+      handler = Claricle.const_get(:Registry).handler_for(:emf)
+      faulting = handler.new
+      allow(faulting).to receive(:convert).and_raise(RuntimeError, "handler defect")
+      allow(handler).to receive(:new).and_return(faulting)
+
+      workspace.call do
+        FileUtils.cp(emf_fixture, "rect_and_line.emf")
+
+        expect { expect(described_class.run(%w[convert rect_and_line.emf --to svg --output out.svg])).to eq(4) }
+          .to output(/rect_and_line\.emf: handler defect/).to_stderr
       end
     end
 
