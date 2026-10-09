@@ -537,6 +537,15 @@ RSpec.describe Claricle::Cli::Runner do
       expect(stream.string).not_to include("Errno")
     end
 
+    it "exits 2 when conform is given a missing file beside a real one" do
+      Tempfile.create(["real", ".png"]) do |file|
+        stream = StringIO.new
+
+        expect(described_class.run(["conform", file.path, "no/such.png"], output: stream)).to eq(2)
+        expect(stream.string).to include("no/such.png")
+      end
+    end
+
     it "exits 2 for a directory, naming it as one" do
       Dir.mktmpdir do |dir|
         stream = StringIO.new

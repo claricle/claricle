@@ -139,6 +139,29 @@ RSpec.describe "Claricle::Batch" do
       end
     end
 
+    # A literal path that names nothing is a typo, not a glob that happened
+    # to match nothing: dropping it silently let `conform a.png typo.png`
+    # exit 0.
+    it "refuses a metacharacter-free positional that names nothing, before any file runs" do
+      tree do
+        File.write("a.png", "x")
+        ran = []
+
+        expect { run(batch, %w[a.png missing.png], classify: clean) { |path| ran << path } }
+          .to raise_error(Claricle::InvocationError, /No such file or directory - missing\.png/)
+        expect(ran).to be_empty
+      end
+    end
+
+    it "keeps a glob that matches nothing quiet while other arguments match" do
+      tree do
+        File.write("a.png", "x")
+        result = run(batch, %w[a.png none-*.svg], classify: clean, &report)
+
+        expect(result.items.map(&:path)).to eq(["a.png"])
+      end
+    end
+
     # A different mistake, so a different sentence. "no files matched" with
     # an empty list names neither what was asked for nor what was wrong.
     it "says nothing was given when nothing was given" do
