@@ -59,17 +59,42 @@ module Claricle
       # input; Report is listed first as it is the existing, more common
       # case.
       #
-      # Known gap, not closed by this change: `Attribute#cast_union` is
-      # `match&.last` (lutaml-model attribute.rb:875-879) -- a value that
-      # matches NEITHER member silently casts to nil rather than raising, the
-      # same silent-nil shape as any other failed cast. Nothing in this
-      # codebase can currently produce such a value here (every writer of
-      # `result` is Report or Conversion), so it is unreached, not verified
-      # unreachable by a guard.
       attribute :result, [Report, Conversion]
+      alias cast_result= result=
+      private :cast_result=
+
+      # Lutaml casts a value matching neither union member to nil. Refuse it
+      # here while the caller's original value is still available.
+      def result=(value)
+        self.cast_result = value
+        validate_result(value)
+        value
+      end
+
       attribute :error, BatchError
 
+      # Keyword and positional-hash construction cast union values before
+      # calling the writer, so retain the original until casting finishes.
+      def initialize(*args, **kwargs)
+        supplied_result = result_argument(args, kwargs)
+        super
+        validate_result(supplied_result)
+      end
+
       private
+
+      def result_argument(args, kwargs)
+        return kwargs[:result] if kwargs.key?(:result)
+
+        attributes = args.first
+        attributes[:result] if attributes.is_a?(::Hash) && attributes.key?(:result)
+      end
+
+      def validate_result(value)
+        return if value.nil? || result.is_a?(Report) || result.is_a?(Conversion)
+
+        refuse(:result, "a Report or Conversion", value.class)
+      end
 
       # The verdict is written here rather than read from what arrived, so a
       # document cannot assert a status its own fields contradict, and the
