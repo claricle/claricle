@@ -13,6 +13,7 @@ require_relative "../models/location"
 require_relative "../models/report"
 require_relative "../models/conversion"
 require_relative "../lossiness"
+require_relative "../postscript_fidelity"
 
 # `Postsvg::Model::UnknownOperator` (postsvg-0.3.0, model/operators.rb:59) is
 # declared via a WRONG-FILE autoload -- model.rb:13 points at the singular
@@ -696,7 +697,9 @@ module Claricle
       # `Postsvg::Model::UnknownOperator` NameError this same rescue used to
       # exist for is fixed outright above, at file-load time.
       def convert_content(content, to)
-        ::Vectory::Svg.from_content(content).public_send(CONVERT_TARGET_METHODS.fetch(to))
+        PostscriptFidelity.convert(content, to) do |svg|
+          ::Vectory::Svg.from_content(svg).public_send(CONVERT_TARGET_METHODS.fetch(to)).content
+        end
       rescue StandardError => e
         raise ConversionError, "#{e.class}: #{e.message}"
       end
@@ -711,7 +714,7 @@ module Claricle
           source_format: image.format.to_s,
           target_format: to.to_s,
           lossiness: Lossiness.classify(source_format: image.format, target_format: to, source: content),
-          content: converted.content
+          content: converted
         )
       end
 

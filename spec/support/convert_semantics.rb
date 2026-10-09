@@ -78,12 +78,15 @@ module ConvertSemantics
   class Interpreter
     NUMBER = "(-?[\\d.]+)"
     PATH_OP = /\A#{NUMBER} #{NUMBER} (moveto|lineto|rlineto)\z/
+    IDENTITY = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].freeze
     COLOUR = /\A#{NUMBER} #{NUMBER} #{NUMBER} setrgbcolor\z/
     WIDTH = /\A#{NUMBER} setlinewidth\z/
+    TRANSLATE = /\A#{NUMBER} #{NUMBER} translate\z/
+    SCALE = /\A#{NUMBER} #{NUMBER} scale\z/
     IGNORED = /\A(\d+ set(linecap|linejoin)|closepath|showpage|%.*)?\z/
 
     def initialize
-      @state = { color: [0, 0, 0], width: 1, path: [] }
+      @state = { color: [0, 0, 0], width: 1, path: [], ctm: IDENTITY }
       @stack = []
       @shapes = []
     end
@@ -103,7 +106,7 @@ module ConvertSemantics
       when PATH_OP then step(Regexp.last_match)
       when COLOUR then colour(Regexp.last_match)
       when WIDTH then @state[:width] = Regexp.last_match(1).to_f
-      else raise "ConvertSemantics: unmodelled PostScript line #{line.inspect}"
+      else transform(line) || raise("ConvertSemantics: unmodelled PostScript line #{line.inspect}")
       end
     end
 
@@ -120,8 +123,28 @@ module ConvertSemantics
       end
     end
 
+    # PLRM `translate` and `scale` compose onto the CTM; nil for any other line.
+    def transform(line)
+      case line
+      when TRANSLATE then concat(1, 0, 0, 1, *Regexp.last_match.captures.map(&:to_f))
+      when SCALE then concat(*Regexp.last_match.captures.map(&:to_f).then { |(x, y)| [x, 0, 0, y, 0, 0] })
+      end
+    end
+
+    # Cells are PostScript's [a b c d tx ty]; new CTM = given x current.
+    def concat(*cells)
+      given = [[cells[0], cells[2], cells[4]], [cells[1], cells[3], cells[5]], [0, 0, 1]]
+      @state[:ctm] = @state[:ctm].map { |row| given.transpose.map { |column| dot(row, column) } }
+    end
+
+    def device(points)
+      points.map { |x, y| @state[:ctm].first(2).map { |row| dot(row, [x, y, 1]) } }
+    end
+
+    def dot(left, right) = left.zip(right).sum { |one, other| one * other }
+
     def paint(kind)
-      @shapes << Shape.new(kind, @state[:path].dup, @state[:color], kind == :stroke ? @state[:width] : nil)
+      @shapes << Shape.new(kind, device(@state[:path]), @state[:color], kind == :stroke ? @state[:width] : nil)
     end
 
     def step(match)
