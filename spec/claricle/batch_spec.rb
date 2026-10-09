@@ -340,6 +340,19 @@ RSpec.describe "Claricle::Batch" do
       end
     end
 
+    it "collects a failure that overrides its class reader" do
+      tree do
+        File.write("a.png", "x")
+        disguised = Class.new(StandardError) do
+          def class = nil
+        end
+        result = run(batch, ["a.png"], classify: clean) { raise disguised, "boom" }
+
+        expect(result.items.first.status).to eq("error")
+        expect(result.items.first.error.code).to match(/\A#<Class:0x\h+>\z/)
+      end
+    end
+
     # The set Runner.run rescues stops at StandardError and friends, so
     # Ctrl-C still behaves like Ctrl-C rather than becoming one row of a
     # report.

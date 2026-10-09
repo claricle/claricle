@@ -12,6 +12,12 @@ module Claricle
   # they cannot reach a batch operation, and naming them here would drag
   # `require "thor"` into the library layer.
   module Fault
+    CLASS_OF = ::Object.instance_method(:class)
+    KIND_OF = ::Object.instance_method(:is_a?)
+    MODULE_NAME = ::Module.instance_method(:name)
+    MODULE_TO_S = ::Module.instance_method(:to_s)
+    private_constant :CLASS_OF, :KIND_OF, :MODULE_NAME, :MODULE_TO_S
+
     module_function
 
     def exit_code(error)
@@ -29,6 +35,18 @@ module Claricle
       raw_message(error).encode(Encoding::UTF_8, invalid: :replace, undef: :replace)
     end
 
+    # Call the core readers directly. An exception is an ordinary Ruby
+    # object and can override #class just as it can override #message; the
+    # diagnostic path must still name the exception that was actually raised.
+    def class_name(error)
+      klass = CLASS_OF.bind_call(error)
+      MODULE_NAME.bind_call(klass) || MODULE_TO_S.bind_call(klass)
+    end
+
+    def kind_of?(error, kind)
+      KIND_OF.bind_call(error, kind)
+    end
+
     # Exception subclasses can override #message, including with a non-String
     # result or another exception. Reporting must not replace the original
     # failure with a failure from its diagnostic path. Copy a real String into
@@ -37,9 +55,9 @@ module Claricle
       value = error.message
       return ::String.new(value) if ::String === value # rubocop:disable Style/CaseEquality
 
-      error.class.to_s
+      class_name(error)
     rescue StandardError
-      error.class.to_s
+      class_name(error)
     end
     private_class_method :raw_message
   end

@@ -26,6 +26,17 @@ RSpec.describe "Claricle::Fault" do
     expect(fault.message(BrokenMessageError.new)).to eq("BrokenMessageError")
   end
 
+  it "reads the actual exception class when the exception disguises it" do
+    stub_const("DisguisedError", Class.new(StandardError) do
+      def class = nil
+      def message = nil
+    end)
+
+    error = DisguisedError.new
+    expect(fault.class_name(error)).to eq("DisguisedError")
+    expect(fault.message(error)).to eq("DisguisedError")
+  end
+
   it "still replaces invalid bytes in a normal exception message" do
     expect(fault.message(StandardError.new("bad \xFF".b))).to eq("bad \uFFFD")
   end

@@ -18,6 +18,10 @@ RSpec.describe Claricle::Cli::Runner do
   # a closure because stubbing Claricle::Cli replaces the namespace the
   # probe would otherwise look it up through.
   accepted_arguments = []
+  disguised_error = Class.new(StandardError) do
+    def class = nil
+    def is_a?(_kind) = raise("do not ask the exception to classify itself")
+  end
   errors = {
     "enoent" => [Errno::ENOENT, "nope"],
     "invocation" => [Claricle::InvocationError, "bad flags"],
@@ -1595,6 +1599,13 @@ RSpec.describe Claricle::Cli::Runner do
       stream = StringIO.new
       described_class.run(%w[boom load], output: stream)
       expect(stream.string).to eq("claricle: LoadError: missing gem\n")
+    end
+
+    it "reports an unexpected failure without trusting its class readers" do
+      error = disguised_error.new("masked")
+
+      expect(described_class.send(:error_message, error))
+        .to match(/\Aclaricle: #<Class:0x\h+>: masked\z/)
     end
 
     # A mapped Claricle error already reads as a sentence.

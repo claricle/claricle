@@ -180,17 +180,16 @@ module Claricle
         Outcome.new(item: failed_item(path, e), error: e)
       end
 
-      # `Class#name` is nil for an anonymous class -- rare, but a delegate
-      # raising `Class.new(StandardError).new(...)` is real Ruby, and
-      # `BatchError#code` is required: an unguarded nil there raised
-      # `ValidationError` building THIS envelope, uncaught, aborting the
-      # whole batch from inside the one rescue that exists to keep a
-      # single bad file from doing exactly that. `Class#to_s` is never nil.
+      # Fault owns both diagnostic values. Besides keeping this path aligned
+      # with the CLI, it reads the real exception class without trusting an
+      # overridable #class method and supplies a printable name for an
+      # anonymous class. `BatchError#code` is required, so either gap would
+      # otherwise abort from inside the rescue meant to collect the failure.
       def failed_item(path, error)
         Models::BatchItem.new(
           path: path,
           exit_code: Fault.exit_code(error),
-          error: Models::BatchError.new(code: error.class.name || error.class.to_s,
+          error: Models::BatchError.new(code: Fault.class_name(error),
                                         message: Fault.message(error))
         )
       end
