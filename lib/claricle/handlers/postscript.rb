@@ -1,8 +1,7 @@
 # frozen_string_literal: true
 
-require "vectory"
-
 require_relative "base"
+require_relative "../conversion_engine"
 require_relative "../detector"
 require_relative "../models/inspection"
 require_relative "../models/issue"
@@ -940,12 +939,9 @@ module Claricle
     # `module_function` rather than a class with instance methods -- there
     # is no state to hold between calls, matching MetafileConvert.
     module PostscriptConvert
-      # Symbol -> the vectory class that owns that SOURCE format. eps and
-      # ps are different Vectory classes with different available `to_*`
-      # methods (neither exposes a same-format method), unlike svg.rb and
-      # metafile.rb where one delegate class serves the one source format
-      # the handler owns.
-      DELEGATE_CLASSES = { eps: ::Vectory::Eps, ps: ::Vectory::Ps }.freeze
+      # Symbol -> the vectory class name that owns that SOURCE format. The
+      # class itself is resolved only after ConversionEngine loads vectory.
+      DELEGATE_CLASS_NAMES = { eps: "Vectory::Eps", ps: "Vectory::Ps" }.freeze
 
       # Symbol -> the vectory method it dispatches to, matching
       # Handlers::Svg's own CONVERT_TARGET_METHODS convention for the same
@@ -972,6 +968,7 @@ module Claricle
         end
 
         content = postscript_section(bounded_content(image))
+        ConversionEngine.load!
         converted = convert_content(image.format, content, to)
         build(image, to, content, converted)
       end
@@ -1001,7 +998,7 @@ module Claricle
       # here is a third-party render pipeline (vectory/postsvg) whose
       # exact raised classes are not this file's to enumerate.
       def convert_content(source_format, content, to)
-        delegate = DELEGATE_CLASSES.fetch(source_format)
+        delegate = ::Object.const_get(DELEGATE_CLASS_NAMES.fetch(source_format))
         delegate.from_content(content).public_send(TARGET_METHODS.fetch(to))
       rescue StandardError => e
         raise ConversionError, "#{e.class}: #{e.message}"

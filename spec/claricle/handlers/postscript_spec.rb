@@ -1819,7 +1819,7 @@ RSpec.describe "Claricle PostScript handler" do
 
     # Measured against the real, committed fixture bytes -- without these,
     # swapping CONVERT_TARGET_METHODS leaves every example in a bare loop
-    # green. Does NOT catch a DELEGATE_CLASSES swap for the svg/emf
+    # green. Does NOT catch a DELEGATE_CLASS_NAMES swap for the svg/emf
     # targets: Vectory::Eps and Vectory::Ps produce byte-identical
     # to_svg/to_emf output for this fixture, so only the eps<->ps edges
     # would go red under that mutant, and only because same-format
@@ -1868,7 +1868,7 @@ RSpec.describe "Claricle PostScript handler" do
       # `self.class.convert_targets.include?(to)` alone catches. Proven by
       # construction: weakening `run`'s combined guard back to
       # `convert_targets.include?(to)` alone left this example calling
-      # `DELEGATE_CLASSES.fetch(:#{source}).from_content(...).public_send(:to_#{source})`,
+      # `DELEGATE_CLASS_NAMES.fetch(:#{source}).from_content(...).public_send(:to_#{source})`,
       # and neither Vectory::Eps nor Vectory::Ps defines that method, so it
       # raised a leaked `ConversionError: NoMethodError` instead of
       # `UnsupportedFormat`.

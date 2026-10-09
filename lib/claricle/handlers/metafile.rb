@@ -1,9 +1,9 @@
 # frozen_string_literal: true
 
 require "emf"
-require "vectory"
 
 require_relative "base"
+require_relative "../conversion_engine"
 require_relative "../models/location"
 require_relative "../models/report"
 require_relative "../models/inspection"
@@ -616,6 +616,7 @@ module Claricle
         raise UnsupportedFormat.new(image.format, :convert, target: to) unless convert_targets.include?(to)
 
         content = bounded_content(image)
+        ConversionEngine.load!
         converted = convert_content(content, to)
         build(image, to, content, converted)
       end
