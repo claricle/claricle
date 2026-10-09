@@ -233,7 +233,12 @@ module Claricle
       handler.conformance_report(self, profile: wanted)
     end
 
+    # A target the source's handler does not list may still be one whose
+    # own handler declared it accepts this format (`Base.convert_from`).
     def convert(to:)
+      inbound = Registry.inbound_handler(from: format, to: to)
+      return inbound.new.convert_inbound(self, to: to) if inbound
+
       handler.convert(self, to: to)
     end
 

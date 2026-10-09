@@ -1,20 +1,17 @@
 # frozen_string_literal: true
 
-# Requires live here, next to the list that names the classes, so there is
-# no load order for the entry point to get wrong.
+# Requires live here, next to the derivation that needs them, so there is
+# no load order for the entry point to get wrong. Every file in handlers/
+# is loaded, so a new format is one new file there and nothing else.
 require_relative "errors"
 require_relative "handlers/base"
-require_relative "handlers/metafile"
-require_relative "handlers/pdf"
-require_relative "handlers/png"
-require_relative "handlers/postscript"
-require_relative "handlers/svg"
+Dir[File.join(__dir__, "handlers", "*.rb")].each { |file| require file }
 
 module Claricle
   module Registry
-    # One list. A new format adds its handler file above and its class here.
-    HANDLER_CLASSES = [Handlers::Metafile, Handlers::Pdf, Handlers::Png,
-                       Handlers::Postscript, Handlers::Svg].freeze
+    # Every handler class loaded above, in name order so nothing depends on
+    # the order the filesystem listed the files in.
+    HANDLER_CLASSES = Handlers.const_get(:Base).subclasses.sort_by(&:to_s).freeze
 
     class << self
       def handler_for(format)
@@ -57,11 +54,41 @@ module Claricle
       # about as one of its own targets. Every single-format handler's own
       # format was never in its declared list to begin with, so this is a
       # no-op for them.
+      #
+      # Targets another handler declared it can produce from this format
+      # (`convert_from`) are included, so adding a format makes it a target
+      # of every source it accepts without editing any of them.
       def convert_targets_for(format)
-        handler_for(format).convert_targets - [format]
+        (handler_for(format).convert_targets + inbound_targets(format)).uniq - [format]
+      end
+
+      # The handler to convert a `from` image to `to`, when `to` is a format
+      # whose own handler declared it accepts `from` and `from`'s handler
+      # does not already list `to`. nil means "ask the source's handler".
+      def inbound_handler(from:, to:)
+        return if HANDLERS[from]&.convert_targets&.include?(to)
+
+        owner = HANDLERS[to]
+        owner if owner&.convert_sources&.include?(from)
+      end
+
+      # The format a handler's declared detector recognises in these leading
+      # bytes, or nil. Reached by the detector only after its built-in
+      # probes have all declined.
+      def detect(header)
+        HANDLER_CLASSES.each do |handler|
+          format = handler.detect_format(header)
+          return format if format
+        end
+        nil
       end
 
       private
+
+      def inbound_targets(format)
+        HANDLERS.values.uniq.select { |handler| handler.convert_sources.include?(format) }
+                .flat_map(&:supported_formats)
+      end
 
       # Two classes claiming a format is a configuration defect, not a
       # last-one-wins: the design has one immutable owner per format.

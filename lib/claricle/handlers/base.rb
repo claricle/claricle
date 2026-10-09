@@ -3,6 +3,7 @@
 require_relative "../errors"
 require_relative "../models/inspection"
 require_relative "../models/issue"
+require_relative "extension_points"
 
 module Claricle
   module Handlers
@@ -10,6 +11,8 @@ module Claricle
     # it supports. Anything it does not implement raises, naming what was
     # asked for, so an unfinished handler says so rather than returning nil.
     class Base
+      include ExtensionPoints
+
       # Each operation, mapped to the method a handler overrides to
       # support it. The names are the vocabulary of the public API; the
       # CLI happens to print them, but does not own them.

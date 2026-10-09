@@ -483,7 +483,7 @@ module Claricle
         return format if format
         return :svg if svg?(yield)
 
-        raise UnknownFormat, "no known image signature"
+        declared_or_unknown(header)
       end
 
       def postscript_flavour(source)
@@ -678,6 +678,14 @@ module Claricle
           @namespaces[prefix] = value unless @namespaces.key?(prefix)
         end
       end
+    end
+
+    # Handlers declare their own probe (`Handlers::Base.detect`); it runs
+    # last, so a new format cannot change what a built-in one detects. The
+    # registry is absent when this file is loaded on its own, and then
+    # there are no handlers to ask.
+    def self.declared_or_unknown(header)
+      (Registry.detect(header) if defined?(Registry)) || raise(UnknownFormat, "no known image signature")
     end
 
     private_constant :RootSource, :RootParser
