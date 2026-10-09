@@ -20,12 +20,29 @@ RSpec.describe "Claricle conversion API" do
   png = File.join(fixtures, "valid.png")
   eps = File.join(fixtures, "basic.eps")
   emf = File.join(fixtures, "valid.emf")
+  svg = File.join(fixtures, "valid.svg")
 
   def workspace(*sources)
     Dir.mktmpdir do |dir|
       sources.each { |name, source| FileUtils.cp(source, File.join(dir, name)) }
       Dir.chdir(dir) { yield dir }
     end
+  end
+
+  # Names and bytes of every file in dir, so "nothing was written" holds
+  # against any route rather than the one an assertion names.
+  def snapshot(dir)
+    Dir.children(dir).sort.to_h { |name| [name, File.binread(File.join(dir, name))] }
+  end
+
+  # Independent of the Writer's own probe: write an upcased name, ask for
+  # the downcased one.
+  def folds_case?(dir)
+    upper = File.join(dir, "ZZZ-VOLUME-CHECK")
+    File.binwrite(upper, "")
+    File.exist?(File.join(dir, "zzz-volume-check"))
+  ensure
+    FileUtils.rm_f(upper)
   end
 
   describe ".convert_batch" do
@@ -128,6 +145,72 @@ RSpec.describe "Claricle conversion API" do
 
         expect { Claricle.convert_batch(pattern: "x.*", to: "svg") }
           .to raise_error(Claricle::InvocationError, /two outputs are the same file/)
+      end
+    end
+
+    # 04-convert.md's four concrete batch cases, each driven through the
+    # module API with --force (which authorises replacing an unrelated
+    # file, never an input) and each asserting the refusal AND that the
+    # directory is byte-for-byte what it was: refused before any write.
+    describe "the four preflight cases, under --force" do
+      [
+        ["a destination that is also a later input",
+         [["a.emf", :emf], ["a.svg", :svg]], { paths: %w[a.emf a.svg], to: "svg" },
+         /output would overwrite an input/],
+        ["two sources deriving the same destination",
+         [["a.eps", :eps], ["a.ps", :eps]], { paths: %w[a.eps a.ps], to: "svg" },
+         /two outputs are the same file/],
+        ["a single source whose --output is itself (reaches the overwrite check)",
+         [["logo.svg", :svg]], { paths: %w[logo.svg], output: "logo.svg" },
+         /output would overwrite an input/],
+        ["the literal plan command, --to emf --output logo.svg (refused earlier by the suffix conflict)",
+         [["logo.svg", :svg]], { paths: %w[logo.svg], to: "emf", output: "logo.svg" },
+         /--to emf conflicts with --output logo\.svg/]
+      ].each do |label, files, args, message|
+        it "refuses #{label}, leaving the directory unchanged" do
+          sources = files.map { |name, kind| [name, { emf: emf, eps: eps, svg: svg }.fetch(kind)] }
+          workspace(*sources) do |dir|
+            before = snapshot(dir)
+
+            expect { Claricle.convert_batch(*args[:paths], **args.except(:paths), force: true) }
+              .to raise_error(Claricle::InvocationError, message)
+            expect(snapshot(dir)).to eq(before)
+          end
+        end
+      end
+
+      it "refuses a destination that is a hardlink to an input" do
+        workspace(["a.emf", emf]) do |dir|
+          File.link("a.emf", "twin.svg")
+          before = snapshot(dir)
+
+          expect { Claricle.convert_batch("a.emf", "twin.svg", to: "svg", force: true) }
+            .to raise_error(Claricle::InvocationError, /output would overwrite an input/)
+          expect(snapshot(dir)).to eq(before)
+        end
+      end
+
+      # The oracle is the volume under test, probed independently of the
+      # Writer: a case-insensitive volume must refuse; a case-sensitive
+      # one must not call the pair a collision.
+      it "treats Logo.eps/logo.ps deriving Logo.svg/logo.svg as this volume treats it" do
+        workspace(["Logo.eps", eps], ["logo.ps", eps]) do |dir|
+          before = snapshot(dir)
+          folds = folds_case?(dir)
+          error = begin
+            Claricle.convert_batch("Logo.eps", "logo.ps", to: "svg", force: true)
+            nil
+          rescue Claricle::InvocationError => e
+            e
+          end
+
+          if folds
+            expect(error&.message).to match(/collide on a case-insensitive filesystem/)
+            expect(snapshot(dir)).to eq(before)
+          else
+            expect(error&.message).not_to match(/case-insensitive|same file/)
+          end
+        end
       end
     end
 
