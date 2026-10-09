@@ -300,8 +300,7 @@ module Claricle
       def convert(image, to:)
         raise UnsupportedFormat.new(image.format, :convert, target: to) unless self.class.convert_targets.include?(to)
 
-        content = bounded_content(image)
-        ConversionEngine.load!
+        content = bounded_content(image).tap { ConversionEngine.load! }
         converted = convert_content(content, to)
         build_conversion(image, to, content, converted)
       end
