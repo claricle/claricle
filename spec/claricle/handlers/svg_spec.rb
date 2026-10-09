@@ -1172,10 +1172,10 @@ RSpec.describe "Claricle SVG handler" do
       end
     end
 
-    it "classifies embedded_raster -> emf as unknown, because emf's own loss rules don't name embedded rasters" do
+    it "classifies embedded_raster -> emf as lossy, because a linked image is dropped by the emf writer" do
       conversion = handler.convert(convert_image("embedded_raster"), to: :emf)
 
-      expect(conversion.lossiness).to eq("unknown")
+      expect(conversion.lossiness).to eq("lossy")
     end
 
     it "converts a content-born image, with source_path nil" do
