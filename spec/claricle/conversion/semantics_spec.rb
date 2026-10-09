@@ -64,8 +64,6 @@ RSpec.describe "Conversion semantics" do
           end
 
           it "paints every shape the source draws, at the source's size and x position" do
-            pending "width=\"10px\" is read as 0: the rect is painted with zero size" if name == "geom_px_rect"
-
             actual = drawn(name, target)
 
             expected(name).each do |want|
@@ -76,9 +74,6 @@ RSpec.describe "Conversion semantics" do
           end
 
           it "paints each shape in the colour the source gave it" do
-            pending "rgb() paint is dropped: output has no setrgbcolor, so red paints as black" if
-              name == "paint_rgb_rect"
-
             actual = drawn(name, target)
             expected(name).each do |want|
               expect(actual.select { |shape| shape.kind == want.kind }.map(&:color)).to include(want.color)
@@ -86,9 +81,6 @@ RSpec.describe "Conversion semantics" do
           end
 
           it "paints no shape the source did not ask for" do
-            pending "a line with no stroke attribute is stroked black; SVG paints no stroke" if
-              name == "no_paint_rect"
-
             expect(drawn(name, target).map(&:kind)).to eq(expected(name).map(&:kind))
           end
         end
@@ -103,8 +95,6 @@ RSpec.describe "Conversion semantics" do
       end
 
       it "keeps the SVG y-down origin: a rect at the top-left lands at the top of the page (#{target})" do
-        pending "svg -> #{target} emits y-up coordinates unflipped: the rect lands at y 0..10, the page bottom"
-
         fill = drawn("rect_and_line", target).find { |shape| shape.kind == :fill }
         _, min_y, _, max_y = ConvertSemantics.extent(fill.points)
 
