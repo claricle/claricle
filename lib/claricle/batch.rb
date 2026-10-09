@@ -125,6 +125,8 @@ module Claricle
         raise InvocationError, nothing_matched(arguments, pattern) if files.empty?
 
         files
+      rescue ArgumentError => e
+        raise InvocationError, "invalid path: #{e.message}"
       end
 
       private

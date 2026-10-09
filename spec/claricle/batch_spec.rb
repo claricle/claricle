@@ -148,6 +148,13 @@ RSpec.describe "Claricle::Batch" do
       end
     end
 
+    it "treats a null byte in a path as an invocation error" do
+      tree do
+        expect { run(batch, ["a.png\0evil"], classify: clean, &report) }
+          .to raise_error(Claricle::InvocationError, /invalid path/)
+      end
+    end
+
     # Dir.glob's brace alternation is combinatorial, not linear: measured,
     # a bare 20-repeat `{a,b}` pattern took over ten seconds to expand and
     # a 22-repeat one did not return inside fifteen -- entirely before any
