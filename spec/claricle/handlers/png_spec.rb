@@ -833,6 +833,36 @@ RSpec.describe "Claricle PNG handler" do
       )
     end
 
+    it "sanitizes binary validator issue text instead of crashing the report" do
+      bytes = File.binread(conform_fixture("valid.png")).dup
+      idat = bytes.index("IDAT")
+      bytes.setbyte(idat + 3, 0xEF)
+
+      report = Claricle::Image.from_content(bytes).conformance_report
+      issue = report.issues.find { |item| item.code == "png.unknown_critical_chunk_type_ida" }
+
+      expect(report.valid).to eq(:no)
+      expect(issue).to have_attributes(
+        severity: "error", message: "Unknown critical chunk type: IDA\uFFFD",
+        location: have_attributes(chunk: nil, byte_offset: idat - 4)
+      )
+      expect { report.to_json }.not_to raise_error
+    end
+
+    it "reports forced short PNG content as malformed instead of leaking reader errors" do
+      ["".b, "x".b].each do |content|
+        report = Claricle::Image.from_content(content, format: :png).conformance_report
+
+        expect(report.valid).to eq(:no)
+        expect(report.issues).to include(
+          have_attributes(
+            severity: "error", code: "png.delegate_truncated", location: nil,
+            message: "PNG input ended before validation could complete"
+          )
+        )
+      end
+    end
+
     # FullLoadReader.new(path) opens its own File handle (@owns_io = true)
     # and exposes #close for exactly that reason -- leaving it open leaks a
     # file descriptor per conformance check until GC finalizes it.
@@ -977,9 +1007,9 @@ RSpec.describe "Claricle PNG handler" do
     # The allowlist has to be narrow, or a real defect in this handler
     # would silently read as an ordinary nonconformant file (exit 1)
     # instead of the internal-error code (exit 4) that says something
-    # needs fixing. Stubbing the delegate itself, since nothing else in
-    # 300 randomised inputs and every truncation of two real PNGs raised
-    # anything off `Errno::EINVAL`.
+    # needs fixing. The known malformed-input exceptions are pinned by
+    # end-to-end examples above; this keeps an unrelated implementation
+    # failure from being mistaken for ordinary nonconformance.
     it "does not rescue an exception off its malformed-input allowlist" do
       allow(PngConform::Services::ValidationService).to receive(:new).and_raise(RuntimeError, "boom")
       image = Claricle::Image.from_path(conform_fixture("valid.png"))
@@ -987,9 +1017,16 @@ RSpec.describe "Claricle PNG handler" do
       expect { image.conformance_report }.to raise_error(RuntimeError, "boom")
     end
 
+    it "does not rescue an unrelated IO error from the delegate" do
+      allow(PngConform::Services::ValidationService).to receive(:new).and_raise(IOError, "boom")
+      image = Claricle::Image.from_path(conform_fixture("valid.png"))
+
+      expect { image.conformance_report }.to raise_error(IOError, "boom")
+    end
+
     # A `RuntimeError` is far outside the allowlist, so the row above holds
     # however wide the allowlist gets. Measured: widening `MALFORMED_INPUT`
-    # from `[Errno::EINVAL]` to `[SystemCallError]` left all 72 examples in
+    # from `[Errno::EINVAL]` to `[SystemCallError]` left the focused examples in
     # this file green while a real unreadable file -- `chmod 000`, an
     # `Errno::EACCES` -- stopped propagating and came back as an ordinary
     # nonconformant report instead. That is exit 1 for something that must
