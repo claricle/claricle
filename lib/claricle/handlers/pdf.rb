@@ -5,9 +5,9 @@ require "timeout"
 require_relative "base"
 require_relative "../models/inspection"
 require_relative "../models/issue"
-require_relative "../models/location"
 require_relative "../models/report"
 require_relative "pdf_arlington"
+require_relative "pdf_profiles"
 
 module Claricle
   module Handlers
@@ -57,20 +57,6 @@ module Claricle
       # `ConformanceMapper` -- the mapping owes nothing to any metadata
       # interpretation this handler might grow later.
       class ConformanceMapper
-        PROFILE_VALIDATORS = {
-          pdf_a: :PdfA,
-          pdf_ua: :PdfUA,
-          pdf_x: :PdfX,
-          pdf_vt: :PdfVT,
-          pades: :Pades,
-          ltv: :Ltv,
-          pdf_2_af: :Pdf2AF,
-          tagged_pdf: :TaggedPdf
-        }.freeze
-        PADES_LEVELS = {
-          :"b-b" => :"B-B", :"b-t" => :"B-T",
-          :"b-lt" => :"B-LT", :"b-lta" => :"B-LTA"
-        }.freeze
         # Measured against the installed pdfrb gem (0.7.49, resolved from
         # claricle.gemspec's `~> 0.7.23`) rather than assumed --
         # 03-conform.md's own summary is a starting point, not a source,
@@ -219,27 +205,7 @@ module Claricle
           structural.concat(arlington)
           return structural if profile.nil? || structural.any?
 
-          profile_issues(document, profile, level)
-        end
-
-        def self.profile_issues(document, profile, level)
-          validator = ::Pdfrb::Conformance.const_get(PROFILE_VALIDATORS.fetch(profile))
-          arguments = level ? { level: delegate_level(profile, level) } : {}
-          validator.validate(document, **arguments).violations.map { |violation| violation_issue(violation) }
-        end
-
-        def self.delegate_level(profile, level)
-          profile == :pades ? PADES_LEVELS.fetch(level) : level
-        end
-
-        def self.violation_issue(violation)
-          location = violation.object && Models::Location.new(node_path: violation.object.to_s)
-          Models::Issue.new(
-            severity: violation.severity.to_s,
-            code: violation.rule_id.to_s,
-            message: violation.message,
-            location: location
-          )
+          PdfProfiles.issues(document, profile, level)
         end
 
         def self.issue_from(message)
@@ -252,7 +218,6 @@ module Claricle
         end
 
         private_class_method :report_for, :open_document, :structure_errors, :issues_for,
-                             :profile_issues, :delegate_level, :violation_issue,
                              :issue_from, :unreadable_issue
       end
 
