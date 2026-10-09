@@ -411,8 +411,8 @@ RSpec.describe "the documentation" do
       # nothing a caller can see. Exactness is what matters, and
       # contain_exactly keeps it.
       expect(Claricle.methods(false))
-        .to contain_exactly(:conform?, :conformance_batch, :conformance_report, :convert_batch,
-                            :detect)
+        .to contain_exactly(:conform?, :conformance_batch, :conformance_report, :convert,
+                            :convert_batch, :detect)
     end
 
     # The tree above is what the code exposes; this is what the README
@@ -435,7 +435,7 @@ RSpec.describe "the documentation" do
       # the same.
       claims("The public surface is `Claricle.detect`, `Claricle.conform?`, " \
              "`Claricle.conformance_report`, `Claricle.conformance_batch`, " \
-             "`Claricle.convert_batch`, `Claricle::Image`, " \
+             "`Claricle.convert`, `Claricle.convert_batch`, `Claricle::Image`, " \
              "`Claricle::BatchResult`, " \
              "`Claricle::Cli` (including `Cli::Runner` and " \
              "`Runner::Status`), `Claricle::VERSION`, the error classes, " \

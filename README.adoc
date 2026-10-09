@@ -365,6 +365,27 @@ A path-born image is never slurped to satisfy `with_source`. That is how
 the SVG handler reads the root, so a 64 MiB file costs the 8 KiB it
 actually reads.
 
+Convert one file. The result is the `Models::Conversion`: where it was
+written, how lossy it was, and the bytes.
+
+[source,ruby]
+----
+conversion = Claricle.convert("diagram.emf", to: :svg)  # writes diagram.svg
+conversion.output_path
+conversion.lossiness
+
+Claricle.convert("diagram.emf", output: "out/copy.svg", force: true)
+Claricle.convert("diagram.emf", to: :svg, output: "-")  # bytes to stdout
+----
+
+`output:` defaults to the source's name with the target's extension,
+beside the source. An existing file is refused unless `force: true`. This
+is the same code as `Claricle.convert_batch` and `claricle convert`, so
+the collision and overwrite rules are identical. A file that cannot be
+converted raises its own error (`UnsupportedFormat`, `InvocationError`),
+where `convert_batch` collects it per file; a name matching more than one
+file raises `InvocationError`.
+
 == Architecture
 
 [source]
@@ -396,7 +417,7 @@ lib/claricle/
 `UnsupportedFormat::ABSENT` are private constants.
 The public surface is `Claricle.detect`, `Claricle.conform?`,
 `Claricle.conformance_report`, `Claricle.conformance_batch`,
-`Claricle.convert_batch`,
+`Claricle.convert`, `Claricle.convert_batch`,
 `Claricle::Image`,
 `Claricle::BatchResult`,
 `Claricle::Cli` (including `Cli::Runner` and `Runner::Status`),

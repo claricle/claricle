@@ -17,6 +17,7 @@ require_relative "claricle/registry"
 require_relative "claricle/detector"
 require_relative "claricle/image"
 require_relative "claricle/cli"
+require_relative "claricle/convert"
 
 module Claricle
   # Detects the format of `source`, a String of image content or an IO.
@@ -145,11 +146,6 @@ module Claricle
   # `to:`/`output:`/`force:` for the target and the write lifecycle, so
   # the CLI command and the Ruby API cannot drift about what "which files"
   # or "where to" mean.
-  #
-  # There is no single-file `Claricle.convert` convenience wrapper yet. It
-  # is deferred until there is a real per-conversion result worth returning
-  # from one -- building it ahead of that would be an API surface with
-  # nothing honest to answer for `output_path`/lossiness yet.
   #
   # The whole destination set is preflighted -- collision, overwrite,
   # case-fold aliasing -- BEFORE any file is converted. That is why this
