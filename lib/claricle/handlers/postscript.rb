@@ -871,7 +871,6 @@ module Claricle
 
         EpsBinary.postscript_range(first, size)
       end
-
     end
 
     # Coordinates the extra reads and box validation needed by inspection,
