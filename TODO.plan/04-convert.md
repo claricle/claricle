@@ -28,7 +28,8 @@ svg/emf/eps/ps were measured working, so v1 ships the full matrix.
   on a cold process for an embedded raster, then succeeded once an
   unrelated conversion had run first. That load-order bug will present
   as intermittent, so the spec suite must exercise each edge in a fresh
-  process, not only after other conversions have warmed the constants. WMF is out of v1 entirely (D14)
+  process, not only after other conversions have warmed the constants (done in #70: `spec/claricle/conversion/fresh_process_spec.rb`, one fresh
+  process per convert edge). WMF is out of v1 entirely (D14)
   and never reaches a handler; png and pdf have no vectory class.
 - **Lossiness is per-conversion, not per-edge (D10 superseded, D23).**
   Measured: SVG→EPS silently turns a gradient solid black, silently
@@ -189,19 +190,19 @@ Plumbing first again, then one edge family per commit.
 
 ## Done when
 
-- All acceptance-matrix conversions work via API and CLI with correct
+- [x] All acceptance-matrix conversions work via API and CLI with correct
   exit codes and lossiness warnings.
-- Semantic suite green; every `:lossless` classification is
+- [x] Semantic suite green; every `:lossless` classification is
   fixture-proven for the features present in that fixture, and the
   gradient, clip-path and embedded-raster cases each produce a
   `:lossy` classification with a warning rather than silent loss.
-- A batch that would collide or overwrite an input is refused before
+- [x] A batch that would collide or overwrite an input is refused before
   anything is written, and specs cover the four concrete cases.
-- `claricle formats` prints the complete support matrix — every cell
+- [x] `claricle formats` prints the complete support matrix — every cell
   matches what actually works.
-- README describes only verified behavior; issue #1 acceptance
-  checklist fully satisfiable, or the gaps are signed off.
-- Full Pre-Push Review Chain passed.
+- [x] README describes only verified behavior; issue #1 acceptance
+  checklist fully satisfiable, or the gaps are signed off (D11, D14, D18, D22).
+- ~~Full Pre-Push Review Chain passed.~~ Superseded: Hassan 2026-10-09 requires TDD, only changed specs, and green GHA; no extra review chain.
 
 ## Files
 

@@ -96,13 +96,14 @@ dependency where marked ⚙):
   `UnsupportedFormat`; `formats -> [Symbol]` (sorted; feeds 02's
   `formats` command); no runtime mutation, no test-only APIs.
 - **Handler metadata carries what the registry derives.** The advertised
-  "adding a format = one handler class" is **not** true under the settled
-  design: a new format needs a handler class, a `require_relative` for
-  it in `registry.rb` (there is no autoloading), an entry in
-  `HANDLER_CLASSES`, and a probe in the detector (detection is a
-  hand-rolled sequence, not a per-handler sniffer), plus — for an
-  inbound conversion — an entry in the source handler's target list and
-  its feature-loss rules. Step 7b corrects the README
+  "adding a format = one handler class" was **not** true under the
+  design first settled here (a `require_relative`, a `HANDLER_CLASSES`
+  entry and a detector probe on top of the class). It is true on main:
+  `registry.rb:8` globs `handlers/*.rb` and `:14` derives
+  `HANDLER_CLASSES` from `Base.subclasses`, with detection a per-handler
+  `detect` block; the README says one file and
+  `one_class_per_format_spec.rb` proves it. An inbound conversion still
+  adds its target list and loss rules, in that same class. Step 7b corrects the README
   claim; making the promise true would mean redesigning discovery and
   loss-rule ownership, which is out of scope for item 01.
   A handler declares its formats, its capabilities, its conversion
@@ -239,36 +240,38 @@ subjects in quotes):
 
 ## Done when
 
-- `bundle exec rake` green on a clean install.
-- `bundle exec exe/claricle version` → 0; `bundle exec exe/claricle
+- [x] `bundle exec rake` green on a clean install.
+- [x] `bundle exec exe/claricle version` → 0; `bundle exec exe/claricle
   nope; echo $?` → 2; stub commands absent from `claricle help`.
-- Runner spec covers every row of the exit-code matrix including 4
+- [x] Runner spec covers every row of the exit-code matrix including 4
   (a raised `StandardError` that is not a `Claricle::Error`); 03
   exercises 4 end-to-end through a deliberately faulting handler
   raising an off-allowlist exception. A real crashing delegate is the
   wrong probe — once the allowlists exist, a corrupt fixture is
-  nonconformance and exits 1.
-- `Report#valid` spec covers info-only and warning-plus-info inputs,
+  nonconformance and exits 1. (Matrix covered: `cli_spec.rb:10-45`. End-to-end exit 4:
+  `cli_spec.rb:765` through `spec/fixtures/faulting_handler/boom.rb`, #63.)
+- [x] `Report#valid` spec covers info-only and warning-plus-info inputs,
   proves the frozen issue collection refuses mutation rather than
   silently accepting it, and proves the verdict is correct after a
   deserialization round trip.
-- The detector's SVG contract is stated as what it accepts, not as
+- [x] The detector's SVG contract is stated as what it accepts, not as
   parity with vectory — vectory is not a dependency of this item, so a
   parity claim cannot be measured here. It accepts a root carrying the
   SVG namespace within `SVG_PROLOG_BYTES`; a foreign namespace, a decoy
   and a namespace-less root are all refused, and no external entity is
   ever resolved. Both bounds are real divergences from a permissive XML
   reader, not formalities ⚙: REXML parses a valid SVG behind a
-  9,000-byte comment, and behind no comment at all with the namespace
+  comment longer than `SVG_PROLOG_BYTES` (8192; pinned either side at
+  `detector_spec.rb:1063-1078`), and behind no comment at all with the namespace
   dropped, that `Claricle.detect` refuses in both cases.
-- Execution-diff vs main shows ONLY: stubs gone, version unchanged,
+- [x] (one-time check, now complete) Execution-diff vs main shows ONLY: stubs gone, version unchanged,
   README and gemspec truthful.
-- Every ⚙ contract check ran against the installed gem and its outcome
+- [x] (PR-time record, superseded by CI) Every ⚙ contract check ran against the installed gem and its outcome
   is recorded in the PR description. `Emf.detect_format` raising, the
   SVG root cases, lutaml-model's deferred validation and `tempfile`'s
   non-autoloading are the known ones; treat any new delegate assumption
   the same way.
-- Full Pre-Push Review Chain passed.
+- ~~Full Pre-Push Review Chain passed.~~ Superseded: Hassan 2026-10-09 requires TDD, only changed specs, and green GHA; no extra review chain.
 
 ## Files
 
