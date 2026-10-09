@@ -26,15 +26,7 @@ RSpec.describe "Handlers inspect path-born samples without calling Image#content
 
   # format => fixture file => the parse status that file must produce.
   samples = {
-    # The pdf pair was BUILT, not found: reproduce with #12's own builder:
-    #
-    #   require_relative "spec/support/pdf_builder"
-    #   FileUtils.cp(PdfBuilder.path, "spec/fixtures/inspect/valid.pdf")
-    #   File.binwrite("spec/fixtures/inspect/no_trailer.pdf",
-    #                 File.binread(PdfBuilder.path)[0, 60])
-    #
-    # Any cut from byte 9 through 297 reports the same "no trailer"/"failed"
-    # result, so this cut point is not fragile.
+    # Both pdf files are built at spec time by InspectFixture, not committed.
     pdf: { "valid.pdf" => "ok", "no_trailer.pdf" => "failed" },
     png: { "valid.png" => "ok", "short_ihdr.png" => "failed" },
     emf: { "valid.emf" => "ok", "truncated_44.emf" => "failed" },
