@@ -31,7 +31,9 @@ RSpec.describe "Claricle PDF handler" do
 
   describe "conformance_report" do
     # A structurally valid document -- catalog, one page under it, a
-    # MediaBox on the page -- so `Validator.validate` has nothing to say.
+    # MediaBox and Resources on the page (Arlington requires both; the
+    # builder's own page has no Resources) -- so neither check has
+    # anything to say.
     #
     # `and_call_original` on top of the two value assertions: without it,
     # a handler that never calls `Validator.validate` at all (and simply
@@ -40,7 +42,9 @@ RSpec.describe "Claricle PDF handler" do
     # nothing", not proof of it.
     it "reports a conformant PDF" do
       expect(Pdfrb::Validator).to receive(:validate).and_call_original
-      path = PdfBuilder.path(name: "valid")
+      resourced = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>"
+      path = PdfBuilder.path(name: "valid", objects: [[1, 0, PdfBuilder::CATALOG],
+                                                      [2, 0, PdfBuilder::PAGES], [3, 0, resourced]])
       report = image_for(path).conformance_report
 
       expect(report.valid).to eq(:yes)
