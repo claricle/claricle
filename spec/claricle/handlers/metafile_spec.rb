@@ -1532,6 +1532,18 @@ RSpec.describe "Claricle metafile handler" do
       end
     end
 
+    it "checks the declared record count when the delegate cannot read the file" do
+      source = File.binread(fixture("described_92")).dup
+      source[52, 4] = [999].pack("V")
+
+      expect { Emf.parse(source) }.to raise_error(EOFError)
+
+      report = conform_bytes(source)
+      expect(report.valid).to eq(:no)
+      expect(report.issues.map(&:code))
+        .to contain_exactly("emf.unverified", "emf.record_count_mismatch")
+    end
+
     it "reports a stream over the scan limit as not examined, not clean" do
       oversized = File.binread(fixture("valid")) + ("\x00".b * (200 * 1024 * 1024))
 
