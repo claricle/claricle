@@ -281,7 +281,7 @@ RSpec.describe Claricle::Cli::Runner do
     it "maps formats JSON generation's broken pipe to 4" do
       registry = Claricle.const_get(:Registry)
       allow(registry).to receive(:formats).and_return([])
-      allow(JSON).to receive(:generate).with([]).and_raise(Errno::EPIPE)
+      allow(Claricle::Models::FormatCapability).to receive(:to_json).with([]).and_raise(Errno::EPIPE)
 
       expect(described_class.run(%w[formats --json], output: StringIO.new)).to eq(4)
     end

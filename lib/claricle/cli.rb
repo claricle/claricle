@@ -84,7 +84,7 @@ module Claricle
     option :json, type: :boolean, default: false, desc: "Emit JSON"
     def formats
       rows = Registry.formats.map { |format| Presenter.format_row(format) }
-      payload = options[:json] ? JSON.generate(rows) : Presenter.format_table(rows)
+      payload = options[:json] ? Models::FormatCapability.to_json(rows) : Presenter.format_table(rows)
       tolerate_closed_output { puts payload }
     end
 
@@ -234,19 +234,19 @@ module Claricle
       def format_row(format)
         capabilities = Registry.capabilities_for(format)
 
-        {
-          "format" => format.to_s,
-          "inspect" => capabilities.include?(:inspect),
-          "conform" => capabilities.include?(:conform),
-          "convert" => capabilities.include?(:convert),
-          "convert_to" => Registry.convert_targets_for(format).map(&:to_s)
-        }
+        Models::FormatCapability.new(
+          format: format.to_s,
+          inspectable: capabilities.include?(:inspect),
+          conform: capabilities.include?(:conform),
+          convert: capabilities.include?(:convert),
+          convert_to: Registry.convert_targets_for(format).map(&:to_s)
+        )
       end
 
       def format_table(rows)
         rows.map do |row|
-          operations = %w[inspect conform convert].select { |name| row[name] }
-          "#{row["format"]}\t#{operations.join(", ")}"
+          operations = { inspect: row.inspectable, conform: row.conform, convert: row.convert }
+          "#{row.format}\t#{operations.select { |_, supported| supported }.keys.join(", ")}"
         end.join("\n")
       end
 

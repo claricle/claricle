@@ -1796,7 +1796,8 @@ RSpec.describe Claricle::Models do
 
     it "lists none of them among its constants" do
       expect(described_class.constants)
-        .to contain_exactly(:BatchError, :BatchItem, :Conversion, :Inspection, :Issue, :Location, :Report)
+        .to contain_exactly(:BatchError, :BatchItem, :Conversion, :FormatCapability,
+                            :Inspection, :Issue, :Location, :Report)
     end
 
     # `meta` still hands back a plain Hash, so hiding the type takes

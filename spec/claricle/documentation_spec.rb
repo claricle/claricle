@@ -396,6 +396,7 @@ RSpec.describe "the documentation" do
           BatchError: {},
           BatchItem: {},
           Conversion: { LOSSINESS_LEVELS: nil },
+          FormatCapability: {},
           Inspection: { PARSE_STATUSES: nil },
           Issue: { SEVERITIES: nil },
           Location: {},
@@ -440,7 +441,7 @@ RSpec.describe "the documentation" do
              "`Claricle::Cli` (including `Cli::Runner` and " \
              "`Runner::Status`), `Claricle::VERSION`, the error classes, " \
              "the model classes `Models::BatchError`, `Models::BatchItem`, " \
-             "`Models::Inspection`, `Models::Issue`, " \
+             "`Models::FormatCapability`, `Models::Inspection`, `Models::Issue`, " \
              "`Models::Location` and `Models::Report`, and the two " \
              "vocabularies those models validate against, " \
              "`Inspection::PARSE_STATUSES` and `Issue::SEVERITIES`.")

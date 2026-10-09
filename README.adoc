@@ -422,8 +422,8 @@ The public surface is `Claricle.detect`, `Claricle.conform?`,
 `Claricle::BatchResult`,
 `Claricle::Cli` (including `Cli::Runner` and `Runner::Status`),
 `Claricle::VERSION`, the error classes, the model classes
-`Models::BatchError`, `Models::BatchItem`, `Models::Inspection`,
-`Models::Issue`, `Models::Location` and `Models::Report`, and the two
+`Models::BatchError`, `Models::BatchItem`, `Models::FormatCapability`,
+`Models::Inspection`, `Models::Issue`, `Models::Location` and `Models::Report`, and the two
 vocabularies those models validate against,
 `Inspection::PARSE_STATUSES` and `Issue::SEVERITIES`.
 
