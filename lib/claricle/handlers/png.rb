@@ -575,8 +575,8 @@ module Claricle
           end
         rescue *MALFORMED_INPUT
           report_for(image, [malformed_issue])
-        rescue IOError => error
-          raise unless error.is_a?(EOFError) || error.message == "data truncated"
+        rescue IOError => e
+          raise unless e.is_a?(EOFError) || e.message == "data truncated"
 
           report_for(image, [truncated_issue])
         end
