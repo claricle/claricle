@@ -43,6 +43,13 @@ module Claricle
         HANDLERS.values.flat_map(&:supported_profiles).uniq.sort
       end
 
+      # The user-facing level names for a profile, or nil when that
+      # profile has no separate level selector.
+      def levels_for_profile(profile)
+        owner = HANDLERS.values.uniq.find { |handler| handler.supported_profiles.include?(profile) }
+        owner&.levels_for(profile)
+      end
+
       # What one format's handler can convert to -- the `formats` command's
       # `convert_to` column builds from this, the same way `capabilities_for`
       # builds the operations column.

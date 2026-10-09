@@ -84,6 +84,12 @@ module Claricle
           @profiles || [].freeze
         end
 
+        # nil means this profile takes no separate level. Handlers with
+        # level-bearing profiles override this with their accepted names.
+        def levels_for(_profile)
+          nil
+        end
+
         # A handler's convert target list, declared the same way `formats`
         # is and for the same reason: two calls would let a handler change
         # its mind about what it converts to, and the registry would have

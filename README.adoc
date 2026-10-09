@@ -119,12 +119,6 @@ The name reflects what the library is for:
   `Claricle::UnsupportedFormat` and the CLI exits 3
 * `convert` to or from PNG and PDF. Both raise
   `Claricle::UnsupportedFormat` and the CLI exits 3
-* `--profile` for `conform`, on every format but SVG. SVG's handler
-  already defines six -- `base` (the default), `lucid_fix`,
-  `metanorma`, `no_external_css`, `svg_1_2_rfc` and
-  `svg_1_2_rfc_with_rdf`. PDF and EMF will name stricter standards
-  through it once they define one; until then supplying `profile:` for
-  an unconformed format is refused rather than accepted and ignored
 * WMF beyond detection. `detect` returns `:wmf`, but no handler
   registers it, so every operation on a WMF raises
   `UnsupportedFormat`. That is deliberate: the upstream parser this
@@ -212,6 +206,33 @@ so it cannot advertise an operation that does not run.
 
 === Checking conformance
 
+The generic check is format-specific: PNG validates its chunk stream,
+SVG checks well-formed structure and the `base` requirement set, EMF
+checks record framing and its terminating EOF record, and PDF combines
+pdfrb's structural validator with Claricle's Arlington document walk.
+These are deliberately not interchangeable claims; each report records
+the profile when a named requirement set ran.
+
+SVG profiles are `base` (the generic default), `lucid_fix`, `metanorma`,
+`no_external_css`, `svg_1_2_rfc`, and `svg_1_2_rfc_with_rdf`. PDF offers
+`pdf_a`, `pdf_ua`, `pdf_x`, `pdf_vt`, `pades`, `ltv`, `pdf_2_af`, and
+`tagged_pdf`. Four PDF families accept a level:
+
+[cols="1,3"]
+|===
+| Profile | Accepted `--level` values
+
+| `pdf_a` | `a1b`, `a1a`, `a2b`, `a2a`, `a3b`, `a3a`, `a4`
+| `pdf_x` | `x1a`, `x3`, `x4`, `x6`
+| `pdf_vt` | `vt1`, `vt2`
+| `pades` | `b-b`, `b-t`, `b-lt`, `b-lta`
+|===
+
+An unknown profile, an invalid profile/format pairing, an unknown level,
+or `--level` with a profile that takes none is a bad invocation and exits
+2. Named PDF validation first requires the generic structural and
+Arlington checks to pass.
+
 [source,sh]
 ----
 $ claricle conform valid.svg no_viewbox.svg; echo "exit: $?"
@@ -220,6 +241,10 @@ no_viewbox.svg: no
   error [viewbox_required] Trying to put in the attribute with value '0 0 64.0 64.0'
 valid.svg: yes
 exit: 1
+
+$ claricle conform document.pdf --profile pdf_a --level a1b
+document.pdf: no
+  error [6.1-2] PDF/A requires /Catalog/Metadata XMP stream (node_path: Catalog)
 ----
 
 === Converting a file

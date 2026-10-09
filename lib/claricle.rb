@@ -15,6 +15,7 @@ require_relative "claricle/fault"
 require_relative "claricle/batch"
 require_relative "claricle/writer"
 require_relative "claricle/registry"
+require_relative "claricle/conformance_options"
 require_relative "claricle/detector"
 require_relative "claricle/image"
 require_relative "claricle/cli"
@@ -85,19 +86,20 @@ module Claricle
   # Both shapes reach the same expansion, so a positional means here exactly
   # what it means on the command line: a literal path when it names a file,
   # and a glob otherwise.
-  def self.conform?(path = nil, pattern: nil, strict: false, profile: nil)
+  def self.conform?(path = nil, pattern: nil, strict: false, profile: nil, level: nil)
     raise InvocationError, "give exactly one of a path or pattern" unless path.nil? ^ pattern.nil?
 
+    profile, level = ConformanceOptions.normalize(profile, level)
     result = conformance_batch(*[path].compact, pattern: pattern,
-                                                strict: strict, profile: profile)
+                                                strict: strict, profile: profile, level: level)
     raise result.highest_error if result.highest_error
 
     result.exit_code.zero?
   end
 
-  def self.conformance_report(path, profile: nil)
-    checked_profile(profile)
-    Image.from_path(path).conformance_report(profile: profile)
+  def self.conformance_report(path, profile: nil, level: nil)
+    profile, level = ConformanceOptions.normalize(profile, level)
+    Image.from_path(path).conformance_report(profile: profile, level: level)
   end
 
   # A batch predicate loses information, so a caller can have the whole
@@ -105,15 +107,15 @@ module Claricle
   # which is what the command prints. Takes the command's own argument
   # shape -- files, a pattern, or both -- so the two cannot drift about
   # what conformance means.
-  def self.conformance_batch(*paths, pattern: nil, strict: false, profile: nil)
+  def self.conformance_batch(*paths, pattern: nil, strict: false, profile: nil, level: nil)
     # Checked eagerly here, before the batch runs, so a profile no format
     # defines is one invocation error about the call and never a row in a
     # report -- `conformance_report` checks it again per file, but only as a
     # no-op once this call has already passed.
-    checked_profile(profile)
+    profile, level = ConformanceOptions.normalize(profile, level)
     Batch.run(paths, pattern: pattern,
                      classify: ->(report) { conformant?(report, strict: strict) ? 0 : 1 }) do |file|
-      conformance_report(file, profile: profile)
+      conformance_report(file, profile: profile, level: level)
     end
   end
 
@@ -121,24 +123,6 @@ module Claricle
   # unless the caller asked for strict; info never downgrades anything.
   def self.conformant?(report, strict:)
     strict ? report.valid == :yes : report.valid != :no
-  end
-
-  # A name NO format defines is a bad invocation -- a typo, caught before
-  # the batch opens a file. A name some format defines but this file's
-  # format does not is a different answer and belongs per file, so
-  # `Image#conformance_report` asks it again with the format in hand.
-  #
-  # This used to refuse every profile outright, because no handler
-  # implemented conformance. That is no longer true, and leaving it would
-  # have meant a report naming the profile it ran under while the same
-  # public API rejected a caller asking for that profile by name.
-  def self.checked_profile(profile)
-    return if profile.nil?
-
-    known = Registry.profiles
-    return if known.include?(profile.to_sym)
-
-    raise InvocationError, "no format defines a profile named #{profile.inspect}"
   end
 
   # A batch predicate loses information, so a caller can have the whole
@@ -261,7 +245,7 @@ module Claricle
     File.join(File.dirname(file), "#{File.basename(file, ".*")}.#{target}")
   end
 
-  private_class_method :accumulate, :conclusive?, :conformant?, :checked_profile,
+  private_class_method :accumulate, :conclusive?, :conformant?,
                        :convert_one, :resolved_convert_target, :resolved_to_target,
                        :check_to_output_conflict, :convert_extension_format, :convert_destination
 end

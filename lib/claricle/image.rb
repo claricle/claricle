@@ -223,14 +223,13 @@ module Claricle
     # `conformance_report`, and the guard above means it can never be
     # called with a keyword it does not take -- so adding profiles to one
     # format does not change the signature every other handler implements.
-    def conformance_report(profile: nil)
-      return handler.conformance_report(self) if profile.nil?
+    def conformance_report(profile: nil, level: nil)
+      profile, level = ConformanceOptions.normalize(profile, level, format: format)
+      return handler.conformance_report(self) unless profile
 
-      wanted = profile.to_sym
-      accepted = Registry.profiles_for(format)
-      raise UnsupportedProfile.new(format, profile, accepted) unless accepted.include?(wanted)
-
-      handler.conformance_report(self, profile: wanted)
+      options = { profile: profile }
+      options[:level] = level if level
+      handler.conformance_report(self, **options)
     end
 
     # A target the source's handler does not list may still be one whose

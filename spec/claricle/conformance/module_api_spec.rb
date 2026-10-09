@@ -165,9 +165,8 @@ RSpec.describe "Claricle conformance API" do
   # A profile is refused on TWO different grounds, and they are separate
   # answers a caller fixes by different means: a name no format defines at
   # all is a typo, and a name some format defines but this file's format
-  # does not is the wrong pairing. EMF, PDF and PNG conform now but
-  # declare no profile (03-conform.md: only PDF and SVG will eventually),
-  # so the flag is never accepted and ignored for them either.
+  # does not is the wrong pairing. PDF and SVG define profiles; EMF and
+  # PNG do not, so the flag is never accepted and ignored for them.
   # `checked_profile` is format-agnostic (it runs before any handler is
   # reached), so this holds for every format, conforming or not, until a
   # per-format profile table exists.
@@ -183,12 +182,8 @@ RSpec.describe "Claricle conformance API" do
     # profiles either way, so this stays the "defines none" case. The
     # message says which, rather than leaving the caller to guess whether
     # they mistyped the profile or brought the wrong file.
-    # A unit test, because no CLI input can reach this branch TODAY:
-    # a name only survives `checked_profile` if some format defines it,
-    # and SVG is the only format that defines any, so anything reaching
-    # the per-format check for :svg is by construction in SVG's own list.
-    # The branch becomes reachable the moment a second format declares a
-    # different set, and this is what will already be pinning it.
+    # A unit test for the message independent of either format's current
+    # profile inventory.
     it "names what the format does accept, when it accepts anything" do
       error = Claricle::UnsupportedProfile.new(:svg, "nope", %i[base metanorma])
 
@@ -204,6 +199,36 @@ RSpec.describe "Claricle conformance API" do
     it "accepts a profile the format does define, and records it" do
       expect(Claricle.conformance_report(svg, profile: "base"))
         .to have_attributes(profile: "base", valid: :yes)
+    end
+
+    it "runs a PDF profile at an accepted level" do
+      report = Claricle.conformance_report(pdf, profile: "pdf_a", level: "a1b")
+
+      expect(report).to have_attributes(profile: "pdf_a", valid: :no)
+    end
+
+    it "passes the PDF profile and level through the predicate" do
+      expect(Claricle.conform?(pdf, profile: "pdf_a", level: "a1b")).to be(false)
+    end
+
+    it "refuses an unknown level before opening the file" do
+      expect { Claricle.conformance_report("missing.pdf", profile: "pdf_a", level: "nonsense") }
+        .to raise_error(Claricle::InvocationError, /pdf_a.*nonsense.*a1b/)
+    end
+
+    it "refuses a level without a profile" do
+      expect { Claricle.conformance_report(pdf, level: "a1b") }
+        .to raise_error(Claricle::InvocationError, /level requires a profile/)
+    end
+
+    it "refuses a level for a profile that does not take one" do
+      expect { Claricle.conformance_report(pdf, profile: "pdf_ua", level: "a1b") }
+        .to raise_error(Claricle::InvocationError, /pdf_ua does not take a level/)
+    end
+
+    it "treats a profile and format mismatch as an invocation error" do
+      expect { Claricle.conformance_report(png, profile: "pdf_a") }
+        .to raise_error(Claricle::InvocationError, /:png does not define profile "pdf_a"/)
     end
 
     # The report names the profile it ran under, and the same public API

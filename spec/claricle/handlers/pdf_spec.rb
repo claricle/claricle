@@ -30,6 +30,57 @@ RSpec.describe "Claricle PDF handler" do
   end
 
   describe "conformance_report" do
+    describe "named profiles" do
+      let(:path) do
+        resourced = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>"
+        PdfBuilder.path(name: "profile", objects: [[1, 0, PdfBuilder::CATALOG],
+                                                   [2, 0, PdfBuilder::PAGES], [3, 0, resourced]])
+      end
+
+      it "maps pdfrb violations and records the profile that ran" do
+        report = image_for(path).conformance_report(profile: :pdf_a, level: :a1b)
+
+        expect(report).to have_attributes(profile: "pdf_a", validator_version: Pdfrb::VERSION, valid: :no)
+        expect(report.issues).to include(
+          have_attributes(
+            severity: "error", code: "6.1-2",
+            message: "PDF/A requires /Catalog/Metadata XMP stream",
+            location: have_attributes(node_path: "Catalog")
+          )
+        )
+      end
+
+      it "runs structural validation before a named profile" do
+        allow(Pdfrb::Validator).to receive(:validate).and_return(["structurally broken"])
+        expect(Pdfrb::Conformance::Pdf2AF).not_to receive(:validate)
+
+        report = image_for(path).conformance_report(profile: :pdf_2_af)
+
+        expect(report.issues).to contain_exactly(
+          have_attributes(code: "PDF_STRUCTURE", message: "structurally broken")
+        )
+      end
+
+      it "declares every supported PDF profile" do
+        expect(handler.class.supported_profiles).to eq(
+          %i[pdf_a pdf_ua pdf_x pdf_vt pades ltv pdf_2_af tagged_pdf]
+        )
+      end
+
+      it "dispatches every declared profile" do
+        handler.class.supported_profiles.each do |profile|
+          expect(image_for(path).conformance_report(profile: profile).profile).to eq(profile.to_s)
+        end
+      end
+
+      it "maps the lowercase PAdES CLI level to pdfrb's level name" do
+        expect(Pdfrb::Conformance::Pades).to receive(:validate)
+          .with(an_instance_of(Pdfrb::Document), level: :"B-LTA").and_call_original
+
+        image_for(path).conformance_report(profile: :pades, level: :"b-lta")
+      end
+    end
+
     # A structurally valid document -- catalog, one page under it, a
     # MediaBox and Resources on the page (Arlington requires both; the
     # builder's own page has no Resources) -- so neither check has

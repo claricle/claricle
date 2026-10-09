@@ -186,6 +186,9 @@ so no commit declares a capability the CLI can't yet deliver.
   content (D22). Exit 4 comes from a real faulting handler run through
   the real executable (`cli_spec.rb:765`, `boom.rb`, #63).
 - [x] `formats` now reports conform, and its spec says so.
+- [x] PDF named profiles map all eight planned pdfrb validators; `--level`
+  validates and maps the accepted PDF/A, PDF/X, PDF/VT and PAdES levels,
+  and structural/Arlington validation runs before a named profile.
 - ~~Full Pre-Push Review Chain passed.~~ Superseded: Hassan 2026-10-09 requires TDD, only changed specs, and green GHA; no extra review chain.
 
 ## Files

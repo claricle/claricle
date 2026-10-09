@@ -7,6 +7,7 @@ require_relative "../models/inspection"
 require_relative "../models/issue"
 require_relative "../models/report"
 require_relative "pdf_arlington"
+require_relative "pdf_profiles"
 
 module Claricle
   module Handlers
@@ -33,6 +34,10 @@ module Claricle
     # different unit of work.
     class Pdf < Base
       formats :pdf
+
+      profiles(*PdfProfiles.profiles)
+
+      def self.levels_for(profile) = PdfProfiles.levels_for(profile)
 
       # Builds the `Report` a conform operation returns. A sibling class
       # rather than instance methods, matching `Handlers::Png`'s own
@@ -136,14 +141,21 @@ module Claricle
         UNREADABLE_CODE = "PDF_STRUCTURE_UNREADABLE"
         UNREADABLE_MESSAGE = "PDF structure could not be validated"
 
-        def self.report(image)
+        def self.report(image, profile: nil, level: nil)
           # `image.with_path`, not `image.with_source`: `Document.open`
           # takes a path (or an IO through its block form).
-          report_for(image, image.with_path { |path| issues_for(path) })
+          issues = image.with_path { |path| issues_for(path, profile: profile, level: level) }
+          report_for(image, issues, profile: profile)
         end
 
-        def self.report_for(image, issues)
-          Models::Report.new(source_path: image.path, format: image.format.to_s, issues: issues)
+        def self.report_for(image, issues, profile:)
+          Models::Report.new(
+            source_path: image.path,
+            format: image.format.to_s,
+            issues: issues,
+            profile: profile&.to_s,
+            validator_version: profile ? ::Pdfrb::VERSION : nil
+          )
         end
 
         # The two pdfrb calls the structural check makes, each with its own
@@ -170,14 +182,17 @@ module Claricle
         # which would hide the very key the walk reports. It also runs when
         # the structural check raises -- a Catalog with no /Pages makes it
         # raise -- because the Arlington issue is what names the key.
-        def self.issues_for(path)
+        def self.issues_for(path, profile:, level:)
           document = open_document(path)
           return [unreadable_issue] unless document
 
           arlington = PdfArlington.issues(document)
           errors = structure_errors(document)
           structural = errors == :malformed ? [unreadable_issue] : errors.map { |message| issue_from(message) }
-          structural + arlington
+          structural.concat(arlington)
+          return structural if profile.nil? || structural.any?
+
+          PdfProfiles.issues(document, profile, level)
         end
 
         def self.issue_from(message)
@@ -189,15 +204,16 @@ module Claricle
                             message: UNREADABLE_MESSAGE, location: nil)
         end
 
-        private_class_method :report_for, :open_document, :structure_errors, :issues_for, :issue_from, :unreadable_issue
+        private_class_method :report_for, :open_document, :structure_errors, :issues_for,
+                             :issue_from, :unreadable_issue
       end
 
       private_constant :ConformanceMapper
 
-      def conformance_report(image)
+      def conformance_report(image, profile: nil, level: nil)
         require "pdfrb"
 
-        ConformanceMapper.report(image)
+        ConformanceMapper.report(image, profile: profile, level: level)
       end
 
       # A PDF header line longer than a kilobyte is not a header. The
