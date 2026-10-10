@@ -529,17 +529,16 @@ module Claricle
         # The spec pins the mapping below by raising the errno directly
         # rather than by finding an input that produces it here.
         #
-        # Every other malformed shape tried against the
-        # real gem -- a short file, a garbage tail, 300 random byte
-        # streams, every truncation of two real PNGs -- returned a normal
-        # result instead of raising. This is the PNG analogue of the EMF
-        # row in 03-conform.md: the delegate's *reporting style* is an
+        # This is the PNG analogue of the EMF row in 03-conform.md: the
+        # delegate's *reporting style* is an
         # exception, but the meaning is the same nonconformance a
         # returned issue would carry, so it goes on the allowlist rather
         # than the generic exit 4.
         MALFORMED_INPUT = [Errno::EINVAL].freeze
         MALFORMED_CODE = "#{IssueCode::PREFIX}chunk_length_unreadable".freeze
         MALFORMED_MESSAGE = "a chunk declared a length the file could not supply"
+        TRUNCATED_CODE = "#{IssueCode::PREFIX}delegate_truncated".freeze
+        TRUNCATED_MESSAGE = "PNG input ended before validation could complete"
 
         # Claricle's own finding, not a mapped png_conform message -- same
         # treatment MALFORMED_CODE above gets, and for the same reason:
@@ -576,6 +575,10 @@ module Claricle
           end
         rescue *MALFORMED_INPUT
           report_for(image, [malformed_issue])
+        rescue IOError => e
+          raise unless e.is_a?(EOFError) || e.message == "data truncated"
+
+          report_for(image, [truncated_issue])
         end
 
         def self.report_for(image, issues)
@@ -599,11 +602,29 @@ module Claricle
 
         def self.issue_from(raw)
           chunk_type, message, severity, offset = raw.values_at(*ISSUE_KEYS)
+          message = utf8(message)
 
           Models::Issue.new(
             severity: severity.to_s, code: IssueCode.for(message), message: message,
-            location: location_for(chunk_type, offset)
+            location: location_for(chunk_name(chunk_type), offset)
           )
+        end
+
+        def self.utf8(value)
+          value.to_s.encode(Encoding::UTF_8, invalid: :replace, undef: :replace)
+        end
+
+        # The delegate uses pseudo-names such as SIGNATURE as well as real
+        # four-letter chunk types, so preserve every name that can be
+        # represented safely instead of applying the structural scanner's
+        # narrower chunk-type grammar. Binary names still retain their byte
+        # offset while the unsafe label is omitted.
+        def self.chunk_name(value)
+          return if value.nil? || !value.valid_encoding?
+
+          value.encode(Encoding::UTF_8)
+        rescue EncodingError
+          nil
         end
 
         # nil rather than an all-nil Location: chunk_type is populated on
@@ -619,6 +640,14 @@ module Claricle
 
         def self.malformed_issue
           Models::Issue.new(severity: "error", code: MALFORMED_CODE, message: MALFORMED_MESSAGE)
+        end
+
+        # png_conform raises EOFError for empty input and `IOError: data
+        # truncated` for the other sub-signature lengths. Treat only those
+        # parser outcomes as nonconformance while propagating unrelated IO
+        # failures.
+        def self.truncated_issue
+          Models::Issue.new(severity: "error", code: TRUNCATED_CODE, message: TRUNCATED_MESSAGE)
         end
 
         # `offset` is real, not invented: `AncillaryBoundsGuard` read it off
