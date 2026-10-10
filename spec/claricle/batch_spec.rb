@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "tmpdir"
+require "pathname"
 
 # Calls `Claricle::Batch.run` with `pattern:`/`classify:` keywords already
 # named, so every example below reads the argument it is actually varying
@@ -44,6 +45,22 @@ RSpec.describe "Claricle::Batch" do
         result = run(batch, ["a.png"], classify: clean, &report)
 
         expect(result.items.map(&:path)).to eq(["a.png"])
+      end
+    end
+
+    it "accepts a Pathname positional and returns the normalized path" do
+      tree do
+        File.write("a.png", "x")
+        result = run(batch, [Pathname("a.png")], classify: clean, &report)
+
+        expect(result.items.map(&:path)).to eq(["a.png"])
+      end
+    end
+
+    it "reports a missing Pathname positional as an invocation error" do
+      tree do
+        expect { run(batch, [Pathname("missing.png")], classify: clean, &report) }
+          .to raise_error(Claricle::InvocationError, /no files matched "missing\.png"/)
       end
     end
 

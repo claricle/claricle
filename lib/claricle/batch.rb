@@ -119,6 +119,8 @@ module Claricle
       # `nothing_matched` stay private -- only this method is called from
       # outside `Batch`.
       def expand(arguments, pattern)
+        arguments = arguments.map { |argument| path_string(argument) }
+        pattern = path_string(pattern) if pattern
         files = matched_files(arguments, pattern)
         raise InvocationError, nothing_matched(arguments, pattern) if files.empty?
 
@@ -126,6 +128,12 @@ module Claricle
       end
 
       private
+
+      def path_string(value)
+        File.path(value)
+      rescue TypeError, ArgumentError => e
+        raise InvocationError, "invalid path: #{e.message}"
+      end
 
       def matched_files(arguments, pattern)
         found = arguments.flat_map { |argument| files_for(argument) }
