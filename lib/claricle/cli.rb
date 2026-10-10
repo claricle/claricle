@@ -453,7 +453,7 @@ module Claricle
           # unreachable while nothing opened a file, so naming the class
           # went unnoticed. A missing file is an ordinary user mistake and
           # reads as one.
-          return "claricle: #{message}" if MAPPED.any? { |kind| Fault.kind_of?(error, kind) }
+          return "claricle: #{message}" if MAPPED.any? { |kind| Fault.matches_class?(error, kind) }
 
           "claricle: #{Fault.class_name(error)}: #{message}"
         end

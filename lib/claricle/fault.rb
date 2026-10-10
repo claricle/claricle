@@ -46,7 +46,7 @@ module Claricle
       MODULE_NAME.bind_call(klass) || MODULE_TO_S.bind_call(klass)
     end
 
-    def kind_of?(error, kind)
+    def matches_class?(error, kind)
       KIND_OF.bind_call(error, kind)
     end
 
