@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "timeout"
+
 require_relative "base"
 require_relative "../conversion_engine"
 require_relative "../detector"
@@ -952,6 +954,12 @@ module Claricle
       # itself, not the bytesize checked after the fact.
       MAX_CONVERT_BYTES = 200 * 1024 * 1024
 
+      # One deadline around the input-controlled delegate work. A 372-byte
+      # program containing a stray closing string delimiter otherwise keeps
+      # postsvg's parser running indefinitely.
+      DEADLINE_SECONDS = 5
+      private_constant :DEADLINE_SECONDS
+
       module_function
 
       # `convert_targets` is the class-level declared union both :eps and
@@ -969,7 +977,7 @@ module Claricle
 
         content = postscript_section(bounded_content(image))
         ConversionEngine.load!
-        converted = convert_content(image.format, content, to)
+        converted = bounded_conversion(image.format, content, to)
         build(image, to, content, converted)
       end
 
@@ -990,6 +998,17 @@ module Claricle
         return source.read(length) || "".b if source.respond_to?(:read)
 
         source.byteslice(0, length)
+      end
+
+      # Loading the conversion stack is fixed work and stays outside this
+      # deadline. Only the delegate receives attacker-controlled bytes.
+      # Timeout's default exception becomes Timeout::Error outside the block,
+      # so convert_content's StandardError rescue cannot mislabel the expiry.
+      def bounded_conversion(source_format, content, to)
+        Timeout.timeout(DEADLINE_SECONDS) { convert_content(source_format, content, to) }
+      rescue Timeout::Error
+        raise ConversionError,
+              "postscript conversion did not finish within #{DEADLINE_SECONDS} seconds"
       end
 
       # Scoped to only the delegate call, not `build` below -- mirrors
