@@ -32,7 +32,10 @@ module Claricle
     # it reaches a String attribute that Models::Base refuses because JSON
     # cannot render it, so reporting the failure would become the failure.
     def message(error)
-      raw_message(error).encode(Encoding::UTF_8, invalid: :replace, undef: :replace)
+      value = raw_message(error)
+      value.encode(Encoding::UTF_8, invalid: :replace, undef: :replace)
+    rescue EncodingError
+      value.b.encode(Encoding::UTF_8, invalid: :replace, undef: :replace)
     end
 
     # Call the core readers directly. An exception is an ordinary Ruby
