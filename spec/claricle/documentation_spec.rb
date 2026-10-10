@@ -486,6 +486,14 @@ RSpec.describe "the documentation" do
     spec = Gem::Specification.load(File.join(root, "claricle.gemspec"))
     prose = "#{spec.summary} #{spec.description}"
 
+    it "ships the text for its declared license" do
+      license = File.read(File.join(root, "LICENSE"))
+
+      expect(spec.license).to eq("BSD-2-Clause")
+      expect(spec.files).to include("LICENSE")
+      expect(license).to include("BSD 2-Clause License", "Copyright (c) 2026, Ribose Inc.")
+    end
+
     it "promises no capability the code lacks" do
       expect(prose).not_to match(/compress/i)
       expect(prose).not_to match(/comprehensive/i)
