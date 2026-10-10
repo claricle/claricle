@@ -551,7 +551,7 @@ RSpec.describe "the documentation" do
 
   describe "the continuous integration workflow" do
     let(:workflow) do
-      YAML.safe_load(File.read(File.join(root, ".github/workflows/main.yml")), aliases: true)
+      YAML.safe_load_file(File.join(root, ".github/workflows/main.yml"), aliases: true)
     end
 
     it "uses a stable runner and current checkout runtime with read-only access" do
