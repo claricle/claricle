@@ -1319,11 +1319,13 @@ RSpec.describe "Claricle SVG handler" do
           print conversion.lossiness
         RUBY
         lib = File.expand_path("../../../lib", __dir__)
-        output = IO.popen([RbConfig.ruby, "-I#{lib}", "-e", script], err: %i[child out], &:read)
-        status = $CHILD_STATUS
+        # Separate streams, as in the load-alone example above: leptris
+        # warns on stderr when a platform gem lacks the native layer for
+        # this Ruby, and a merged stream fails eq on that line.
+        stdout, stderr, status = Open3.capture3(RbConfig.ruby, "-I#{lib}", "-e", script)
 
-        expect(status).to be_success, "fresh-process conversion failed: #{output}"
-        expect(output).to eq("lossy")
+        expect(status).to be_success, "fresh-process conversion failed: #{stdout}\nSTDERR: #{stderr}"
+        expect(stdout).to eq("lossy")
       end
     end
   end
