@@ -192,12 +192,12 @@ RSpec.describe "Claricle metafile handler" do
       end
     end
 
-    # truncated_117 and nsize_87 raise the SAME class with the SAME
-    # message. Only a header-first pass can separate them.
-    it "separates a bad stream from a bad header despite the same error" do
-      %w[truncated_117 nsize_87].each do |name|
-        expect { Emf.parse(File.binread(fixture(name))) }.to raise_error(IOError)
-      end
+    # emf before 0.2 raised the SAME IOError for truncated_117 and
+    # nsize_87; 0.2 recovers the one and refuses the other. The handler
+    # still decides from the header, not from what the delegate raises.
+    it "separates a bad stream from a bad header" do
+      expect(Emf.parse(File.binread(fixture("truncated_117"))).ok?).to be(false)
+      expect { Emf.parse(File.binread(fixture("nsize_87"))) }.to raise_error(Emf::FormatError)
 
       expect(inspect_emf("truncated_117").parse_status).to eq("ok")
       expect(inspect_emf("nsize_87").parse_status).to eq("failed")
@@ -206,22 +206,21 @@ RSpec.describe "Claricle metafile handler" do
 
   describe "inputs whose header cannot be read" do
     {
-      "garbage" => Emf::FormatError, "empty" => Emf::FormatError,
-      "truncated_44" => Emf::FormatError, "truncated_87" => Emf::FormatError,
-      "nsize_44" => EOFError, "nsize_87" => IOError
+      "garbage" => /unrecognised format/, "empty" => /input too short/,
+      "truncated_44" => /truncated EMF header/, "truncated_87" => /truncated EMF header/,
+      "nsize_44" => /cannot hold its fields/, "nsize_87" => /cannot hold its fields/
     }.each do |name, raised|
-      it "reports failed for #{name}, which raises #{raised}" do
+      it "reports failed for #{name}, which emf refuses with #{raised.source}" do
         # The precondition is what proves each fixture is broken, and
-        # broken in its OWN way: three different failures across six
+        # broken in its OWN way: three different refusals across six
         # files, rather than one defect copied six times.
         #
         # None of them reaches the delegate through the handler --
         # measured, `Emf.parse` is called zero times for all six,
         # because `declared_size` refuses them first. That is the
         # header-first pass working, and it is why `PARSE_FAILURES`
-        # names only `Emf::Error`: the IO failures below belong to
-        # parsing the whole stream, which the handler never does.
-        expect { Emf.parse(File.binread(fixture(name))) }.to raise_error(raised)
+        # names only `Emf::Error`.
+        expect { Emf.parse(File.binread(fixture(name))) }.to raise_error(Emf::FormatError, raised)
         expect(inspect_emf(name).parse_status).to eq("failed")
       end
     end
@@ -265,17 +264,17 @@ RSpec.describe "Claricle metafile handler" do
 
   # MS-EMF puts an optional UTF-16LE description straight after the
   # fixed 88-byte header, so nSize legitimately lands on 92 or 96.
-  # An nSize above 88 makes emf 0.1.0 read the Win95 optional header
-  # fields -- twelve more bytes -- so it wants a full 100 and raises
-  # EOFError on both of these: on the declared prefix AND on the full
-  # stream, which is why re-slicing cannot fix it. The handler parses
+  # An nSize above 88 makes emf read the Win95 optional header fields --
+  # twelve more bytes -- so it wants a full 100 and refuses both of these
+  # (EOFError before 0.2, Emf::FormatError since): on the declared prefix
+  # AND on the full stream, which is why re-slicing cannot fix it. The handler parses
   # the fixed 88 bytes with nSize normalised instead.
   [["described_92", 92], ["described_96", 96]].each do |name, declared|
     it "reads a standards-valid header declaring #{declared}" do
       bytes = File.binread(fixture(name))
       expect(bytes.byteslice(4, 4).unpack1("V")).to eq(declared)
-      expect { Emf.parse(bytes) }.to raise_error(EOFError)
-      expect { Emf.parse(bytes.byteslice(0, declared)) }.to raise_error(EOFError)
+      expect { Emf.parse(bytes) }.to raise_error(Emf::FormatError)
+      expect { Emf.parse(bytes.byteslice(0, declared)) }.to raise_error(Emf::FormatError)
 
       expect(inspect_emf(name)).to have_attributes(
         parse_status: "ok", width: 100.0, height: 50.0, dpi: 97.69
@@ -540,11 +539,12 @@ RSpec.describe "Claricle metafile handler" do
     # The crash this replaced: a comment declaring four bytes of payload
     # in a twelve-byte record. The outer framing is perfect -- aligned,
     # in bounds, EOF intact -- so an outer-framing check alone passes it.
-    # emf 0.1.0 raises NoMethodError here, from an extraction step that
-    # checks cbData >= 4 without checking four bytes are present.
+    # emf before 0.2 raised NoMethodError here, from an extraction step
+    # that checked cbData >= 4 without checking four bytes are present;
+    # 0.2 reads the file.
     it "survives a comment whose cbData overruns its own record" do
       bytes = File.binread(fixture("bad_comment"))
-      expect { Emf.parse(bytes) }.to raise_error(NoMethodError)
+      expect(Emf.parse(bytes).ok?).to be(true)
 
       expect(inspect_emf("bad_comment")).to have_attributes(
         parse_status: "ok", width: 100.0, height: 50.0
@@ -950,11 +950,16 @@ RSpec.describe "Claricle metafile handler" do
     # it, so a handler that read nothing at all cannot pass either.
     #
     # The image is built BEFORE the spy goes on, because detection opens
-    # the file too and its own 512-byte read is not the handler's.
+    # the file too and its own 512-byte read is not the handler's. Only
+    # the fixture's reads are counted: emf 0.2's native backend opens its
+    # own library to check the checksum the first time it loads.
     it "asks a path-born stream for at most the scan limit, and never reads it unbounded" do
-      image = Claricle::Image.from_path(fixture("emf_plus"))
+      path = fixture("emf_plus")
+      image = Claricle::Image.from_path(path)
       asked = []
       allow(File).to receive(:open).and_wrap_original do |original, *args, &block|
+        next original.call(*args, &block) unless args.first.to_s == path
+
         original.call(*args) do |file|
           allow(file).to receive(:read).and_wrap_original do |read, length|
             asked << length
@@ -1302,18 +1307,17 @@ RSpec.describe "Claricle metafile handler" do
     end
 
     # Regression for dependency-contract-check's F2 (also found
-    # independently by execution-diff): a truncated real fixture makes
-    # bindata (via the emf gem's own parser) raise IOError, which the
-    # same FAILURES list did not cover either. 351 of 364 bytes was found
-    # by truncating the real fixture byte by byte until this exact
-    # exception class appeared; a few bytes shorter raises EOFError
-    # instead, from the same underlying defect.
-    it "wraps a truncated real fixture as ConversionError, not a raw IOError" do
+    # independently by execution-diff): before 0.2 a truncated real
+    # fixture made the emf gem's parser raise IOError, which the same
+    # FAILURES list did not cover either. 351 of 364 bytes cuts the EOF
+    # record short; emf 0.2 keeps the records before it and reports the
+    # cut one, so the file converts instead of escaping as IOError.
+    it "converts a truncated real fixture from the records emf recovers" do
       truncated = File.binread(convert_fixture)[0, 351]
       image = Claricle::Image.from_content(truncated, format: :emf)
 
-      expect { handler.convert(image, to: :svg) }
-        .to raise_error(Claricle::ConversionError, /IOError/)
+      expect(Emf.parse(truncated).errors.map(&:class)).to eq([Emf::ParseError])
+      expect(handler.convert(image, to: :svg).content).to include("<svg")
     end
 
     # F3 (a genuine postsvg 0.3.0 autoload bug, NameError: uninitialized
@@ -1505,22 +1509,27 @@ RSpec.describe "Claricle metafile handler" do
       end
     end
 
-    # Every exception family the gem raises, and what the walk reports in
-    # its place. `EOFError < IOError`, so listing IOError covers both --
-    # but only because the rescue matches by CLASS, not by equality.
+    # Every header the gem refuses, and what the walk reports in its
+    # place. Since emf 0.2 each refusal is an Emf::FormatError.
     {
-      "truncated_44" => ["Emf::FormatError", ["emf.record_framing", 0]],
-      "nsize_87" => ["IOError", ["emf.record_framing", 0]],
-      "nsize_44" => ["EOFError", ["emf.record_framing", 0]],
-      "described_92" => ["EOFError", ["emf.unverified", nil]],
-      "bad_comment" => ["NoMethodError", ["emf.comment_overrun", 88]]
-    }.each do |name, (raised, found)|
-      it "reports #{found.first} for #{name}.emf rather than letting #{raised} escape" do
-        expect { Emf.parse(File.binread(fixture(name))) }
-          .to raise_error(Object.const_get(raised))
+      "truncated_44" => ["emf.record_framing", 0],
+      "nsize_87" => ["emf.record_framing", 0],
+      "nsize_44" => ["emf.record_framing", 0],
+      "described_92" => ["emf.unverified", nil]
+    }.each do |name, found|
+      it "reports #{found.first} for #{name}.emf rather than letting Emf::FormatError escape" do
+        expect { Emf.parse(File.binread(fixture(name))) }.to raise_error(Emf::FormatError)
 
         expect(codes_at(conform_emf(name))).to eq([found])
       end
+    end
+
+    # emf before 0.2 raised NoMethodError on this file; 0.2 reads it, and
+    # the walk still finds the overrun the gem does not report.
+    it "reports emf.comment_overrun for bad_comment.emf, which emf reads" do
+      expect(Emf.parse(File.binread(fixture("bad_comment"))).ok?).to be(true)
+
+      expect(codes_at(conform_emf("bad_comment"))).to eq([["emf.comment_overrun", 88]])
     end
 
     # A gem exception is evidence about the validator, not the file. These
@@ -1536,7 +1545,7 @@ RSpec.describe "Claricle metafile handler" do
       source = File.binread(fixture("described_92")).dup
       source[52, 4] = [999].pack("V")
 
-      expect { Emf.parse(source) }.to raise_error(EOFError)
+      expect { Emf.parse(source) }.to raise_error(Emf::FormatError)
 
       report = conform_bytes(source)
       expect(report.valid).to eq(:no)
